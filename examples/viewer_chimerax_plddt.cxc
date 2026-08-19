@@ -1,0 +1,32 @@
+# ChimeraX 에서 AF3 결과를 pLDDT 색으로 보는 스크립트
+# 만든 것: af3_visualize.py
+#
+# 쓰는 법
+#   chimerax chimerax_색칠.cxc
+# 또는 ChimeraX 를 먼저 띄운 뒤
+#   open chimerax_색칠.cxc
+#
+# 왜 이 색이 맞는가
+#   AF3 mmCIF 의 B_iso_or_equiv 열이 원자별 pLDDT(0~100)다.
+#   cAbLys3_1MEL: 원자 2101개 확인, 최대 차 0.0100 (mmCIF 소수 2자리 반올림 범위). B_iso_or_equiv = pLDDT 로 확정 [반올림 차이 2개]
+#   ChimeraX 는 이 열을 bfactor 속성으로 읽으므로 아래 명령이 그대로 맞는다.
+#   (참고: ChimeraX 의 'color bfactor palette alphafold' 는 0~1 스케일을 가정하는
+#    버전이 있어, 여기서는 0~100 범위를 명시해 색 경계를 직접 준다.)
+
+close session
+set bgColor white
+
+open ../cplx_out/cAbLys3_1MEL/cAbLys3_1MEL_model.cif name cAbLys3_1MEL
+
+hide atoms
+show cartoon
+
+# pLDDT 색칠 (AlphaFold DB 와 같은 색 경계)
+color bfactor palette 0,#FF7D45:50,#FF7D45:50.001,#FFDB13:70,#FFDB13:70.001,#65CBF3:90,#65CBF3:90.001,#0053D6:100,#0053D6
+
+# 낮은 신뢰 구간만 보고 싶을 때 (주석을 풀어라)
+# select @@bfactor<70
+# show sel atoms
+# style sel stick
+
+view

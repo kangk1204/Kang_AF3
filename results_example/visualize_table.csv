@@ -1,0 +1,2 @@
+﻿name,ranking_score,ptm,iptm,mean_plddt,min_plddt,n_residue,n_token,n_chain,fraction_disordered,has_clash,sample_sd
+cAbLys3_1MEL,0.94,0.87,0.92,91.5318,32.0067,277,277,2,0.05,0.0,0.0032
