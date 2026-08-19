@@ -1,0 +1,172 @@
+# =============================================================================
+# Kang_AF3 .gitignore
+#
+# 목적: 이 저장소는 공개(public)다. 아래를 실수로 커밋하는 것을 막는다.
+#   (1) AF3 모델 가중치 - 재배포가 금지돼 있다. 약관 위반이다
+#   (2) 데이터베이스와 ccd.pickle - 최대 850GB. 각자 받으면 된다
+#   (3) 실행 결과와 실제 연구 서열 - 미공개 연구 데이터다
+#   (4) macOS/에디터 쓰레기 파일 - AppleDouble 사이드카는 파이프라인을 죽인다
+#
+# 주의: .gitignore 는 **이미 추적 중인 파일은 막지 못한다.**
+#       커밋 전에 항상 `git status` 와 `git diff --cached --stat` 를 확인하라.
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# (1) AF3 모델 가중치 - 재배포 금지. 절대 커밋하지 말 것
+# -----------------------------------------------------------------------------
+af3.bin
+af3.bin.*
+*.bin
+*.zst
+af3_models/
+models/
+weights/
+
+# -----------------------------------------------------------------------------
+# (2) 데이터베이스와 화학 성분 사전
+# -----------------------------------------------------------------------------
+public_databases/
+databases/
+*.pickle
+ccd.pickle
+chemical_component_sets.pickle
+# DB 원본 압축 파일
+*.tar
+*.tar.gz
+*.tar.zst
+*.tgz
+# HMMER/BLAST 계열 DB 파일
+*.fa
+*.fasta.gz
+*.a3m
+*.sto
+*.stockholm
+*.hhr
+*.hmm
+# mmCIF DB 덤프
+mmcif_files/
+pdb_mmcif/
+
+# -----------------------------------------------------------------------------
+# (3) 실행 결과와 작업 폴더
+#     폴더 관례: <이름>_in / <이름>_out / <이름>_work
+# -----------------------------------------------------------------------------
+*_out/
+*_work/
+*_in/
+af3out*/
+af3_out/
+partial/
+msa_store/
+state.json
+run_summary.csv
+af3_check.txt
+*.log
+
+# 출력 구조 파일 (예제로 넣을 것이 있으면 git add -f 로 명시적으로 추가)
+*.cif
+*.pdb
+*.mmcif
+# 단, examples/ 안의 예제 입력 JSON 은 추적해야 한다 (아래 예외 처리)
+
+# AF3 출력 JSON (신뢰도/데이터)
+*_confidences.json
+*_summary_confidences.json
+*_data.json
+*_ranking_scores.csv
+TERMS_OF_USE.md
+
+# XLA 컴파일 캐시
+af3_cache/
+xla_cache/
+jax_cache/
+.cache/
+
+# -----------------------------------------------------------------------------
+# (4) 실제 연구 서열 - 미공개 데이터. examples/ 밖의 서열 파일은 전부 제외
+# -----------------------------------------------------------------------------
+*.fasta
+*.faa
+*.fna
+*.seq
+# 최상위/임의 위치의 입력 JSON·CSV 는 실제 서열일 가능성이 있으므로 제외
+/*.json
+/*.csv
+
+# examples/ 와 results_example/ 는 예외 (공개 PDB 유래 예시와 실측 결과)
+!examples/
+!examples/**
+!results_example/
+!results_example/**
+!figures/
+!figures/**
+!docs/
+!docs/**
+!scripts/
+!scripts/**
+
+# -----------------------------------------------------------------------------
+# (5) macOS / 에디터 / OS 쓰레기 파일
+#     AppleDouble 사이드카(._*)는 glob('*.json') 에 잡히고 UTF-8이 아니어서
+#     읽는 순간 파이프라인이 죽는다. 실제로 이 때문에 측정 3시간을 날렸다.
+# -----------------------------------------------------------------------------
+._*
+.DS_Store
+.DS_Store?
+.AppleDouble
+.LSOverride
+.Spotlight-V100
+.Trashes
+Icon?
+ehthumbs.db
+Thumbs.db
+desktop.ini
+*~
+*.swp
+*.swo
+.idea/
+.vscode/
+*.sublime-*
+
+# -----------------------------------------------------------------------------
+# (6) Python
+# -----------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+env/
+ENV/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# -----------------------------------------------------------------------------
+# (7) 기타 대용량 / 임시
+# -----------------------------------------------------------------------------
+*.zip
+*.7z
+*.rar
+tmp/
+temp/
+scratch/
+nohup.out
+core.*
