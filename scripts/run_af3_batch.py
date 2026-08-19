@@ -120,9 +120,9 @@ def main():
         print(f"[안내] {len(todo)-ok}건이 남았습니다. 이 스크립트를 다시 실행하면 실패한 것만 재시도합니다.")
 
 
-def docker_base(db_dir, model_dir, output_dir, cache_dir, in_mount):
+def docker_base(db_dir, model_dir, output_dir, cache_dir, in_mount, use_cache=True):
     """모든 실행에 공통인 docker 옵션."""
-    return [
+    cmd = [
         "sudo", "docker", "run", "--rm", "--gpus", "all",
         "-v", f"{db_dir}:/root/public_databases",
         "-v", f"{model_dir}:/root/af3_models",
@@ -134,9 +134,11 @@ def docker_base(db_dir, model_dir, output_dir, cache_dir, in_mount):
         "--model_dir=/root/af3_models",
         "--db_dir=/root/public_databases",
         "--output_dir=/root/af3_out",
-        # 컴파일 결과를 다음 실행에서도 재사용한다
-        "--jax_compilation_cache_dir=/root/af3_cache",
     ]
+    if use_cache:
+        # 컴파일 결과를 다음 실행에서도 재사용한다 (구버전 이미지는 이 플래그를 모른다)
+        cmd.append("--jax_compilation_cache_dir=/root/af3_cache")
+    return cmd
 
 
 def run_all_at_once(todo, base_dir, input_dir, output_dir, db_dir, model_dir, cache_dir):
@@ -152,7 +154,20 @@ def run_all_at_once(todo, base_dir, input_dir, output_dir, db_dir, model_dir, ca
     for f in todo:
         shutil.copy2(f, stage_dir / f.name)
 
-    cmd = docker_base(db_dir, model_dir, output_dir, cache_dir, stage_dir)
+    supported = check_flags(db_dir, model_dir, output_dir, cache_dir, stage_dir)
+
+    cmd = docker_base(db_dir, model_dir, output_dir, cache_dir, stage_dir,
+                      use_cache="jax_compilation_cache_dir" in supported)
+    if "input_dir" not in supported:
+        # 도커 이미지의 AF3가 오래된 버전이다. 예전 방식으로 돌린다.
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        print("[안내] 이 도커 이미지의 AlphaFold 3는 --input_dir 을 지원하지 않습니다.")
+        print("       예전 방식(파일마다 실행)으로 진행합니다. 속도 개선은 제한됩니다.")
+        print("       개선을 온전히 받으려면 AF3 이미지를 최신 버전으로 다시 빌드하세요.\n")
+        run_one_by_one(todo, input_dir, output_dir, db_dir, model_dir, cache_dir,
+                       use_cache="jax_compilation_cache_dir" in supported)
+        return
+
     cmd.append("--input_dir=/root/af3_in")
     if SKIP_MSA:
         cmd.append("--norun_data_pipeline")
@@ -170,12 +185,38 @@ def run_all_at_once(todo, base_dir, input_dir, output_dir, db_dir, model_dir, ca
         shutil.rmtree(stage_dir, ignore_errors=True)
 
 
-def run_one_by_one(todo, input_dir, output_dir, db_dir, model_dir, cache_dir):
+def check_flags(db_dir, model_dir, output_dir, cache_dir, in_mount):
+    """도커 이미지의 AF3가 어떤 플래그를 지원하는지 --help 로 확인한다.
+
+    이미지가 오래된 버전이면 --input_dir 을 모르고, 그때는 실행이 통째로
+    실패한다. 미리 확인해서 예전 방식으로 자동 전환하기 위한 것이다.
+    """
+    cmd = docker_base(db_dir, model_dir, output_dir, cache_dir, in_mount,
+                      use_cache=False)
+    cmd = [c for c in cmd if not c.startswith(("--model_dir", "--db_dir", "--output_dir"))]
+    cmd.append("--help")
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+        text = (p.stdout or "") + (p.stderr or "")
+    except (subprocess.TimeoutExpired, OSError):
+        # 확인에 실패하면 지원한다고 보고 그대로 진행한다 (실패 시 안내가 나온다).
+        return {"input_dir", "jax_compilation_cache_dir"}
+    if not text.strip():
+        return {"input_dir", "jax_compilation_cache_dir"}
+    return {f for f in ("input_dir", "jax_compilation_cache_dir") if "--" + f in text}
+
+
+def run_one_by_one(todo, input_dir, output_dir, db_dir, model_dir, cache_dir,
+                   use_cache=None):
     """예전 방식. 파일마다 컨테이너를 새로 띄운다 (느리다)."""
     print("[안내] 파일마다 컨테이너를 새로 띄우는 방식입니다. 건당 고정 비용이 반복됩니다.\n")
+    if use_cache is None:
+        use_cache = "jax_compilation_cache_dir" in check_flags(
+            db_dir, model_dir, output_dir, cache_dir, input_dir)
     for idx, json_file in enumerate(todo, 1):
         print(f"[{idx}/{len(todo)}] 연산 중: {json_file.name}")
-        cmd = docker_base(db_dir, model_dir, output_dir, cache_dir, input_dir)
+        cmd = docker_base(db_dir, model_dir, output_dir, cache_dir, input_dir,
+                          use_cache=use_cache)
         cmd.append(f"--json_path=/root/af3_in/{json_file.name}")
         if SKIP_MSA:
             cmd.append("--norun_data_pipeline")
