@@ -1,8 +1,22 @@
 #!/usr/bin/env python3
+"""AlphaFold 3 배치 실행 스크립트.
+
+컨테이너를 한 번만 띄워 폴더 전체를 순회하므로, 파일마다 docker run 을
+새로 띄우는 방식보다 빠르다 (실측 4.13배, RTX 5070 Ti, VHH 7건).
+
+완료 판정은 폴더 존재가 아니라 최종 산출물 3종의 존재와 크기로 한다.
+AF3 는 추론 전에 <name>_data.json 을 먼저 쓰기 때문에, 폴더만 보면
+추론 중 중단된 것을 완료로 오판한다.
+
+점검만 하려면:  python3 run_af3_batch.py --audit
+"""
 import json
+import os
 import shutil
+import string
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -22,6 +36,22 @@ USE_SINGLE_RUN = True
 SKIP_MSA = False
 # =========================================================
 
+# AF3 가 추론을 끝냈을 때 결과 폴더 최상위에 남기는 파일들.
+# _data.json 은 추론 '전' 에 쓰이므로 완료 근거가 될 수 없다.
+REQUIRED_SUFFIXES = (
+    ("_ranking_scores.csv",),
+    ("_model.cif", "_model.cif.zst"),      # 압축 옵션에 따라 둘 중 하나
+    ("_summary_confidences.json",),
+)
+
+# JSON 안에서 다른 파일을 상대경로로 가리킬 수 있는 키.
+# AF3 는 상대경로를 JSON 파일 위치 기준으로 해석하므로,
+# 이런 입력은 임시 폴더로 복사하면 경로가 깨진다.
+SIDECAR_KEYS = (
+    "mmcifPath", "unpairedMsaPath", "pairedMsaPath",
+    "userCCDPath", "path",
+)
+
 
 def sanitised_name(name):
     """AF3가 출력 폴더 이름을 만드는 방식과 동일하게 정규화한다.
@@ -30,23 +60,64 @@ def sanitised_name(name):
     만든다 (folding_input.py 의 sanitised_name). 그래서 스킵 검사도
     같은 규칙을 써야 이미 끝난 것을 다시 돌리지 않는다.
     """
-    import string
-
     allowed = set(string.ascii_letters + string.digits + "_-.")
     return "".join(c for c in name.replace(" ", "_") if c in allowed)
 
 
-def output_name_of(json_file):
-    """JSON 의 name 필드를 읽어 결과 폴더 이름을 알아낸다."""
+def read_input(json_file):
+    """입력 JSON 을 읽어 (결과폴더이름, 원래이름, 사이드카여부, 오류메시지)."""
     try:
         with open(json_file, encoding="utf-8") as f:
-            name = json.load(f).get("name")
-        if name:
-            return sanitised_name(str(name))
-    except (json.JSONDecodeError, UnicodeDecodeError, OSError):
-        pass
-    # name 을 못 읽으면 파일명으로 대신한다 (기존 동작).
-    return json_file.stem
+            obj = json.load(f)
+    except UnicodeDecodeError:
+        return None, None, False, "UTF-8 이 아닙니다 (macOS 껍데기 파일일 수 있음)"
+    except json.JSONDecodeError as e:
+        return None, None, False, f"JSON 형식 오류 ({e.lineno}행 {e.colno}열: {e.msg})"
+    except OSError as e:
+        return None, None, False, f"파일을 읽을 수 없습니다 ({e.strerror})"
+
+    if not isinstance(obj, dict):
+        return None, None, False, "최상위가 객체(dict)가 아닙니다"
+    raw = obj.get("name")
+    if raw is None or not str(raw).strip():
+        return None, None, False, "name 필드가 비어 있습니다"
+    out = sanitised_name(str(raw))
+    if not out:
+        return (None, str(raw), False,
+                f"name={str(raw)!r} 은 정규화하면 빈 문자열이 됩니다. "
+                "영문/숫자/밑줄/하이픈/점을 한 자 이상 포함해야 합니다")
+    return out, str(raw), has_sidecar(obj), None
+
+
+def has_sidecar(obj):
+    """JSON 안에 상대경로로 다른 파일을 가리키는 항목이 있는지 본다."""
+    stack = [obj]
+    while stack:
+        cur = stack.pop()
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if k in SIDECAR_KEYS and isinstance(v, str) and v:
+                    if not os.path.isabs(v):
+                        return True
+                else:
+                    stack.append(v)
+        elif isinstance(cur, list):
+            stack.extend(cur)
+    return False
+
+
+def is_complete(result_dir, out_name):
+    """결과 폴더가 '추론까지 끝난' 상태인지 최종 산출물로 판정한다."""
+    if not result_dir.is_dir():
+        return False
+    for group in REQUIRED_SUFFIXES:
+        for suffix in group:
+            p = result_dir / f"{out_name}{suffix}"
+            if p.is_file() and p.stat().st_size > 0:
+                break
+        else:
+            return False
+    return True
 
 
 def main():
@@ -91,33 +162,86 @@ def main():
     if hidden:
         print(f"[안내] macOS 껍데기 파일 {len(hidden)}개를 건너뜁니다 (예: {hidden[0]}).")
 
-    # 이미 끝난 것과 남은 것을 가른다
-    todo, done = [], []
-    for json_file in json_files:
-        if (output_dir / output_name_of(json_file)).exists():
-            done.append(json_file)
-        else:
-            todo.append(json_file)
+    # --- 입력 사전 검증 -------------------------------------------------
+    # AF3 는 잘못된 JSON 을 만나면 그 자리에서 멈춘다. 폴더 전체를 넘기기 전에
+    # 먼저 걸러내지 않으면 뒤에 있던 정상 입력까지 처리되지 않는다.
+    bad, sidecar, by_out = [], [], {}
+    entries = []
+    for f in json_files:
+        out_name, raw, side, err = read_input(f)
+        if err:
+            bad.append((f, err))
+            continue
+        if side:
+            sidecar.append(f)
+        by_out.setdefault(out_name, []).append(f)
+        entries.append((f, out_name, raw))
 
-    print(f"[시작] JSON {len(json_files)}개 중 완료 {len(done)}개, 남은 것 {len(todo)}개.")
+    if bad:
+        print(f"\n[오류] 읽을 수 없는 입력 {len(bad)}개를 발견했습니다. 먼저 고쳐 주세요.")
+        for f, err in bad[:10]:
+            print(f"   - {f.name}: {err}")
+        if len(bad) > 10:
+            print(f"   ... 그 외 {len(bad)-10}개")
+        print("   (이 파일들을 폴더에서 빼거나 고친 뒤 다시 실행하세요.)")
+        sys.exit(2)
+
+    dup = {k: v for k, v in by_out.items() if len(v) > 1}
+    if dup:
+        print(f"\n[오류] 결과 폴더 이름이 겹치는 입력이 있습니다. 서로 덮어씁니다.")
+        for out_name, group in list(dup.items())[:5]:
+            print(f"   - '{out_name}' <- {', '.join(f.name for f in group)}")
+        print("   각 JSON 의 name 필드를 서로 다르게 고친 뒤 다시 실행하세요.")
+        sys.exit(2)
+
+    # --- 완료 여부 판정 (최종 산출물 기준) ------------------------------
+    todo, done, partial = [], [], []
+    for f, out_name, _ in entries:
+        rdir = output_dir / out_name
+        if is_complete(rdir, out_name):
+            done.append(f)
+        else:
+            if rdir.is_dir():
+                partial.append((f, out_name))
+            todo.append((f, out_name))
+
+    print(f"\n[시작] JSON {len(entries)}개 중 완료 {len(done)}개, 남은 것 {len(todo)}개.")
+    if partial:
+        print(f"[안내] 폴더는 있으나 결과물이 없는 것 {len(partial)}개를 다시 돌립니다"
+              f" (예: {partial[0][1]}). 추론 중 중단된 건입니다.")
+
+    if "--audit" in sys.argv:
+        print("\n[점검] --audit 이므로 실행하지 않고 끝냅니다.")
+        if partial:
+            for _, out_name in partial:
+                print(f"   미완료: {output_dir.name}/{out_name}")
+        sys.exit(1 if partial else 0)
+
     if not todo:
         print("[완료] 모두 이미 끝나 있습니다.")
         return
 
+    if sidecar:
+        names = ", ".join(f.name for f in sidecar[:3])
+        print(f"[안내] 상대경로로 다른 파일을 참조하는 입력 {len(sidecar)}개가 있어"
+              f" 파일별 실행으로 진행합니다 ({names}).")
+
     started = time.time()
 
-    if USE_SINGLE_RUN:
+    # 사이드카 입력이 있으면 임시 폴더 복사가 경로를 깨므로 파일별로 돌린다.
+    if USE_SINGLE_RUN and not sidecar:
         run_all_at_once(todo, base_dir, input_dir, output_dir, db_dir, model_dir, cache_dir)
     else:
         run_one_by_one(todo, input_dir, output_dir, db_dir, model_dir, cache_dir)
 
-    # 실제로 결과가 나왔는지 확인한다
-    ok = sum(1 for f in todo if (output_dir / output_name_of(f)).exists())
+    # 실제로 최종 산출물이 나왔는지 확인한다
+    ok = sum(1 for _, out_name in todo if is_complete(output_dir / out_name, out_name))
     elapsed = time.time() - started
     per = elapsed / ok if ok else 0
     print(f"\n[완료] {ok}/{len(todo)}건 성공. 총 {elapsed/60:.1f}분, 건당 평균 {per:.1f}초.")
     if ok < len(todo):
         print(f"[안내] {len(todo)-ok}건이 남았습니다. 이 스크립트를 다시 실행하면 실패한 것만 재시도합니다.")
+        sys.exit(1)   # 자동화에서 실패를 성공으로 오인하지 않도록
 
 
 def docker_base(db_dir, model_dir, output_dir, cache_dir, in_mount, use_cache=True):
@@ -148,10 +272,10 @@ def run_all_at_once(todo, base_dir, input_dir, output_dir, db_dir, model_dir, ca
     임시 폴더에 복사해서 그 폴더를 넘긴다. 이렇게 하면 이미 끝난 것을
     다시 돌리지 않으면서도 컨테이너 기동과 가중치 로딩을 1회로 줄인다.
     """
-    stage_dir = base_dir / f".{INPUT_DIR_NAME}_todo"
-    shutil.rmtree(stage_dir, ignore_errors=True)
-    stage_dir.mkdir(parents=True)
-    for f in todo:
+    # 임시 폴더는 매 실행마다 고유한 이름으로 만든다. 고정 이름을 지우면
+    # 동시에 돌리는 다른 실행이나 같은 이름의 기존 폴더를 날릴 수 있다.
+    stage_dir = Path(tempfile.mkdtemp(prefix=f".{INPUT_DIR_NAME}_todo_", dir=str(base_dir)))
+    for f, _ in todo:
         shutil.copy2(f, stage_dir / f.name)
 
     supported = check_flags(db_dir, model_dir, output_dir, cache_dir, stage_dir)
@@ -178,7 +302,17 @@ def run_all_at_once(todo, base_dir, input_dir, output_dir, db_dir, model_dir, ca
     try:
         subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError:
-        print("\n[경고] 순회 중 중단됐습니다. 끝난 것은 남아 있으니 다시 실행하면 이어서 합니다.")
+        # 순회가 중간에 멈췄다. 남은 것을 파일별로 돌려 문제 있는 한 건만
+        # 건너뛰고 나머지를 살린다.
+        left = [(f, n) for f, n in todo
+                if not is_complete(output_dir / n, n)]
+        print(f"\n[경고] 순회가 중단됐습니다. 남은 {len(left)}건을 파일별로 다시 시도합니다.")
+        print("       한 건에서 막혀도 나머지는 계속 진행됩니다.\n")
+        shutil.rmtree(stage_dir, ignore_errors=True)
+        if left:
+            run_one_by_one(left, input_dir, output_dir, db_dir, model_dir, cache_dir,
+                           use_cache="jax_compilation_cache_dir" in supported)
+        return
     except KeyboardInterrupt:
         print("\n[중단] 사용자가 멈췄습니다. 다시 실행하면 이어서 합니다.")
     finally:
@@ -195,15 +329,28 @@ def check_flags(db_dir, model_dir, output_dir, cache_dir, in_mount):
                       use_cache=False)
     cmd = [c for c in cmd if not c.startswith(("--model_dir", "--db_dir", "--output_dir"))]
     cmd.append("--help")
+    ALL = {"input_dir", "jax_compilation_cache_dir"}
     try:
-        p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
-        text = (p.stdout or "") + (p.stderr or "")
-    except (subprocess.TimeoutExpired, OSError):
-        # 확인에 실패하면 지원한다고 보고 그대로 진행한다 (실패 시 안내가 나온다).
-        return {"input_dir", "jax_compilation_cache_dir"}
-    if not text.strip():
-        return {"input_dir", "jax_compilation_cache_dir"}
-    return {f for f in ("input_dir", "jax_compilation_cache_dir") if "--" + f in text}
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except subprocess.TimeoutExpired:
+        print("[경고] 도커 이미지 확인이 300초 안에 끝나지 않았습니다.")
+        print("       최신 이미지로 가정하고 진행합니다. 실패하면 아래 명령으로 직접 확인하세요.")
+        print("       sudo docker run --rm alphafold3 python run_alphafold.py --help | head -40")
+        return ALL
+    except OSError as e:
+        print(f"[오류] docker 를 실행할 수 없습니다: {e}")
+        print("       docker 설치와 sudo 권한을 확인하세요.")
+        sys.exit(1)
+
+    text = (p.stdout or "") + (p.stderr or "")
+    if p.returncode != 0 or not text.strip():
+        # 확인 자체가 실패했다. 원인을 보여주고 최신 이미지로 가정한다.
+        print(f"[경고] 도커 이미지 확인이 실패했습니다 (종료코드 {p.returncode}).")
+        for line in [l for l in text.splitlines() if l.strip()][-5:]:
+            print(f"       {line}")
+        print("       최신 이미지로 가정하고 진행합니다.")
+        return ALL
+    return {f for f in ALL if "--" + f in text}
 
 
 def run_one_by_one(todo, input_dir, output_dir, db_dir, model_dir, cache_dir,
@@ -213,7 +360,8 @@ def run_one_by_one(todo, input_dir, output_dir, db_dir, model_dir, cache_dir,
     if use_cache is None:
         use_cache = "jax_compilation_cache_dir" in check_flags(
             db_dir, model_dir, output_dir, cache_dir, input_dir)
-    for idx, json_file in enumerate(todo, 1):
+    for idx, item in enumerate(todo, 1):
+        json_file = item[0] if isinstance(item, tuple) else item
         print(f"[{idx}/{len(todo)}] 연산 중: {json_file.name}")
         cmd = docker_base(db_dir, model_dir, output_dir, cache_dir, input_dir,
                           use_cache=use_cache)
