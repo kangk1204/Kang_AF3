@@ -16,7 +16,7 @@ VHH/나노바디처럼 짧은 단백질 수백에서 수천 건을 AlphaFold 3�
 (32건 곱하기 3반복 중앙값), 2000건 스크리닝이 축소 DB 구성에서 약 4.1시간이다
 (연구자 현재 방식 189시간). 필요한 것은 AF3 소스, 모델 가중치(Google DeepMind 승인 필요),
 서열 DB 세 개이고 모두 이 저장소에 없다
-([3-1 다운로드 목록](#3-1-무엇을-받아야-하나-다운로드-목록)).
+([3-1 다운로드 목록](#3-1-다운로드-목록)).
 
 **전체 흐름은 명령 4줄이다.**
 
@@ -43,16 +43,16 @@ ipTM 을 본다. 신뢰도는 정답과의 일치도가 아니라 모델의 자�
 
 ## 목차
 
-[1. 이게 무엇인가 / 무엇이 아닌가](#1-이게-무엇인가--무엇이-아닌가) ·
+[1. 이게 무엇인가 / 무엇이 아닌가](#1-이-저장소의-범위) ·
 [2. 요구 사양](#2-요구-사양) · [3. 설치](#3-설치) · [4. 동작 확인](#4-동작-확인) ·
 [5. 입력 파일 준비](#5-입력-파일-준비) · [6. 배치 실행](#6-배치-실행) ·
-[7. 왜 빠른가](#7-왜-빠른가) · [8. 결과 해석](#8-결과-해석) ·
+[7. 왜 빠른가](#7-속도-개선의-근거) · [8. 결과 해석](#8-결과-해석) ·
 [9. 결과 보기](#9-결과-보기) · [10. 자주 만나는 문제](#10-자주-만나는-문제) ·
 [11. 라이선스와 인용](#11-라이선스와-인용) · [12. 측정 조건과 한계](#12-측정-조건과-한계)
 
 ---
 
-## 1. 이게 무엇인가 / 무엇이 아닌가
+## 1. 이 저장소의 범위
 
 AlphaFold 3 를 대량으로 돌리기 위한 껍데기다. 스크립트 8개를 제공한다.
 
@@ -68,13 +68,13 @@ AlphaFold 3 를 대량으로 돌리기 위한 껍데기다. 스크립트 8개를
 | `scripts/af3_stage2.py` | `_data.json` 재사용으로 MSA 를 건너뛰는 2단계 입력 생성 |
 
 **AlphaFold 3 자체가 아니다.** AF3 코드도, 가중치도, 데이터베이스도 이 저장소에 없다
-([3-1](#3-1-무엇을-받아야-하나-다운로드-목록)). 그리고 **이 저장소는 공개다. 가중치 파일,
-`ccd.pickle`, DB 파일, 실제 연구 서열을 커밋하지 마라.** `.gitignore` 가 1차 방어선이고
+([3-1](#3-1-다운로드-목록)). 그리고 **이 저장소는 공개다. 가중치 파일,
+`ccd.pickle`, DB 파일, 실제 연구 서열은 커밋하지 않는다.** `.gitignore` 가 1차 방어선이고
 최종 책임은 커밋하는 사람에게 있다 ([11절](#11-라이선스와-인용)).
 
 타깃 10건 이하면 필요 없다. AF3 공식 명령을 그대로 쓰면 된다. 타깃 100건 이상이고
 서열이 짧고 서로 비슷하다면(항체 라이브러리, 나노바디 패널, 점돌연변이 시리즈)
-건당 고정 오버헤드가 전체 시간을 지배하므로 이 저장소가 정확히 그 경우를 위한 것이다.
+건당 고정 오버헤드가 전체 시간을 지배한다. 이 저장소가 다루는 상황이 그것이다.
 
 ---
 
@@ -88,7 +88,7 @@ AlphaFold 3 를 대량으로 돌리기 위한 껍데기다. 스크립트 8개를
 | RAM | 검증 호스트는 126GB. 축소 DB 만 쓰면 훨씬 적어도 된다 (하한 미측정) | |
 | 디스크 | 축소 DB 경로 약 5GB, 전체 DB 경로 약 855GB. 전체 DB 계획이면 여유 1TB | 실측 |
 
-`nvidia-smi` 가 15,157 MiB 를 쓰고 있다고 보여줄 것이다. **이건 수요가 아니라 XLA 의
+`nvidia-smi` 는 15,157 MiB 를 쓰고 있다고 표시한다. **이건 수요가 아니라 XLA 의
 선점량(미리 예약한 메모리)이다.** 이 숫자를 보고 VRAM 이 부족하다고 판단하면 틀린다.
 
 ![gpu-5070ti 추론 실측: 컴파일 상환, 캐시 효과, VRAM 선점 대 실제 요구량](figures/baseline_gpu5070ti.png)
@@ -97,7 +97,7 @@ AlphaFold 3 를 대량으로 돌리기 위한 껍데기다. 스크립트 8개를
 선점 OFF 스모크 1건 5,291 MiB, 선점 OFF 배치 23런 2,942~2,963 MiB. 뒤 두 값의 차이는
 계측 조건 차이(단발 실행 대 순회 정상상태)이고 어느 값이든 16GB 카드에 여유롭게 들어간다
 ([docs/benchmark_report.md](docs/benchmark_report.md)). 위 그림 (c) 의 GB 표기는 환산
-기준(1024 대 1000)이 섞여 있으므로 **정확한 값이 필요하면 이 문단의 MiB 를 쓰라.**
+기준(1024 대 1000)이 섞여 있으므로 **정확한 값이 필요하면 이 문단의 MiB 를 쓴다.**
 
 ### 동작이 확인된 버전 조합
 
@@ -125,11 +125,11 @@ rdkit 2025.9.4, dm-haiku 0.0.17, tokamax 0.0.12, HMMER 3.4 + AF3 의 `--seq_limi
 | **B. 전체 DB** | 약 **4~5시간** | 약 **855GB** | 복합체(항원 결합) 예측, 소수 정밀 재계산 |
 
 두 경로 모두 가중치 접근 승인 대기 시간은 별도다 (Google 측 처리, 수일 걸릴 수 있음, 추정).
-**승인 요청을 설치 첫날에 먼저 넣고 나머지를 진행하라.**
+**승인 요청은 설치 첫날에 넣어 두고 나머지를 진행하면 대기 시간이 겹친다.**
 
 주 경로는 Docker 다. Docker 를 못 쓰는 경우의 conda 네이티브 설치는 [3-7](#3-7-conda-네이티브-설치-docker-를-못-쓰는-경우)에 있다.
 
-### 3-1. 무엇을 받아야 하나: 다운로드 목록
+### 3-1. 다운로드 목록
 
 | 단계 | 받을 것 | 용량 | 어디서 | 시간 |
 |------|---------|------|--------|------|
@@ -138,8 +138,8 @@ rdkit 2025.9.4, dm-haiku 0.0.17, tokamax 0.0.12, HMMER 3.4 + AF3 의 `--seq_limi
 | ③ | **가중치 접근 승인** | | **Google DeepMind 에 직접 요청.** 우리가 대신 받아줄 수 없다 | 요청 10분, **승인 대기 수일 (추정)** |
 | ④ | **모델 가중치 `af3.bin`** | 1,146,811,260 B (약 1.15GB) | 승인 후 안내받은 경로 | 1~5분 (회선에 따라) |
 | ⑤ | **`ccd.pickle`** | 542,994,372 B (약 543MB) | 받는 것이 아니라 `build_data` 로 굽는다 | 수 분 (미측정). 설치 시 1회 |
-| ⑥-A | **축소 DB** | 약 2GB | AF3 저장소의 축소 세트, 또는 전체 DB 에서 균등 추출한 대리 세트 | 10~30분 (추정) |
-| ⑥-B | **전체 DB** | 압축 238.8GB, 해제 후 **850GB 점유** | AF3 저장소의 DB 다운로드 스크립트 | **3시간 13분 (실측)** |
+| ⑥-A | **축소 DB** | 약 2GB | 공식 축소 세트는 없다. 전체 DB 파일을 잘라 만든다 (3-5) | 10~20분 |
+| ⑥-B | **전체 DB** | 압축 238.8GB, 해제 후 **850GB 점유** | `fetch_databases.sh` (승인 불필요) | **3시간 13분 (실측)** |
 | ⑦ | 첫 실행 컴파일 | | | **최대 406~497초 (실측)**, 이후 웜 6.55~8.5초 |
 | | **이 저장소** | 수 MB | https://github.com/kangk1204/Kang_AF3 | 스크립트와 문서만 |
 
@@ -184,7 +184,7 @@ sha256sum ~/af3_models/af3.bin
 ```
 
 `af3.bin.zst` 는 1,020,545,840 B 이고 가중치 안에는 파라미터가 368,384,602개 있다.
-해시가 다르면 최신 버전이라 그럴 수 있으니 **크기가 절반 이하인지**를 먼저 보라.
+해시가 다르면 최신 버전일 수 있다. 먼저 **크기가 절반 이하인지** 확인한다.
 절반 이하라면 다운로드가 잘린 것이다.
 
 ### 3-4. build_data: 화학 성분 사전 굽기
@@ -200,7 +200,7 @@ sudo docker run --rm alphafold3 build_data      # 이미 있으면 아무것도 
 `chemical_component_sets.pickle` 8,424 B 다 (실측). 수 분 걸린다 (미측정).
 **이 파일도 저장소에 커밋하면 안 된다.**
 
-### 3-5. 데이터베이스 선택: 여기가 가장 중요한 판단이다
+### 3-5. 데이터베이스 선택
 
 두 선택지의 실측 차이:
 
@@ -235,22 +235,112 @@ VHH 프레임워크는 그 신호 없이도 템플릿만으로 잡힌다.
   6종이 모두 단량체여서 ipTM 이 산출되지 않았다 ([12절](#12-측정-조건과-한계)).
 - 실용적인 조합은 축소 DB 로 전수 스크리닝하고 상위 후보 수십 건만 전체 DB 로 재계산하는 것이다.
 
-**이미 축소 DB 로 돌려 놓은 결과가 있다면 버리지 마라.** 단량체 신뢰도 기준으로는
+**이미 축소 DB 로 돌려 놓은 결과는 버릴 필요가 없다.** 단량체 신뢰도 기준으로는
 전체 DB 결과와 실질적으로 같다.
-
-#### ⑥-A 축소 DB 준비 (10~30분, 추정)
-
-AF3 공식 저장소가 제공하는 축소 세트를 받거나, 전체 DB 에서 균등 추출한 대리 세트를 쓴다.
-어느 쪽이든 `~/public_databases` 에 둔다. 우리가 측정에 쓴 축소 DB 는 연구자의 실제
-파일이 아니라 공식 전체 DB 에서 균등 추출한 대리 세트이므로 파일 구성이 다르면 MSA 깊이
-절대값은 달라질 수 있다 ([docs/reduced_db.md](docs/reduced_db.md)).
 
 #### ⑥-B 전체 DB 다운로드와 해제 (3시간 13분, 실측)
 
+축소 DB 도 전체 DB 파일을 잘라 만들기 때문에 전체 DB 를 먼저 적었다.
+축소 DB 만 볼 것이면 ⑥-A 로 건너뛰면 된다.
+
+AF3 소스에 다운로드 스크립트가 들어 있다. 인자로 받을 폴더를 준다.
+
 ```bash
+sudo apt install -y wget tar zstd        # 스크립트가 이 셋을 요구한다
 cd ~/af3_work/alphafold3
-# 경로와 이름은 버전에 따라 다르니 --help 로 확인
 bash fetch_databases.sh ~/public_databases
+```
+
+스크립트는 아래 9개를 `https://storage.googleapis.com/alphafold-databases/v3.0` 에서
+받아 압축을 풀며, 9개를 동시에 내려받는다. 승인이나 계정이 필요하지 않다.
+
+| 파일 | 무엇 |
+|------|------|
+| `pdb_2022_09_28_mmcif_files.tar` | 템플릿 검색용 PDB 구조. 해제하면 195,859개 파일 |
+| `uniref90_2022_05.fa` | 단백질 MSA 주력 |
+| `mgy_clusters_2022_05.fa` | MGnify. 환경 시료 유래 |
+| `bfd-first_non_consensus_sequences.fasta` | BFD |
+| `uniprot_all_2021_04.fa` | paired MSA 용. 복합체에서 중요하다 |
+| `pdb_seqres_2022_09_28.fasta` | PDB 서열 |
+| `rnacentral_...linclust.fasta` | RNA |
+| `nt_rna_2023_02_23_...rep_seq.fasta` | RNA |
+| `rfam_14_9_...rep_seq.fasta` | RNA |
+
+받는 도중에 끊기면 그 파일만 반쪽으로 남고, 스크립트를 다시 돌리면 처음부터
+다시 받는다. 끝난 뒤 크기를 확인해 두면 나중에 원인을 찾기 쉽다.
+
+```bash
+du -sh ~/public_databases                       # 850GB 정도여야 한다
+ls -la ~/public_databases/*.fa ~/public_databases/*.fasta
+ls ~/public_databases/mmcif_files | wc -l       # 195859
+```
+
+#### ⑥-A 축소 DB 준비 (전체 DB 를 이미 받았으면 10~20분)
+
+**공식 저장소에는 축소 세트가 없다.** 우리가 측정에 쓴 축소 DB 는 전체 DB 파일의
+앞부분을 서열 경계에서 잘라 만든 대리 세트다. 연구자분이 쓰시는 약 2GB 파일과
+구성이 같지 않을 수 있으므로, MSA 깊이 절대값은 다를 수 있다.
+
+FASTA 를 목표 크기까지 읽되 서열 중간에서 끊기지 않게 자른다.
+
+```bash
+mkdir -p ~/public_databases_reduced
+
+# 단백질 DB 4종을 목표 크기로 자른다 (서열 경계에서 끊는다)
+python3 - <<'EOF'
+import pathlib
+SRC = pathlib.Path.home() / "public_databases"
+DST = pathlib.Path.home() / "public_databases_reduced"
+DST.mkdir(exist_ok=True)
+TARGET = {                                  # 우리가 쓴 크기 (바이트)
+    "uniref90_2022_05.fa": 520_000_000,
+    "bfd-first_non_consensus_sequences.fasta": 420_000_000,
+    "mgy_clusters_2022_05.fa": 420_000_000,
+    "uniprot_all_2021_04.fa": 320_000_000,
+    "rnacentral_active_seq_id_90_cov_80_linclust.fasta": 60_000_000,
+    "nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta": 60_000_000,
+}
+for name, limit in TARGET.items():
+    src = SRC / name
+    if not src.exists():
+        print("없음, 건너뜀:", name); continue
+    written = 0
+    with open(src, "rb") as fi, open(DST / name, "wb") as fo:
+        for line in fi:
+            if written >= limit and line.startswith(b">"):
+                break                       # 다음 서열이 시작되는 지점에서 끊는다
+            fo.write(line); written += len(line)
+    print("%12d  %s" % (written, name))
+EOF
+
+# 아래 셋은 자르지 않고 그대로 쓴다 (원래 작다)
+cp ~/public_databases/pdb_seqres_2022_09_28.fasta ~/public_databases_reduced/
+cp ~/public_databases/rfam_14_9_*.fasta           ~/public_databases_reduced/
+
+# 템플릿용 PDB 구조는 링크로 공유한다 (복사하면 용량이 두 배가 된다)
+ln -s ~/public_databases/mmcif_files ~/public_databases_reduced/mmcif_files
+```
+
+우리가 쓴 축소본의 실제 크기다.
+
+| 파일 | 크기 | 서열 수 |
+|------|------|---------|
+| `uniref90_2022_05.fa` | 519,998,727 B | 71,974 |
+| `bfd-first_non_consensus_sequences.fasta` | 419,999,948 B | 3,242,672 |
+| `mgy_clusters_2022_05.fa` | 419,999,469 B | 1,886,706 |
+| `uniprot_all_2021_04.fa` | 319,999,311 B | 633,249 |
+| `rfam_14_9_...rep_seq.fasta` | 228,433,680 B | 자르지 않음 |
+| `nt_rna_...rep_seq.fasta` | 59,999,964 B | |
+| `rnacentral_...linclust.fasta` | 59,911,226 B | |
+| `pdb_seqres_2022_09_28.fasta` | 916,475 B | 자르지 않음 |
+
+**템플릿 검색용 구조 파일은 자르지 않는다.** 축소 DB 로도 VHH 신뢰도가 거의 떨어지지 않은 이유가
+템플릿이 그대로 있었기 때문이다. `mmcif_files` 를 잘라내면 그 이점이 사라진다.
+
+`--db_dir` 로 어느 쪽을 쓸지 고른다.
+
+```bash
+python3 scripts/run_af3_batch_improved.py --db-dir ~/public_databases_reduced --yes
 ```
 
 실측 (4병렬 다운로드, 평균 약 41MB/s 회선): 압축 파일 238.8GB 다운로드 **1시간 37분**,
@@ -299,7 +389,7 @@ build_data
 우리 수치는 conda 네이티브 측정이므로 컨테이너 기동 비용이 빠져 있고,
 **우리 값은 Docker 환경의 하한이다.** Docker 에서는 건당 시간이 같거나 조금 더 나온다.
 
-### 3-8. 첫 실행은 느리다
+### 3-8. 첫 실행 지연
 
 처음 한 번은 XLA 가 GPU 커널을 컴파일한다. 관측한 프로세스 고정 오버헤드는 콜드/고부하
 상태에서 **406~497초**까지 올라갔고 웜 상태에서는 6.55~8.5초다.
@@ -332,9 +422,9 @@ bash scripts/af3_check.sh 2>&1 | tee af3_check.txt
 | HMMER | `jackhmmer -h` 가 동작하고 `--seq_limit` 항목이 보인다 |
 | 디스크 | 작업 폴더에 여유가 있다 |
 
-출력 형식은 스크립트 버전에 따라 다르니 항목별 판정 표시(OK/실패)를 보라.
+출력 형식은 스크립트 버전에 따라 다르다. 항목별 판정 표시(OK/실패)를 기준으로 읽는다.
 `--seq_limit` 이 안 보이면 AF3 패치가 적용되지 않은 HMMER 다(도커 이미지를 쓰면 보통
-문제되지 않는다). 실패 항목은 [10절](#10-자주-만나는-문제)에서 찾아보라.
+문제되지 않는다). 실패 항목은 [10절](#10-자주-만나는-문제)에 정리해 두었다.
 
 ### 스모크 테스트: 1건 실제로 돌려 보기
 
@@ -346,7 +436,7 @@ python3 scripts/af3_batch.py --name smoke --stage oneshot
 ls smoke_out/*/
 ```
 
-첫 실행이라 5~8분 걸릴 수 있다 ([3-8](#3-8-첫-실행은-느리다)). 끝나면
+첫 실행이라 5~8분 걸릴 수 있다 ([3-8](#3-8-첫-실행-지연)). 끝나면
 `smoke_out/vhh_7mfv_1/` 안에 `*_summary_confidences.json` 과 `*_model.cif` 가 생긴다.
 여기까지 되면 설치는 끝이다.
 
@@ -422,7 +512,7 @@ DB 는 24,250~27,353 이다. 복합체에는 전체 DB 를 써야 할 것으로 
 
 ### 5-3. `af3_prepare.py`: FASTA/CSV 에서 JSON 만들기
 
-세부 옵션은 `python3 scripts/af3_prepare.py --help` 로 확인하라. 여기 적은 것보다
+세부 옵션은 `python3 scripts/af3_prepare.py --help` 에 있다. 여기 적은 것보다
 스크립트가 정확하다.
 
 ```bash
@@ -465,11 +555,11 @@ vhh_7a50_1,QVQLQESGGGLVQAGDSLRLSCAASGRTFSTYPMGWFRQAPGKEREFVAASSSRAYYADSVKGRFTISR
 
 `examples/vhh_panel.csv` 와 `examples/vhh_panel.fasta` 가 같은 6종의 CSV 판과 FASTA
 판이다(공개 PDB 유래). 이 6종이
-[3-5절](#3-5-데이터베이스-선택-여기가-가장-중요한-판단이다) 의 DB 비교에 쓴 타깃과 같으므로
+[3-5절](#3-5-데이터베이스-선택) 의 DB 비교에 쓴 타깃과 같으므로
 결과를 [results_example/af3_summary.csv](results_example/af3_summary.csv) 와 직접
 비교할 수 있다. 리간드를 넣거나 다량체를 만드는 옵션도 있다. `--help` 를 보라.
 
-### 5-4. 만들어진 것 확인
+### 5-4. 생성 결과 확인
 
 ```bash
 ls vhh_001_in | head -3
@@ -625,7 +715,7 @@ MSA 설정은 실측 기준으로 이미 최적값이 기본이다. **`--msa-wor
 권장값은 `--jackhmmer_n_cpu = --nhmmer_n_cpu = min(코어수/2, 8)`, 동시 1갈래다.
 AF3 기본값이 `min(코어수, 8)` 이므로 **8코어 이상이면 기본값이 이미 최적에 가깝다.**
 
-### 6-5. 진행 상황 보기와 중간에 끊겼을 때
+### 6-5. 진행 확인과 재개
 
 스크립트는 `<이름>_work/` 에 상태를 남긴다.
 
@@ -652,7 +742,7 @@ nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -l 5
 
 ---
 
-## 7. 왜 빠른가
+## 7. 속도 개선의 근거
 
 JSON 하나마다 `docker run` 을 새로 띄우면 타깃마다 컨테이너 기동, JAX/CUDA 초기화,
 가중치 로딩(1.15GB, 파라미터 3.68억 개), XLA 커널 컴파일을 처음부터 반복한다.
@@ -706,7 +796,7 @@ GPU 추론 단계만 **5.93배**(직접 측정), 전체 파이프라인은 **4.7
 
 숫자가 나왔다고 구조가 맞는 게 아니다. 결과 해석과 [구조 확인](#9-결과-보기)이 실제로 가장 중요하다.
 
-### 8-1. 출력 폴더에 무엇이 들어 있나
+### 8-1. 출력 폴더의 구성
 
 타깃 하나가 폴더 하나가 되고 폴더 이름은 입력 JSON 의 `name` 을 정규화한 값이다.
 아래는 검증 호스트의 실제 출력이다 (VHH 단량체, sample 5).
@@ -742,7 +832,7 @@ vhh_001_out/vhh_4qgy_1/
 `_summary_confidences.json` 세 개가 모두 있고 크기가 0보다 클 때다.
 `run_af3_batch_improved.py` 가 이 기준으로 판정한다.
 
-### 8-2. 지표가 각각 무슨 뜻인가
+### 8-2. 지표의 정의
 
 | 지표 | 범위 | 무엇 | 어디 |
 |------|------|------|------|
@@ -753,7 +843,7 @@ vhh_001_out/vhh_4qgy_1/
 | **ranking_score** | 해당 없음 | AF3 가 모델을 줄 세울 때 쓰는 종합 점수 | `*_summary_confidences.json` |
 | **fraction_disordered**, **has_clash** | 0~1, 0/1 | 무질서 비율, 원자 충돌 발생 | 같음 |
 
-### 8-3. 어느 값부터 믿을 만한가
+### 8-3. 판정 기준선
 
 `af3_collect.py` 가 CSV 의 `등급` 열에 쓰는 기준이고, AlphaFold 계열의 통상적 해석
 구간을 이 배치에 맞춰 적용한 것이다.
@@ -847,7 +937,7 @@ MSA(`MSA_unpaired깊이, MSA_paired깊이`), 규모(`토큰수, 원자수, 체�
 실제 출력 예시는 [results_example/af3_summary.csv](results_example/af3_summary.csv)
 (축소 DB 대 전체 DB 6종 비교, 실측)에 있다.
 
-### 8-5. 결과를 볼 때의 실무 순서
+### 8-5. 검토 순서
 
 1. `등급` 열로 정렬한다. `D_낮음` 은 일단 제외한다.
 2. `경고` 열에 `충돌` 이 있는 건은 구조를 직접 열어 확인한다.
@@ -857,7 +947,7 @@ MSA(`MSA_unpaired깊이, MSA_paired깊이`), 규모(`토큰수, 원자수, 체�
 6. 그중에서 실험할 것을 고른다.
 
 `MSA얕음` 경고는 축소 DB 를 썼으면 전량에 붙는다. 단량체 스크리닝에서는 정상이다
-([3-5](#3-5-데이터베이스-선택-여기가-가장-중요한-판단이다) 의 6종 비교).
+([3-5](#3-5-데이터베이스-선택) 의 6종 비교).
 
 ![신뢰도 분포](figures/confidence_overview.png)
 
@@ -916,7 +1006,7 @@ python3 scripts/af3_view3d.py vhh_001_out --out-dir 뷰어 --lib embed --engine 
 한 개가 약 5MB (`--engine 3dmol` 이면 약 0.6MB)가 된다.
 인터넷 없이 열어야 하는데 건수가 많으면 `--engine 3dmol --lib embed` 를 써라.
 
-### 9-4. 화면에서 하는 것
+### 9-4. 화면 조작
 
 - **돌리기**: 왼쪽 버튼으로 끌기
 - **확대/축소**: 마우스 휠
@@ -928,7 +1018,7 @@ python3 scripts/af3_view3d.py vhh_001_out --out-dir 뷰어 --lib embed --engine 
 원자 충돌 여부, 사슬 수, 잔기/원자 수, 확산 샘플 수와 샘플 간 산포가 나온다.
 ipTM 은 단량체에 없는 값이므로 단량체 화면에는 그 줄이 아예 없다 (0 이 아니다).
 
-### 9-5. 색을 어떻게 읽는가
+### 9-5. 색 해석
 
 기본 색칠은 pLDDT 다. 잔기별 예측 신뢰도이고 0~100 이다. 경계와 색은 EBI
 AlphaFold DB 와 같으므로 그쪽에서 본 그림과 나란히 비교할 수 있다.
@@ -988,7 +1078,7 @@ color orange, lowconf
 
 **(b) ChimeraX.** `chimerax ..._model.cif` 로 열고 명령줄에 붙인다.
 `color bfactor palette alphafold` 가 AlphaFold 공식 pLDDT 배색을 그대로 적용하므로
-이 부분은 ChimeraX 가 더 편하다. `cartoon`, `set bgColor white`,
+이 색칠은 ChimeraX 가 한 줄로 끝난다. `cartoon`, `set bgColor white`,
 `show :/bfactor<70 atoms`(낮은 부위 강조)를 함께 쓴다.
 
 **여러 구조를 겹쳐 보기.** 같은 계열 나노바디에서 CDR 루프만 다른지 확인할 때 PyMOL 은
@@ -1008,7 +1098,7 @@ color orange, lowconf
 파일이 컴퓨터 밖으로 나가지 않는다 (`--lib embed` 로 만들면 열 때 네트워크
 연결조차 하지 않는다).
 
-### 9-8. 구조가 안 뜬다
+### 9-8. 구조가 표시되지 않을 때
 
 - **"구조를 표시하지 못했다" 안내가 나온다**: `--lib cdn` (기본)으로 만든 파일은
   열 때 인터넷에서 3D 라이브러리를 가져온다. 인터넷이 없거나 사내망이 막았으면
@@ -1020,7 +1110,7 @@ color orange, lowconf
   `.cif.zst`), `_summary_confidences.json` 세 개가 모두 있고 크기가 0보다 큰
   것이다. 추론이 끝나지 않은 폴더는 빠진다. 그런 폴더도 보려면 `--include-partial`
 
-### 9-9. 무엇을 눈으로 확인해야 하나
+### 9-9. 눈으로 확인할 것
 
 | 볼 것 | 정상 | 이상 |
 |-------|------|------|
@@ -1032,7 +1122,7 @@ color orange, lowconf
 
 복합체에서 계면이 이상하면 ipTM 이 낮게 나와 있을 것이다. **숫자와 그림이 서로를
 확인해 주는지** 보라. 어긋나면 파일이 섞였을 가능성을 의심하라
-([8-3](#8-3-어느-값부터-믿을-만한가) 의 `ranking검산차`).
+([8-3](#8-3-판정-기준선) 의 `ranking검산차`).
 
 ---
 
@@ -1044,7 +1134,7 @@ color orange, lowconf
 | `nvidia-smi` 가 15,157 MiB 사용 중이라고 나온다 | XLA 선점량. 수요가 아니다. 실제 피크는 2,942~2,963 MiB | 무시하라. 실제 사용량을 보려면 `--no-prealloc` (조금 느려진다) |
 | 진짜 `CUDA out of memory` | 토큰 수가 크다. 버킷 1024 이상에서 급격히 커진다 | 아래 상세 항목의 5단계 순서 |
 | `docker: permission denied ... daemon socket` | 사용자가 `docker` 그룹에 없다 | `sudo usermod -aG docker $USER` 후 재로그인. 또는 `--docker 'sudo docker'` |
-| 첫 실행이 5~8분 걸린다 | XLA 커널 컴파일. 콜드/고부하에서 406~497초 관측 | 정상이다. 두 번째부터 웜 6.55~8.5초 ([3-8](#3-8-첫-실행은-느리다)) |
+| 첫 실행이 5~8분 걸린다 | XLA 커널 컴파일. 콜드/고부하에서 406~497초 관측 | 정상이다. 두 번째부터 웜 6.55~8.5초 ([3-8](#3-8-첫-실행-지연)) |
 | `run_alphafold.py: error: unrecognized arguments: --input_dir` | 도커 이미지가 오래된 AF3 다 | 이미지를 다시 빌드한다. 아래 상세 항목 참고 |
 | 결과 CSV 의 `패딩버킷` 이 256이다 | 사다리에서 128이 빠졌거나, 서열이 그냥 128 토큰보다 길다 (130 aa 는 정상적으로 256) | 버킷 사다리를 직접 지정하지 마라. 지정해야 하면 128을 첫 항목으로 ([6-3](#6-3-af3_batchpy-직접-쓰기)) |
 | `MSA얕음` 경고가 전량에 붙는다 | 축소 DB 를 쓰면 unpaired 깊이가 9~13 이다 | 단량체 스크리닝에서는 정상. **복합체라면 무시하지 말고 전체 DB 를 쓰라** |
