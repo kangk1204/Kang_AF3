@@ -39,6 +39,8 @@ CHECK="${SCRIPT_DIR}/af3_check.sh"
 # 갈래를 늘려도 스레드 총량이 같으면 오히려 느려진다:
 #   32스레드 1갈래 0.890 타깃/분  대  32스레드 2갈래 0.767 타깃/분 (실측)
 # 처리율은 총 스레드가 코어 수의 약 1.3배인 지점에서 0.895 타깃/분으로 포화한다.
+# (이 스윕은 전체 DB 급 = 4종 각 4GB 슬라이스 기준이다. 축소 DB 약 2GB 는
+#  데이터 파이프라인이 건당 1.98초로, 포화점이 문제되지 않는다.)
 WORKERS="${AF3_MSA_WORKERS:-1}"
 
 # DB 검색 스레드: min(코어수/2, 8). AF3 기본값 min(코어수,8) 과 거의 같아서
@@ -72,9 +74,20 @@ if [ "$MODE" = "collect" ]; then
   if [ ! -d "./${NAME}_out" ]; then
     echo "오류: 결과 폴더가 없다: ./${NAME}_out"; exit 1
   fi
-  echo "결과를 집계한다: ./${NAME}_out -> ./${NAME}_결과요약.csv"
+  # 2026-04: 집계 CSV 이름을 ASCII 로 바꿨다 (${NAME}_결과요약.csv -> ${NAME}_summary.csv).
+  # 옛 이름이 필요하면 AF3RUN_FILENAME_LANG=ko 를 주면 된다.
+  if [ "${AF3RUN_FILENAME_LANG:-en}" = "ko" ]; then
+    CSV="./${NAME}_결과요약.csv"
+  else
+    CSV="./${NAME}_summary.csv"
+  fi
+  echo "결과를 집계한다: ./${NAME}_out -> ${CSV}"
   echo "(MSA 깊이 계산이 느리면 --no-msa-depth 를 붙여 직접 실행하라)"
-  "$PY" "$COLLECT" "${NAME}=./${NAME}_out" -o "./${NAME}_결과요약.csv"
+  if [ "${AF3RUN_FILENAME_LANG:-en}" != "ko" ]; then
+    echo "(2026-04 부터 이름이 ${NAME}_결과요약.csv 에서 바뀌었다."
+    echo " 옛 이름을 쓰려면: AF3RUN_FILENAME_LANG=ko bash af3run.sh ${NAME} collect)"
+  fi
+  "$PY" "$COLLECT" "${NAME}=./${NAME}_out" -o "$CSV"
   RC=$?
   echo
   echo "등급 기준을 보려면: ${PY} af3_collect.py --grade-doc ."

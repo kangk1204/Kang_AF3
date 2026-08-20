@@ -40,11 +40,16 @@ af3_batch.py - AlphaFold 3 대량 스크리닝용 최적화 배치 러너
       입력 목록에서 제외한다 (이것 때문에 측정 3시간이 날아간 적이 있다).
 
 무엇이 병목인지 (이 스크립트를 쓴 뒤의 이야기)
-    GPU 단계는 이 스크립트로 2000건 17.8시간 -> 3.0시간이 된다. 그러면 남는 것은
-    MSA(CPU) 단계 약 37시간이고, 이것은 프로세스를 어떻게 쪼개도 줄지 않는다
-    (0.895 타깃/분에서 포화). 즉 이 스크립트를 쓴 뒤의 다음 레버는 코드가 아니라
-    MSA 자체를 줄이는 것이다 -- MSA 재사용, 사전 계산, DB 축소.
-    자세한 근거는 af3_벤치마크리포트.md / af3_진단리포트.md 참고.
+    GPU 단계는 이 스크립트로 2000건 17.8시간 -> 3.0시간이 된다. 그 다음에 무엇이
+    남는지는 1단계에 쓰는 DB 구성이 정한다.
+      - 축소 DB 약 2GB (연구자 현재 구성): 데이터 파이프라인이 건당 1.98초라서
+        MSA 는 병목이 아니다. 2000건이면 파이프라인 1.1시간 + 추론 3.0시간.
+      - 전체 DB 급 (4종 각 4GB 슬라이스): MSA 가 건당 67.0초로 2000건 37.2시간이고
+        전체 40.2시간의 93%다. 이것은 프로세스를 어떻게 쪼개도 줄지 않는다
+        (0.895 타깃/분에서 포화).
+    즉 "코드를 고치면 MSA 가 93%" 는 전체 DB 급 구성에서만 성립하는 문장이다.
+    조건별 근거는 docs/two_stage_notes.md 3절, docs/msa_correction_notes.md,
+    af3_벤치마크리포트.md / af3_진단리포트.md 참고.
 
 폴더 관례 (연구자 기존 구조를 그대로 유지)
     <작업폴더>/
@@ -84,6 +89,7 @@ import json
 import os
 import re
 import shutil
+import string
 import subprocess
 import sys
 import time
@@ -157,20 +163,220 @@ def probe_flags(docker, image):
 # =============================================================================
 # 입력 JSON 해석
 # =============================================================================
-def is_sidecar(name):
-    """macOS AppleDouble 사이드카('._foo.json')와 숨은 파일을 걸러낸다.
+# ---------------------------------------------------------------------------
+# AF3 결과 폴더에서 타깃명을 결정하는 규칙  [정본 블록]
+#
+# 왜 폴더명을 쓰면 안 되는가 (alphafold3 commit 97d2023 에서 확인한 사실)
+#   * 출력 폴더 이름은 입력 파일명이 아니라 JSON 의 name 을 정규화한 값이다
+#     (folding_input.py:1054 sanitised_name -> 공백을 _ 로 바꾸고 [A-Za-z0-9_-.] 만 남긴다.
+#      소문자화는 하지 않는다).
+#   * run_alphafold.py:861~866 - 출력 폴더가 이미 있고 비어 있지 않으면
+#     AF3 는 <폴더명>_<YYYYmmdd_HHMMSS> 폴더를 새로 만든다. 폴더 이름에는
+#     타임스탬프가 붙지만 그 안의 파일 stem 은 원래 타깃명 그대로다.
+#   따라서 폴더명을 타깃명으로 쓰면 재실행 결과가 별개 타깃으로 집계된다.
+#
+# 그래서 이 도구들은 폴더 안 산출물 파일의 stem 에서 타깃명을 얻는다.
+# stem 을 믿을 수 없는 경우의 처리도 아래 resolve_result_dir 에 규정했다.
+#
+# 이 블록은 af3_collect.py / af3_visualize.py / af3_batch.py 에 같은 내용으로
+# 들어 있다 (세 스크립트를 따로 복사해 쓰는 사용자가 있으므로 공용 모듈을 만들지
+# 않았다). 고칠 때는 세 곳을 함께 고쳐라. tests/test_naming.py 가 세 사본이
+# 같은 답을 내는지 검사하므로, 한 곳만 고치면 테스트가 실패한다.
+# ---------------------------------------------------------------------------
 
-    실제로 겪은 사고다. macOS 에서 만든 tar.gz 를 리눅스에서 풀면 파일마다
-    '._' 접두어 사이드카가 함께 생긴다. `ls` 에는 보이지 않지만 glob("*.json") 에는
-    잡히고, UTF-8 이 아니어서 읽는 순간 UnicodeDecodeError 로 죽는다.
-    이 방어가 없어 벤치마크 측정 3시간이 통째로 날아갔다.
+# 완료의 정식 근거. 한 묶음 안의 하나라도 있으면 그 묶음은 충족으로 본다
+# (mmCIF 는 --compress_large_output_files 를 쓰면 .cif.zst 로 나온다).
+FINAL_SUFFIX_GROUPS = (
+    ("_ranking_scores.csv",),
+    ("_model.cif", "_model.cif.zst"),
+    ("_summary_confidences.json",),
+)
+# 데이터 파이프라인(MSA)만 돌렸을 때의 산출물. 추론 완료의 근거는 아니다.
+DATA_SUFFIX = "_data.json"
+
+# AF3 가 재실행 때 붙이는 접미사: _YYYYmmdd_HHMMSS
+AF3_TIMESTAMP_RE = re.compile(r"^(?P<base>.+)_(?P<ts>[0-9]{8}_[0-9]{6})$")
+
+
+def is_sidecar(name):
+    """집계에서 제외할 이름인지 판정한다. 두 가지를 한꺼번에 막는다.
+
+    1) macOS AppleDouble 사이드카('._foo'). UTF-8 이 아니어서 읽으면 죽는다.
+       실제로 겪은 사고다. macOS 에서 만든 tar.gz 를 리눅스에서 풀면 파일마다
+       '._' 접두어 사이드카가 함께 생긴다. `ls` 에는 보이지 않지만 glob("*.json")
+       에는 잡히고, 읽는 순간 UnicodeDecodeError 로 죽는다. 이 방어가 없어
+       벤치마크 측정 3시간이 통째로 날아갔다.
+    2) 점으로 시작하는 모든 항목. 이것은 우연이 아니라 의도다.
+       배치 러너가 출력 폴더 안에 만드는 관리용 항목이 전부 점으로 시작한다:
+         .af3_incomplete/    미완료 결과 격리 보관소. 여기 있는 것은 완료가 아니므로
+                             집계에 섞이면 상위 후보 선별이 틀어진다.
+         .af3_pending_*/     실행 중 staging 폴더. 아직 결과가 아니다.
+         .run_af3_batch.lock 중복 실행 방지 lock 파일.
+       run_af3_batch_improved.py 의 is_safe_output_name 도 '.af3_' 로 시작하는
+       이름을 결과 이름으로 인정하지 않는다. 양쪽이 같은 약속을 지킨다.
     """
     return name.startswith("._") or name.startswith(".")
 
 
+def strip_af3_timestamp(name):
+    """폴더명에서 AF3 재실행 접미사(_YYYYmmdd_HHMMSS)를 떼어낸다. 없으면 그대로.
+
+    주의: 이것은 stem 을 얻지 못했을 때의 되돌림 경로일 뿐이다. 타깃명이 원래
+    '..._20260820_101010' 인 경우를 잘못 자를 수 있으므로 1순위로 쓰지 않는다.
+    """
+    m = AF3_TIMESTAMP_RE.match(name)
+    return m.group("base") if m else name
+
+
+def af3_timestamp_of(name):
+    """폴더명의 재실행 접미사를 'YYYYmmdd_HHMMSS' 문자열로. 없으면 None."""
+    m = AF3_TIMESTAMP_RE.match(name)
+    return m.group("ts") if m else None
+
+
+def _nonempty(path):
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def scan_stems(dirpath):
+    """폴더 안 산출물 파일을 stem 별로 묶는다.
+
+    반환: {stem: {"final": 충족한 묶음 수, "data": bool}}
+    크기 0 인 파일은 없는 것으로 센다 (디스크가 찼거나 중간에 끊긴 흔적이다).
+    """
+    try:
+        entries = [p for p in dirpath.iterdir()
+                   if p.is_file() and not is_sidecar(p.name)]
+    except OSError:
+        return {}
+    found = {}
+    for group in FINAL_SUFFIX_GROUPS:
+        for p in entries:
+            for suf in group:
+                if p.name.endswith(suf) and _nonempty(p):
+                    stem = p.name[:-len(suf)]
+                    if not stem:
+                        continue
+                    rec = found.setdefault(stem, {"groups": set(), "data": False})
+                    rec["groups"].add(group[0])
+                    break
+    for p in entries:
+        if p.name.endswith(DATA_SUFFIX) and _nonempty(p):
+            stem = p.name[:-len(DATA_SUFFIX)]
+            if stem:
+                found.setdefault(stem, {"groups": set(), "data": False})["data"] = True
+    return {s: {"final": len(v["groups"]), "data": v["data"]}
+            for s, v in found.items()}
+
+
+def resolve_result_dir(dirpath, mode="full"):
+    """결과 폴더 하나의 타깃명과 완료 여부를 판정한다.
+
+    mode="full" : 추론까지 끝났는지 (정식 3종 모두)
+    mode="data" : MSA 단계만 끝났는지 (<타깃>_data.json)
+
+    반환 dict:
+        target      집계표에 쓸 타깃명
+        stem        산출물 파일의 stem (없으면 None)
+        source      타깃명을 어디서 얻었는가: "stem" | "folder" | "folder_stripped"
+        complete    mode 기준 완료 여부
+        n_final     충족한 정식 산출물 묶음 수 (0~3)
+        run_ts      폴더명의 AF3 재실행 접미사 (없으면 None)
+        note        사용자에게 알릴 특이사항 (없으면 "")
+
+    stem 을 신뢰할 수 없는 경우의 처리 (문서화된 규칙):
+      (a) 산출물이 하나도 없다  -> 결과 폴더가 아니다. target 은 폴더명에서
+          타임스탬프를 떼어낸 값(source="folder_stripped"), complete=False.
+      (b) 완료 stem 이 정확히 하나 -> 그것을 쓴다 (정상 경로).
+      (c) 완료 stem 이 여러 개    -> 폴더명(또는 타임스탬프를 뗀 폴더명)과 일치하는
+          stem 을 고른다. 일치하는 것이 없으면 사전순 첫 번째를 쓰고 note 에
+          섞인 stem 을 모두 적는다. 임의로 고르지 않고 규칙을 고정해 두어야
+          같은 폴더를 두 번 집계했을 때 답이 달라지지 않는다.
+      (d) 완료 stem 은 없고 미완료 stem 만 있다 -> 같은 규칙으로 이름만 정하고
+          complete=False. (추론 중 끊긴 폴더. 이름은 알려줘야 재시도할 수 있다.)
+    """
+    stems = scan_stems(dirpath)
+    folder = dirpath.name
+    stripped = strip_af3_timestamp(folder)
+    run_ts = af3_timestamp_of(folder)
+    def _ok(rec):
+        return rec["data"] if mode == "data" else rec["final"] >= 3
+
+    if not stems:
+        return {"target": stripped, "stem": None,
+                "source": "folder_stripped" if run_ts else "folder",
+                "complete": False, "n_final": 0, "run_ts": run_ts,
+                "note": "산출물 파일이 없다"}
+
+    good = sorted(s for s, rec in stems.items() if _ok(rec))
+    pool = good if good else sorted(stems)
+    note = ""
+    if len(pool) == 1:
+        stem = pool[0]
+    else:
+        # (c)/(d): 규칙을 고정한다 - 폴더명 일치 > 타임스탬프 뗀 폴더명 일치 > 사전순
+        if folder in pool:
+            stem = folder
+        elif stripped in pool:
+            stem = stripped
+        else:
+            stem = pool[0]
+        note = ("한 폴더에 stem 이 %d개 섞여 있다(%s). '%s' 를 대표로 골랐다"
+                % (len(pool), ", ".join(pool), stem))
+
+    rec = stems[stem]
+    return {"target": stem, "stem": stem, "source": "stem",
+            "complete": _ok(rec), "n_final": rec["final"], "run_ts": run_ts,
+            "note": note}
+
+
+def dir_run_time(dirpath, info):
+    """결과 폴더의 '실행 시각' 을 비교 가능한 숫자로 준다. 최신 판정에 쓴다.
+
+    1순위: 폴더명의 AF3 재실행 접미사(_YYYYmmdd_HHMMSS). AF3 가 직접 찍은 값이라
+           파일 복사/rsync 로 mtime 이 바뀌어도 살아남는다.
+    2순위: 정식 산출물의 mtime 중 가장 늦은 것 (접미사 없는 첫 실행 폴더).
+    두 경로 모두 실패하면 0.0 (가장 오래된 것으로 취급).
+    """
+    ts = info.get("run_ts")
+    if ts:
+        try:
+            return time.mktime(time.strptime(ts, "%Y%m%d_%H%M%S"))
+        except ValueError:
+            pass
+    best = 0.0
+    try:
+        for p in dirpath.iterdir():
+            if p.is_file() and not is_sidecar(p.name):
+                try:
+                    best = max(best, p.stat().st_mtime)
+                except OSError:
+                    continue
+    except OSError:
+        return 0.0
+    return best
+
+
 def sanitise_name(name):
-    """AF3 가 출력 폴더명을 만들 때 쓰는 규칙(소문자화 + 특수문자 치환)을 모사."""
-    return re.sub(r"[^a-z0-9_-]", "_", str(name).lower())
+    """AF3 가 출력 폴더명을 만들 때 쓰는 규칙을 모사한다.
+
+    2026-08 수정: 예전 구현은 소문자화를 했다(`str(name).lower()`).
+    실물 AF3 는 소문자화하지 않는다 - folding_input.py 의 Input.sanitised_name 은
+    공백을 '_' 로 바꾸고 [A-Za-z0-9_-.] 만 남길 뿐이다 (commit 97d2023 에서 확인).
+    소문자화 때문에 리눅스(대소문자 구분 파일시스템)에서 'VHH_001' 의 결과 폴더를
+    'vhh_001' 로 찾아 find_result_dirs 가 빈 목록을 돌려줬다. 그 결과
+    --retry 없이 재실행해도 완료된 건을 건너뛰지 못하고 전부 다시 돌렸다.
+    (측정: gpu-5070ti 에서 find_result_dirs(root,"VHH_001") -> [] 확인)
+
+    또 예전 구현은 마침표(.)를 '_' 로 바꿨는데 실물은 마침표를 남긴다.
+    이제 run_af3_batch_improved.py 의 sanitised_name 과 같은 규칙이다.
+    """
+    spaceless = str(name).replace(" ", "_")
+    allowed = set(string.ascii_letters + string.digits + "_-.")
+    return "".join(ch for ch in spaceless if ch in allowed)
 
 
 def read_fold_json(path):
@@ -219,31 +425,77 @@ def needed_buckets(token_counts, ladder=None):
 
 # =============================================================================
 # 완료/미완료 판정
+#
+# 2026-08 수정 (판정 기준 통일)
+#   예전 outdir_is_complete 는 DONE_MARKERS 세 개 중 '하나라도' 있으면 완료로 봤다.
+#   그래서 _summary_confidences.json 만 남고 추론이 끊긴 폴더를 완료로 오인했고,
+#   크기 0 인 파일도 완료로 셌다 (gpu-5070ti 에서 실측 확인:
+#   summary 파일 하나만 있는 폴더 -> True, 3종이 모두 0바이트인 폴더 -> True).
+#   이제 정식 기준은 run_af3_batch_improved.py 의 is_complete 와 같다:
+#   _ranking_scores.csv / _model.cif(또는 .cif.zst) / _summary_confidences.json
+#   세 묶음이 모두 있고 크기가 0보다 클 때만 완료다.
+#
+#   단 이 스크립트에는 --stage msa 가 있어 단계마다 완료의 뜻이 다르다.
+#     stage msa    : <타깃>_data.json 이 있으면 그 단계는 끝난 것이다 (mode="data")
+#     stage infer/both/oneshot : 정식 3종을 본다 (mode="full")
+#   그래서 판정 함수가 단계를 받는다.
+#
+#   예전 기준으로 돌아가려면 --lenient-done 을 쓴다 (기존 출력 폴더를 완료로
+#   인정해 재실행을 피하고 싶을 때. 다만 끊긴 결과를 완료로 셀 수 있다).
 # =============================================================================
-DONE_MARKERS = ("_summary_confidences.json", "ranking_scores.csv", "_model.cif")
+DONE_MARKERS = ("_summary_confidences.json", "_ranking_scores.csv",
+                "_model.cif", "_model.cif.zst")
 
 
-def outdir_is_complete(d):
-    """AF3 결과 폴더가 정상 완료인지 판정. 폴더 존재만으로 판정하지 않는다."""
+def stage_check_mode(stage):
+    """실행 단계에 맞는 완료 판정 모드를 준다."""
+    return "data" if stage == "msa" else "full"
+
+
+def outdir_is_complete(d, mode="full", lenient=False):
+    """AF3 결과 폴더가 해당 단계까지 끝났는지 판정. 폴더 존재만으로 판정하지 않는다.
+
+    mode="full" : 정식 산출물 3종이 모두 있고 크기가 0보다 크다
+    mode="data" : <타깃>_data.json 이 있고 크기가 0보다 크다 (--stage msa 용)
+    lenient=True: 2026-08 이전 동작. 완료 표식 중 하나만 있어도 완료로 본다
+    """
     if not d.is_dir():
         return False
-    try:
-        names = [p.name for p in d.iterdir()]
-    except OSError:
-        return False
-    return any(any(n.endswith(m) for m in DONE_MARKERS) for n in names)
+    if lenient:
+        try:
+            names = [p.name for p in d.iterdir()]
+        except OSError:
+            return False
+        return any(any(n.endswith(m) for m in DONE_MARKERS) for n in names)
+    return resolve_result_dir(d, mode=mode)["complete"]
 
 
 def find_result_dirs(output_dir, fold_name):
-    """AF3 는 출력 폴더가 비어있지 않으면 <name>_<타임스탬프> 폴더를 새로 만든다.
-    그래서 정확히 일치하는 폴더와 타임스탬프 접미사 폴더를 모두 본다."""
-    s = sanitise_name(fold_name)
+    """한 타깃의 결과 폴더를 모두 찾는다 (없으면 빈 목록).
+
+    AF3 는 출력 폴더가 비어 있지 않으면 <name>_<YYYYmmdd_HHMMSS> 폴더를 새로 만든다.
+    2026-08 수정: 예전에는 glob(sanitise_name(name) + "_*") 로 찾았다. 두 가지가
+    틀렸다.
+      1) sanitise_name 이 소문자화를 해서 리눅스에서 대문자 타깃을 못 찾았다.
+      2) glob 접두어 방식은 'VHH_004' 를 찾을 때 'VHH_004_variantB' 같은 별개
+         타깃까지 잡았다. 이제 폴더 안 산출물의 stem 이 타깃명과 같은지 확인한다.
+    """
+    want = sanitise_name(fold_name)
     out = []
-    exact = output_dir / s
-    if exact.exists():
-        out.append(exact)
-    for p in sorted(output_dir.glob(s + "_*")):
-        if p.is_dir():
+    try:
+        entries = sorted(p for p in output_dir.iterdir()
+                         if p.is_dir() and not is_sidecar(p.name))
+    except OSError:
+        return out
+    for p in entries:
+        # 1순위: 폴더 안 산출물 stem 이 타깃명과 같은가 (AF3 의 실제 동작)
+        info = resolve_result_dir(p, mode="full")
+        if info["stem"] == want:
+            out.append(p)
+            continue
+        # 되돌림: 산출물이 아직 없는 폴더는 이름으로 판단한다
+        # (추론이 시작되기 전이거나 빈 폴더. 접미사만 떼어 정확히 비교한다)
+        if info["stem"] is None and strip_af3_timestamp(p.name) == want:
             out.append(p)
     return out
 
@@ -458,6 +710,8 @@ def msa_n_cpu(args, n_shards=1):
       따라서 실효 스레드 = n_cpu x 4 x 갈래수.
       처리율은 총 스레드가 코어 수의 약 1.3배(= 코어수/2 x 4)인 지점에서 포화한다:
         24스레드 0.778 / 32스레드 0.890 / 48스레드 0.895 / 96스레드 0.848 타깃/분
+      (이 스윕의 측정 조건은 전체 DB 급 = 4종 각 4GB 슬라이스다.
+       축소 DB 약 2GB 에서는 데이터 파이프라인이 건당 1.98초로 훨씬 짧다.)
       즉 n_cpu = min(코어수/2, 8) 이 최적이고, 그 이상 올려도 늘지 않는다.
       AF3 기본값이 min(cpu_count, 8) 이므로 8코어 이상 머신에서는 기본값이 이미
       최적에 가깝다 -- 손대지 않는 것이 정답인 부분이다.
@@ -663,6 +917,11 @@ def parse_args(argv=None):
     p.add_argument("--no-skip", action="store_true", help="이미 끝난 것도 다시 계산한다")
     p.add_argument("--keep-partial", action="store_true",
                    help="미완성 결과 폴더를 partial/ 로 옮기지 않고 그대로 둔다")
+    p.add_argument("--lenient-done", action="store_true",
+                   help="완료 판정을 2026-08 이전 방식으로 되돌린다: 완료 표식 "
+                        "(_summary_confidences.json / _ranking_scores.csv / _model.cif) "
+                        "중 하나만 있어도 완료로 본다. 기본은 3종 모두 있고 크기가 "
+                        "0보다 클 때만 완료다. 예전 출력 폴더를 다시 돌리지 않으려면 쓴다")
     p.add_argument("--docker", default=None, help="도커 실행 명령 강제 지정 (예: 'sudo docker')")
     p.add_argument("--extra-flag", action="append", default=[],
                    help="run_alphafold.py 에 그대로 넘길 추가 플래그. 반드시 등호 형식으로 "
@@ -784,17 +1043,28 @@ def main(argv=None):
         log("재시도 모드: %d건만 실행한다." % len(targets))
 
     # ---- 이미 끝난 것 건너뛰기 -------------------------------------------
+    # 판정 기준은 실행 단계에 맞춘다: --stage msa 는 _data.json 만 보고,
+    # 나머지는 정식 산출물 3종을 본다 (stage_check_mode 참고).
+    chk_mode = stage_check_mode(args.stage)
     if not args.no_skip:
         pending, done = [], 0
+        log("완료 판정 기준: %s"
+            % ("<타깃>_data.json 존재 (--stage msa)" if chk_mode == "data"
+               else "_ranking_scores.csv + _model.cif(.zst) + _summary_confidences.json "
+                    "3종 모두 (크기 0 제외)"))
+        if args.lenient_done:
+            log("  --lenient-done: 완료 표식 하나만 있어도 완료로 본다 (2026-08 이전 동작)")
         for t in targets:
             dirs = find_result_dirs(output_dir, t["name"])
-            if any(outdir_is_complete(d) for d in dirs):
+            if any(outdir_is_complete(d, mode=chk_mode, lenient=args.lenient_done)
+                   for d in dirs):
                 done += 1
                 continue
             # 미완성 폴더가 있으면 AF3 가 타임스탬프 폴더를 새로 만들어 결과가 흩어진다.
             # 삭제하지 않고 partial/ 로 옮겨둔다.
             for d in dirs:
-                if not outdir_is_complete(d) and not args.keep_partial and not args.dry_run:
+                if (not outdir_is_complete(d, mode=chk_mode, lenient=args.lenient_done)
+                        and not args.keep_partial and not args.dry_run):
                     ptdir = work / "partial"
                     ptdir.mkdir(parents=True, exist_ok=True)
                     dest = ptdir / ("%s_%s" % (d.name, datetime.now().strftime("%H%M%S")))
@@ -871,7 +1141,8 @@ def main(argv=None):
     rows, failed = [], []
     for t in ran:
         dirs = find_result_dirs(output_dir, t["name"])
-        ok = any(outdir_is_complete(d) for d in dirs)
+        ok = any(outdir_is_complete(d, mode=chk_mode, lenient=args.lenient_done)
+                 for d in dirs)
         if not ok:
             failed.append(t["name"])
         rows.append({

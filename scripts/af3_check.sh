@@ -5,6 +5,8 @@
 # 목적: GPU/드라이버, 도커 접근성, 도커 이미지 내부 설정, 데이터베이스 구성,
 #       가중치, CPU/RAM/디스크를 한 화면에 찍어서 "무엇이 있고 무엇이 없는지"를
 #       사실로 확인한다.
+#       7d 에서는 이 저장소 보조 스크립트의 파이썬 의존성(python3 버전, fcntl,
+#       matplotlib, rdkit)도 함께 본다. 첫 실행에서 막힐 지점을 미리 알기 위한 것이다.
 #
 # 사용법:
 #   bash af3_check.sh                    # 화면 출력
@@ -16,6 +18,9 @@
 #   [경고]  확인이 필요한 항목
 # =============================================================================
 set -u
+
+# 이 스크립트가 있는 폴더. 7d 에서 옆에 있는 파이썬 스크립트를 점검할 때 쓴다.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
 
 IMAGE="${AF3_IMAGE:-alphafold3}"
 DB_DIR="${AF3_DB_DIR:-$HOME/public_databases}"
@@ -361,6 +366,102 @@ if bad:
 PYEOS
 done
 
+# -----------------------------------------------------------------------------
+head1 "7d. 이 저장소 스크립트의 파이썬 의존성"
+# -----------------------------------------------------------------------------
+cat <<'EOS'
+AF3 본체(도커/conda)와 별개로, 이 저장소의 보조 스크립트가 돌아가는지 본다.
+결론부터: 파이썬 스크립트 5개 중 4개는 표준 라이브러리만 쓰므로 설치할 것이 없다.
+그림을 그리는 af3_visualize.py 하나만 matplotlib 이 필요하다.
+(이 진단 스크립트 af3_check.sh 자체는 bash 라서 파이썬 의존성이 없다.)
+EOS
+echo
+
+PY3=""
+for cand in python3 python; do
+  if command -v "$cand" >/dev/null 2>&1; then PY3="$cand"; break; fi
+done
+
+if [ -z "$PY3" ]; then
+  echo "[경고] python3 을 찾을 수 없다. 이 저장소의 스크립트를 하나도 쓸 수 없다."
+  echo "       설치:  sudo apt install python3      (우분투/데비안)"
+else
+  PY_VER="$("$PY3" -c 'import sys; print("%d.%d.%d" % sys.version_info[:3])' 2>/dev/null || echo '알수없음')"
+  PY_PATH="$(command -v "$PY3")"
+  echo "[측정] python3 경로     : ${PY_PATH}"
+  echo "[측정] python3 버전     : ${PY_VER}"
+  # 3.8 미만이면 f-string 및 dataclasses 사용 부분에서 문제가 생길 수 있다.
+  if "$PY3" -c 'import sys; sys.exit(0 if sys.version_info[:2] >= (3, 8) else 1)' 2>/dev/null; then
+    echo "         -> 3.8 이상. 이 저장소의 스크립트 요구 조건을 만족한다."
+  else
+    echo "[경고]   -> 3.8 미만이다. 이 저장소의 스크립트는 3.8 이상을 가정한다."
+  fi
+
+  # fcntl: run_af3_batch_improved.py 의 중복 실행 방지(flock)에 필요하다.
+  if "$PY3" -c 'import fcntl' 2>/dev/null; then
+    echo "[측정] fcntl 모듈       : 있다 (run_af3_batch_improved.py 의 중복 실행 방지가 동작한다)"
+  else
+    echo "[경고] fcntl 모듈       : 없다. run_af3_batch_improved.py 를 쓸 수 없다"
+    echo "                          (윈도우 기본 파이썬이면 그렇다. 리눅스/macOS 에서 돌려라)"
+  fi
+
+  echo
+  echo "[측정] 표준 라이브러리만 쓰는 파이썬 스크립트 4개 (설치 불필요) - 문법 검사까지 함께 한다:"
+  for s in run_af3_batch_improved.py af3_batch.py af3_collect.py af3_prepare.py; do
+    SP="${SCRIPT_DIR:-$(cd "$(dirname "$0")" && pwd)}/$s"
+    if [ ! -f "$SP" ]; then
+      printf "         %-30s 파일 없음\n" "$s"
+    elif "$PY3" -c "import py_compile,sys; py_compile.compile(sys.argv[1], doraise=True)" "$SP" >/dev/null 2>&1; then
+      printf "         %-30s 정상 (불러올 수 있다)\n" "$s"
+    else
+      printf "         %-30s 문법 오류. 파일이 손상됐을 수 있다\n" "$s"
+    fi
+  done
+
+  echo
+  # matplotlib: 최상위 패키지만 보면 부족하다. 실제 그리기에 쓰는 pyplot 까지 확인한다.
+  MPL_OUT="$("$PY3" - <<'PYEOS' 2>&1
+try:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot  # 실제 그리기 경로
+    print("OK %s" % matplotlib.__version__)
+except Exception as e:
+    print("FAIL %s: %s" % (type(e).__name__, e))
+PYEOS
+)"
+  case "$MPL_OUT" in
+    OK*)
+      echo "[측정] matplotlib       : 있다 (버전 ${MPL_OUT#OK })"
+      echo "                          -> af3_visualize.py 로 그림을 그릴 수 있다."
+      ;;
+    *)
+      echo "[경고] matplotlib       : 쓸 수 없다"
+      echo "                          이유: ${MPL_OUT#FAIL }"
+      echo "                          -> af3_visualize.py 는 죽지 않지만 그림 없이"
+      echo "                             표(visualize_table.csv)와 뷰어 스크립트만 만든다."
+      echo "                          그림이 필요하면:"
+      echo "                             ${PY3} -m pip install matplotlib"
+      echo "                          권한 오류가 나면:"
+      echo "                             ${PY3} -m pip install --user matplotlib"
+      ;;
+  esac
+
+  # 리간드(SMILES)를 쓸 때만 필요한 선택 의존성이다.
+  if "$PY3" -c 'import rdkit' 2>/dev/null; then
+    echo "[측정] rdkit (선택)     : 있다. af3_prepare.py 의 SMILES heavy atom 수를 정확히 센다"
+  else
+    echo "[참고] rdkit (선택)     : 없다. 단백질만 돌리면 상관없다."
+    echo "                          --smiles 로 리간드를 넣을 때만 heavy atom 수가 빈칸이 된다."
+  fi
+fi
+
+echo
+echo "[참고] 한 줄 설치 (그림까지 필요할 때. 저장소 최상위에서):"
+echo "         python3 -m pip install -r requirements.txt"
+echo "       어느 스크립트가 무엇을 필요로 하는지는 docs/dependencies_notes.md 에 있다."
+
+# -----------------------------------------------------------------------------
 head1 "8. 종합"
 # -----------------------------------------------------------------------------
 cat <<'SUMMARY'
@@ -371,6 +472,8 @@ cat <<'SUMMARY'
      이것이 가장 큰 개선 항목이다.
   3) docker 그룹 소속 여부 - sudo 없이 돌릴 수 있으면 배치 스크립트가 단순해진다.
   4) 논리 CPU 수 - --jackhmmer_n_cpu = min(코어수/2, 8) 을 결정한다. 갈래는 1개.
+  5) 7d 의 python3 과 matplotlib - 이 저장소의 보조 스크립트가 첫 실행에서 막히는지.
+     matplotlib 이 없어도 집계(CSV)는 전부 되고 그림만 안 된다.
 
 이 파일을 그대로 저장해서 공유하면 추가 진단에 쓸 수 있다.
 SUMMARY

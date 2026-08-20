@@ -16,11 +16,24 @@ af3_collect.py - AlphaFold 3 출력 폴더를 훑어 타깃별 신뢰도 지표�
 
 의존성
     표준 라이브러리만 쓴다. pandas/numpy 가 없는 서버에서도 그대로 돌아간다.
-    python3.8 이상.
+    설치할 것이 없다. python3.8 이상이면 된다.
+    (그림을 그리는 af3_visualize.py 만 matplotlib 이 필요하고,
+     이 스크립트는 아무것도 필요 없다.)
+
+출력 파일 이름
+    2026-04 부터 -o 를 생략했을 때의 기본 이름이 af3_summary.csv 다
+    (예전에는 af3_결과요약.csv 였다). 옛 이름은 --filename-lang ko 로 그대로 쓸 수 있다
+    (--lang 은 같은 뜻의 별칭이다). CSV 안의 열 이름은 바뀌지 않았다.
 
 사용법
-    # 기본: 출력 폴더 하나를 훑어 CSV 로
-    python3 af3_collect.py vhh_001_out -o af3_결과요약.csv
+    # 기본: 출력 폴더 하나를 훑어 CSV 로 (기본 이름 af3_summary.csv)
+    python3 af3_collect.py vhh_001_out
+
+    # 저장 이름을 직접 정한다
+    python3 af3_collect.py vhh_001_out -o af3_summary.csv
+
+    # 옛 한글 기본 이름(af3_결과요약.csv)을 쓴다
+    python3 af3_collect.py vhh_001_out --filename-lang ko
 
     # 여러 폴더를 한 CSV 로 (조건 비교). --label 로 조건 이름을 붙인다
     python3 af3_collect.py 축소=af3out_reduced 전체=af3out_full -o 비교.csv
@@ -31,10 +44,24 @@ af3_collect.py - AlphaFold 3 출력 폴더를 훑어 타깃별 신뢰도 지표�
     # 상위 후보만 골라내기 (2단계 전략의 재실행 목록 만들기)
     python3 af3_collect.py vhh_001_out --top 100 --top-list top100.txt
 
+타깃명은 어디서 오는가 (2026-08 수정)
+    폴더 이름이 아니라 폴더 안 산출물 파일의 stem 에서 얻는다.
+    AF3 는 출력 폴더가 비어 있지 않으면 <타깃>_<YYYYmmdd_HHMMSS> 폴더를 새로 만드는데
+    (run_alphafold.py:861), 그 안의 파일 stem 은 원래 타깃명 그대로다. 예전에는
+    폴더명을 타깃명으로 썼기 때문에 재실행 결과가 'VHH_004_20260820_101010' 이라는
+    별개 타깃으로 집계됐다. 자세한 근거와 규칙은 docs/naming_fix_notes.md 를 봐라.
+
+    같은 타깃이 여러 폴더에 있으면 기본으로 최신 실행 1건만 집계한다.
+    몇 번 돌았는지는 '실행수' 열, 어느 폴더인지는 '폴더명' 열에 적힌다.
+    전부 보려면 --all-runs 를 쓴다 (그러면 --top 순위가 왜곡되므로 대조용으로만).
+
 주의
     * 이 스크립트는 읽기만 한다. 출력 폴더의 어떤 파일도 수정/삭제하지 않는다.
     * macOS 에서 만든 tar 를 리눅스에서 풀면 '._' 로 시작하는 AppleDouble 사이드카가
       생긴다. UTF-8 이 아니어서 읽으면 죽는다. 이 스크립트는 전부 건너뛴다.
+    * 점(.)으로 시작하는 폴더는 전부 건너뛴다. 배치 러너의 격리 폴더
+      (.af3_incomplete/), staging(.af3_pending_*), lock(.run_af3_batch.lock) 이
+      그 안에 들어간다. 격리 폴더에는 미완료 결과가 있으므로 집계에 섞이면 안 된다.
 """
 
 import argparse
@@ -44,6 +71,7 @@ import math
 import os
 import re
 import sys
+import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -59,9 +87,197 @@ def log(msg):
     print(msg, file=sys.stderr, flush=True)
 
 
+# ---------------------------------------------------------------------------
+# AF3 결과 폴더에서 타깃명을 결정하는 규칙  [정본 블록]
+#
+# 왜 폴더명을 쓰면 안 되는가 (alphafold3 commit 97d2023 에서 확인한 사실)
+#   * 출력 폴더 이름은 입력 파일명이 아니라 JSON 의 name 을 정규화한 값이다
+#     (folding_input.py:1054 sanitised_name -> 공백을 _ 로 바꾸고 [A-Za-z0-9_-.] 만 남긴다.
+#      소문자화는 하지 않는다).
+#   * run_alphafold.py:861~866 - 출력 폴더가 이미 있고 비어 있지 않으면
+#     AF3 는 <폴더명>_<YYYYmmdd_HHMMSS> 폴더를 새로 만든다. 폴더 이름에는
+#     타임스탬프가 붙지만 그 안의 파일 stem 은 원래 타깃명 그대로다.
+#   따라서 폴더명을 타깃명으로 쓰면 재실행 결과가 별개 타깃으로 집계된다.
+#
+# 그래서 이 도구들은 폴더 안 산출물 파일의 stem 에서 타깃명을 얻는다.
+# stem 을 믿을 수 없는 경우의 처리도 아래 resolve_result_dir 에 규정했다.
+#
+# 이 블록은 af3_collect.py / af3_visualize.py / af3_batch.py 에 같은 내용으로
+# 들어 있다 (세 스크립트를 따로 복사해 쓰는 사용자가 있으므로 공용 모듈을 만들지
+# 않았다). 고칠 때는 세 곳을 함께 고쳐라. tests/test_naming.py 가 세 사본이
+# 같은 답을 내는지 검사하므로, 한 곳만 고치면 테스트가 실패한다.
+# ---------------------------------------------------------------------------
+
+# 완료의 정식 근거. 한 묶음 안의 하나라도 있으면 그 묶음은 충족으로 본다
+# (mmCIF 는 --compress_large_output_files 를 쓰면 .cif.zst 로 나온다).
+FINAL_SUFFIX_GROUPS = (
+    ("_ranking_scores.csv",),
+    ("_model.cif", "_model.cif.zst"),
+    ("_summary_confidences.json",),
+)
+# 데이터 파이프라인(MSA)만 돌렸을 때의 산출물. 추론 완료의 근거는 아니다.
+DATA_SUFFIX = "_data.json"
+
+# AF3 가 재실행 때 붙이는 접미사: _YYYYmmdd_HHMMSS
+AF3_TIMESTAMP_RE = re.compile(r"^(?P<base>.+)_(?P<ts>[0-9]{8}_[0-9]{6})$")
+
+
 def is_sidecar(name):
-    """macOS AppleDouble 사이드카(._*) 와 숨은 파일을 걸러낸다."""
+    """집계에서 제외할 이름인지 판정한다. 두 가지를 한꺼번에 막는다.
+
+    1) macOS AppleDouble 사이드카('._foo'). UTF-8 이 아니어서 읽으면 죽는다.
+    2) 점으로 시작하는 모든 항목. 이것은 우연이 아니라 의도다.
+       배치 러너가 출력 폴더 안에 만드는 관리용 항목이 전부 점으로 시작한다:
+         .af3_incomplete/    미완료 결과 격리 보관소. 여기 있는 것은 완료가 아니므로
+                             집계에 섞이면 상위 후보 선별이 틀어진다.
+         .af3_pending_*/     실행 중 staging 폴더. 아직 결과가 아니다.
+         .run_af3_batch.lock 중복 실행 방지 lock 파일.
+       run_af3_batch_improved.py 의 is_safe_output_name 도 '.af3_' 로 시작하는
+       이름을 결과 이름으로 인정하지 않는다. 양쪽이 같은 약속을 지킨다.
+    """
     return name.startswith("._") or name.startswith(".")
+
+
+def strip_af3_timestamp(name):
+    """폴더명에서 AF3 재실행 접미사(_YYYYmmdd_HHMMSS)를 떼어낸다. 없으면 그대로.
+
+    주의: 이것은 stem 을 얻지 못했을 때의 되돌림 경로일 뿐이다. 타깃명이 원래
+    '..._20260820_101010' 인 경우를 잘못 자를 수 있으므로 1순위로 쓰지 않는다.
+    """
+    m = AF3_TIMESTAMP_RE.match(name)
+    return m.group("base") if m else name
+
+
+def af3_timestamp_of(name):
+    """폴더명의 재실행 접미사를 'YYYYmmdd_HHMMSS' 문자열로. 없으면 None."""
+    m = AF3_TIMESTAMP_RE.match(name)
+    return m.group("ts") if m else None
+
+
+def _nonempty(path):
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def scan_stems(dirpath):
+    """폴더 안 산출물 파일을 stem 별로 묶는다.
+
+    반환: {stem: {"final": 충족한 묶음 수, "data": bool}}
+    크기 0 인 파일은 없는 것으로 센다 (디스크가 찼거나 중간에 끊긴 흔적이다).
+    """
+    try:
+        entries = [p for p in dirpath.iterdir()
+                   if p.is_file() and not is_sidecar(p.name)]
+    except OSError:
+        return {}
+    found = {}
+    for group in FINAL_SUFFIX_GROUPS:
+        for p in entries:
+            for suf in group:
+                if p.name.endswith(suf) and _nonempty(p):
+                    stem = p.name[:-len(suf)]
+                    if not stem:
+                        continue
+                    rec = found.setdefault(stem, {"groups": set(), "data": False})
+                    rec["groups"].add(group[0])
+                    break
+    for p in entries:
+        if p.name.endswith(DATA_SUFFIX) and _nonempty(p):
+            stem = p.name[:-len(DATA_SUFFIX)]
+            if stem:
+                found.setdefault(stem, {"groups": set(), "data": False})["data"] = True
+    return {s: {"final": len(v["groups"]), "data": v["data"]}
+            for s, v in found.items()}
+
+
+def resolve_result_dir(dirpath, mode="full"):
+    """결과 폴더 하나의 타깃명과 완료 여부를 판정한다.
+
+    mode="full" : 추론까지 끝났는지 (정식 3종 모두)
+    mode="data" : MSA 단계만 끝났는지 (<타깃>_data.json)
+
+    반환 dict:
+        target      집계표에 쓸 타깃명
+        stem        산출물 파일의 stem (없으면 None)
+        source      타깃명을 어디서 얻었는가: "stem" | "folder" | "folder_stripped"
+        complete    mode 기준 완료 여부
+        n_final     충족한 정식 산출물 묶음 수 (0~3)
+        run_ts      폴더명의 AF3 재실행 접미사 (없으면 None)
+        note        사용자에게 알릴 특이사항 (없으면 "")
+
+    stem 을 신뢰할 수 없는 경우의 처리 (문서화된 규칙):
+      (a) 산출물이 하나도 없다  -> 결과 폴더가 아니다. target 은 폴더명에서
+          타임스탬프를 떼어낸 값(source="folder_stripped"), complete=False.
+      (b) 완료 stem 이 정확히 하나 -> 그것을 쓴다 (정상 경로).
+      (c) 완료 stem 이 여러 개    -> 폴더명(또는 타임스탬프를 뗀 폴더명)과 일치하는
+          stem 을 고른다. 일치하는 것이 없으면 사전순 첫 번째를 쓰고 note 에
+          섞인 stem 을 모두 적는다. 임의로 고르지 않고 규칙을 고정해 두어야
+          같은 폴더를 두 번 집계했을 때 답이 달라지지 않는다.
+      (d) 완료 stem 은 없고 미완료 stem 만 있다 -> 같은 규칙으로 이름만 정하고
+          complete=False. (추론 중 끊긴 폴더. 이름은 알려줘야 재시도할 수 있다.)
+    """
+    stems = scan_stems(dirpath)
+    folder = dirpath.name
+    stripped = strip_af3_timestamp(folder)
+    run_ts = af3_timestamp_of(folder)
+    def _ok(rec):
+        return rec["data"] if mode == "data" else rec["final"] >= 3
+
+    if not stems:
+        return {"target": stripped, "stem": None,
+                "source": "folder_stripped" if run_ts else "folder",
+                "complete": False, "n_final": 0, "run_ts": run_ts,
+                "note": "산출물 파일이 없다"}
+
+    good = sorted(s for s, rec in stems.items() if _ok(rec))
+    pool = good if good else sorted(stems)
+    note = ""
+    if len(pool) == 1:
+        stem = pool[0]
+    else:
+        # (c)/(d): 규칙을 고정한다 - 폴더명 일치 > 타임스탬프 뗀 폴더명 일치 > 사전순
+        if folder in pool:
+            stem = folder
+        elif stripped in pool:
+            stem = stripped
+        else:
+            stem = pool[0]
+        note = ("한 폴더에 stem 이 %d개 섞여 있다(%s). '%s' 를 대표로 골랐다"
+                % (len(pool), ", ".join(pool), stem))
+
+    rec = stems[stem]
+    return {"target": stem, "stem": stem, "source": "stem",
+            "complete": _ok(rec), "n_final": rec["final"], "run_ts": run_ts,
+            "note": note}
+
+
+def dir_run_time(dirpath, info):
+    """결과 폴더의 '실행 시각' 을 비교 가능한 숫자로 준다. 최신 판정에 쓴다.
+
+    1순위: 폴더명의 AF3 재실행 접미사(_YYYYmmdd_HHMMSS). AF3 가 직접 찍은 값이라
+           파일 복사/rsync 로 mtime 이 바뀌어도 살아남는다.
+    2순위: 정식 산출물의 mtime 중 가장 늦은 것 (접미사 없는 첫 실행 폴더).
+    두 경로 모두 실패하면 0.0 (가장 오래된 것으로 취급).
+    """
+    ts = info.get("run_ts")
+    if ts:
+        try:
+            return time.mktime(time.strptime(ts, "%Y%m%d_%H%M%S"))
+        except ValueError:
+            pass
+    best = 0.0
+    try:
+        for p in dirpath.iterdir():
+            if p.is_file() and not is_sidecar(p.name):
+                try:
+                    best = max(best, p.stat().st_mtime)
+                except OSError:
+                    continue
+    except OSError:
+        return 0.0
+    return best
 
 
 def load_json(path):
@@ -213,32 +429,30 @@ def read_ranking_csv(path):
     return rows or None
 
 
-def collect_target(tdir, want_msa=True):
-    """타깃 폴더 하나에서 지표를 뽑는다. 완료되지 않은 폴더는 None."""
-    name = tdir.name
-    summ_p = tdir / ("%s_summary_confidences.json" % name)
-    conf_p = tdir / ("%s_confidences.json" % name)
-    rank_p = tdir / ("%s_ranking_scores.csv" % name)
-    data_p = tdir / ("%s_data.json" % name)
+def collect_target(tdir, want_msa=True, info=None):
+    """타깃 폴더 하나에서 지표를 뽑는다. 완료되지 않은 폴더는 None.
 
-    if not summ_p.exists():
-        # AF3 가 출력 폴더 이름을 소문자화하므로 접두어가 다를 수 있다. 한 번 더 찾는다.
-        cands = [p for p in tdir.glob("*_summary_confidences.json")
-                 if not is_sidecar(p.name)]
-        if not cands:
-            return None
-        summ_p = cands[0]
-        stem = summ_p.name[:-len("_summary_confidences.json")]
-        conf_p = tdir / ("%s_confidences.json" % stem)
-        rank_p = tdir / ("%s_ranking_scores.csv" % stem)
-        data_p = tdir / ("%s_data.json" % stem)
+    타깃명은 폴더 이름이 아니라 resolve_result_dir 이 정한 값(산출물 파일 stem)을 쓴다.
+    폴더 이름을 쓰면 AF3 재실행 폴더(<타깃>_20260820_101010)가 별개 타깃으로 집계된다.
+    """
+    if info is None:
+        info = resolve_result_dir(tdir, mode="full")
+    if not info["complete"]:
+        return None
+    stem = info["stem"]
+    summ_p = tdir / ("%s_summary_confidences.json" % stem)
+    conf_p = tdir / ("%s_confidences.json" % stem)
+    rank_p = tdir / ("%s_ranking_scores.csv" % stem)
+    data_p = tdir / ("%s_data.json" % stem)
 
     summ = load_json(summ_p)
     if summ is None:
         return None
 
     row = {
-        "타깃": name,
+        "타깃": info["target"],
+        "폴더명": tdir.name,
+        "실행시각": info["run_ts"] or "",
         "ranking_score": summ.get("ranking_score"),
         "pTM": summ.get("ptm"),
         "ipTM": summ.get("iptm"),
@@ -414,6 +628,32 @@ def grade_row(row):
 # ---------------------------------------------------------------------------
 # 폴더 순회
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 기본 출력 파일 이름
+#
+# 2026-04 변경: -o 를 생략했을 때의 기본 이름을 af3_결과요약.csv 에서
+#   af3_summary.csv 로 바꿨다.
+#   왜: 한글 파일 이름은 후속 자동화에서 걸린다. 셸 반복문/엑셀 매크로에서
+#       따옴표를 빼먹으면 깨지고, git 은 기본 설정에서 한글 경로를 8진 이스케이프로
+#       출력하며, macOS(NFD) 와 리눅스(NFC) 사이에서 유니코드 정규화가 달라
+#       같은 이름이 다른 이름으로 보인다.
+#   근거: 저장소에 이미 커밋된 예시 파일이 ASCII 이름이었다
+#       (results_example/af3_summary.csv). 도구가 만드는 이름과 저장소 예시
+#       이름이 서로 달랐던 것이 원래 문제다. 새 관례를 만든 것이 아니다.
+#   호환: 옛 이름이 필요하면 두 가지 방법이 있다. 둘 다 내용은 완전히 같다.
+#         1) --filename-lang ko   (기본 이름을 af3_결과요약.csv 로.
+#                                  --lang 은 같은 뜻의 별칭이다 - 이 스크립트는
+#                                  그림을 그리지 않으므로 '라벨 언어' 라는 다른
+#                                  뜻이 없다. af3_visualize.py 의 --lang 은
+#                                  그림 안 라벨 언어이므로 뜻이 다르다)
+#         2) -o af3_결과요약.csv   (직접 지정. 예전 문서의 명령이 이 형태다)
+#   주의: CSV 안의 열 이름(조건/타깃/등급...)은 바꾸지 않았다. 이미 이 열을 참조하는
+#         엑셀 시트가 있을 수 있고, 열 이름은 파일 이름과 달리 도구 연결에서
+#         문제를 일으키지 않는다.
+# ---------------------------------------------------------------------------
+DEFAULT_OUT = {"en": "af3_summary.csv", "ko": "af3_결과요약.csv"}
+
 COLUMNS = ["조건", "타깃", "등급", "경고",
            "ranking_score", "pTM", "ipTM", "pLDDT평균", "pLDDT중앙값",
            "pLDDT최소", "pLDDT_p10", "pLDDT_70이상비율", "pLDDT_90이상비율",
@@ -422,24 +662,94 @@ COLUMNS = ["조건", "타깃", "등급", "경고",
            "토큰수", "원자수", "체인수", "체인ID", "패딩버킷",
            "샘플수", "ranking최고", "ranking최저", "ranking산포",
            "chain_pTM", "chain_ipTM", "min_chain_pair_ipTM",
-           "ranking검산차", "출력경로"]
+           "ranking검산차", "출력경로",
+           # 아래 4개는 타깃명 정규화 때 새로 붙인 열이다. 기존 열의 이름과 순서는
+           # 그대로 두었으므로 이 CSV 를 읽던 스크립트/엑셀 서식은 계속 동작한다.
+           "폴더명", "실행시각", "실행수", "중복정책"]
 
 
-def walk_output_dir(root, label, want_msa=True):
+# ---------------------------------------------------------------------------
+# 같은 타깃이 여러 폴더에 있을 때의 정책
+#
+# 왜 이런 일이 생기는가: AF3 는 출력 폴더가 비어 있지 않으면 <타깃>_<타임스탬프>
+# 폴더를 새로 만든다. 그래서 중단 후 재실행하면 같은 타깃의 결과가 2개 이상 남는다.
+# 2000건 배치에서는 흔한 상황이다.
+#
+# 정한 것: 기본은 '타깃별 최신 실행 1건만 집계표에 넣는다'.
+# 근거
+#   1) 이 CSV 의 용도는 상위 후보 선별이다. 같은 타깃이 두 줄이면 --top 100 이
+#      실제로는 90여 개 타깃만 고르게 되고, 사용자는 그 사실을 알 수 없다.
+#      한 타깃 = 한 줄이어야 순위와 컷오프가 뜻을 갖는다.
+#   2) 실험 기반 초보 사용자가 '어느 줄이 최신인가' 를 폴더명으로 판독해야 하는
+#      상황을 만들지 않는다. 최신 판정은 도구가 하고 근거를 열에 적는다.
+#   3) 버린 실행을 감추지는 않는다. '실행수' 열에 몇 번 돌았는지 적고,
+#      화면 요약에 중복 타깃을 나열하고, --all-runs 로 전부 볼 수 있게 한다.
+# 최신의 기준: 폴더명의 AF3 타임스탬프 접미사가 1순위(AF3 가 직접 찍은 값),
+#   없으면 산출물 파일 mtime. dir_run_time 참고.
+# 접미사 없는 폴더는 첫 실행이므로 접미사 있는 폴더보다 항상 오래된 것으로 취급된다
+#   (첫 실행이 있어야 두 번째 실행에서 접미사가 붙는다).
+# ---------------------------------------------------------------------------
+def walk_output_dir(root, label, want_msa=True, all_runs=False):
+    """출력 폴더를 훑어 (행 목록, 미완료 목록) 을 준다.
+
+    반환하는 행에는 '폴더명', '실행시각', '실행수', '중복정책' 열이 붙는다.
+    미완료 목록은 (타깃명, 폴더명) 쌍이다 - 재시도할 때 필요한 것은 타깃명이다.
+    """
     root = Path(root).expanduser()
     rows, incomplete = [], []
     if not root.is_dir():
         log("오류: 출력 폴더가 없다: %s" % root)
         return rows, incomplete
+
+    # 1) 폴더별로 타깃명과 완료 여부를 먼저 판정한다.
+    #    is_sidecar 로 점으로 시작하는 항목(.af3_incomplete, .af3_pending_*, lock)을
+    #    여기서 통째로 배제한다. 격리된 미완료 결과가 집계에 섞이면 안 된다.
+    resolved = []
     for tdir in sorted(p for p in root.iterdir()
                        if p.is_dir() and not is_sidecar(p.name)):
-        row = collect_target(tdir, want_msa=want_msa)
-        if row is None:
-            incomplete.append(tdir.name)
+        info = resolve_result_dir(tdir, mode="full")
+        if info["note"]:
+            log("  주의: %s - %s" % (tdir.name, info["note"]))
+        resolved.append((tdir, info))
+
+    # 2) 타깃별로 묶어 최신 하나를 고른다.
+    by_target = {}
+    for tdir, info in resolved:
+        if not info["complete"]:
+            incomplete.append((info["target"], tdir.name))
             continue
-        row["조건"] = label
-        row["출력경로"] = str(tdir)
-        rows.append(grade_row(row))
+        by_target.setdefault(info["target"], []).append((tdir, info))
+
+    dup_targets = []
+    for target in sorted(by_target):
+        runs = by_target[target]
+        runs.sort(key=lambda ti: (dir_run_time(ti[0], ti[1]), ti[0].name))
+        if len(runs) > 1:
+            dup_targets.append((target, [t.name for t, _i in runs]))
+        chosen = runs if all_runs else [runs[-1]]   # 정렬 결과의 마지막이 최신
+        for tdir, info in chosen:
+            row = collect_target(tdir, want_msa=want_msa, info=info)
+            if row is None:
+                incomplete.append((info["target"], tdir.name))
+                continue
+            row["조건"] = label
+            row["출력경로"] = str(tdir)
+            row["실행수"] = len(runs)
+            if len(runs) == 1:
+                row["중복정책"] = ""
+            elif all_runs:
+                row["중복정책"] = ("전체표시(최신=%s)" % runs[-1][0].name)
+            else:
+                row["중복정책"] = ("최신선택(%d개중)" % len(runs))
+            rows.append(grade_row(row))
+
+    if dup_targets:
+        log("  같은 타깃이 여러 폴더에 있다 %d건 (%s 정책 적용):"
+            % (len(dup_targets), "전체표시" if all_runs else "최신 1건만 집계"))
+        for target, names in dup_targets[:10]:
+            log("      %-20s %s  -> 최신 %s" % (target, ", ".join(names), names[-1]))
+        if len(dup_targets) > 10:
+            log("      ... (%d건 더)" % (len(dup_targets) - 10))
     return rows, incomplete
 
 
@@ -458,7 +768,20 @@ def main(argv=None):
         epilog=GRADE_DOC)
     ap.add_argument("outputs", nargs="+",
                     help="AF3 출력 폴더. '라벨=경로' 형식으로 조건 이름을 붙일 수 있다")
-    ap.add_argument("-o", "--out", default="af3_결과요약.csv", help="CSV 저장 경로")
+    ap.add_argument("-o", "--out", default=None,
+                    help="CSV 저장 경로. 생략하면 --filename-lang 에 따라 정해진다 "
+                         "(en: af3_summary.csv, ko: af3_결과요약.csv)")
+    ap.add_argument("--filename-lang", "--lang", dest="filename_lang",
+                    choices=["en", "ko"], default="en",
+                    help="-o 를 생략했을 때 쓸 기본 파일 이름의 언어. 기본 en "
+                         "(af3_summary.csv). ko 를 주면 옛 이름 af3_결과요약.csv 를 쓴다. "
+                         "2026-04 에 기본값이 ko 에서 en 으로 바뀌었다. "
+                         "-o 로 직접 준 경로에는 영향이 없다. "
+                         "--lang 은 같은 뜻의 별칭이다")
+    ap.add_argument("--all-runs", action="store_true",
+                    help="같은 타깃이 여러 폴더에 있을 때 전부 집계표에 넣는다 "
+                         "(기본은 최신 1건만). 어느 실행이 어떤 값이었는지 대조할 때 쓴다. "
+                         "이 옵션을 켜면 같은 타깃이 여러 줄이 되므로 --top 순위가 왜곡된다")
     ap.add_argument("--no-msa-depth", action="store_true",
                     help="MSA 깊이 계산을 건너뛴다 (*_data.json 을 읽지 않아 빠르다)")
     ap.add_argument("--top", type=int, default=None,
@@ -482,16 +805,18 @@ def main(argv=None):
     all_rows, all_incomplete = [], []
     for spec in args.outputs:
         label, path = parse_spec(spec)
-        rows, inc = walk_output_dir(path, label, want_msa=not args.no_msa_depth)
+        rows, inc = walk_output_dir(path, label, want_msa=not args.no_msa_depth,
+                                    all_runs=args.all_runs)
         log("%-14s %s : 완료 %d건, 미완성/건너뜀 %d건" % (label, path, len(rows), len(inc)))
         all_rows += rows
-        all_incomplete += [(label, n) for n in inc]
+        # inc 는 (타깃명, 폴더명) 쌍이다. 재시도에 필요한 것은 타깃명이다.
+        all_incomplete += [(label, tgt, dname) for tgt, dname in inc]
 
     if not all_rows:
         log("오류: 집계할 완료 결과가 없다. 출력 폴더 경로를 확인하라.")
         return 1
 
-    out = Path(args.out)
+    out = Path(args.out) if args.out else Path(DEFAULT_OUT[args.filename_lang])
     if out.parent != Path(""):
         out.parent.mkdir(parents=True, exist_ok=True)
     # utf-8-sig: 엑셀에서 한글 열 이름이 깨지지 않게
@@ -505,6 +830,11 @@ def main(argv=None):
     from collections import Counter
     print()
     print("집계 완료: %d건 -> %s" % (len(all_rows), out))
+    if not args.out and args.filename_lang == "en":
+        print("  [알림] 2026-04 부터 기본 파일 이름이 af3_결과요약.csv 에서")
+        print("         af3_summary.csv 로 바뀌었다. 내용과 열 이름은 그대로다.")
+        print("         옛 이름이 필요하면 --filename-lang ko 또는")
+        print("         -o af3_결과요약.csv 를 써라.")
     gc = Counter(r["등급"] for r in all_rows)
     for g in sorted(gc):
         print("  %-12s %4d건 (%.1f%%)" % (g, gc[g], 100.0 * gc[g] / len(all_rows)))
@@ -514,7 +844,8 @@ def main(argv=None):
     if all_incomplete:
         print("  미완성/건너뜀 %d건 (재시도 대상): %s"
               % (len(all_incomplete),
-                 ", ".join(n for _, n in all_incomplete[:10])))
+                 ", ".join(t for _l, t, _d in all_incomplete[:10])))
+        print("     ※ 여기 적힌 것은 타깃명이다 (폴더명이 아니다). 재시도할 때 이 이름을 쓴다.")
     bad = [r["타깃"] for r in all_rows
            if r["ranking검산차"] is not None and abs(r["ranking검산차"]) > 0.02]
     if bad:
@@ -538,12 +869,29 @@ def main(argv=None):
                 "--top-condition <라벨> 로 한 조건만 지정하라."
                 % (len(conds), ", ".join(conds)))
         havekey.sort(key=lambda r: r[key], reverse=True)
+        # 같은 타깃이 여러 줄일 수 있다(--all-runs, 또는 조건이 여러 개).
+        # 상위 N '건' 은 상위 N '타깃' 이어야 뜻이 있으므로 타깃 단위로 중복을 걷어낸다.
+        # (조건이 여러 개일 때는 조건+타깃이 한 단위다 - 조건 비교가 용도이므로)
+        seen, dedup, dropped = set(), [], 0
+        multi_cond = len(conds) > 1 and not args.top_condition
+        for r in havekey:
+            k = (r["조건"], r["타깃"]) if multi_cond else r["타깃"]
+            if k in seen:
+                dropped += 1
+                continue
+            seen.add(k)
+            dedup.append(r)
+        if dropped:
+            log("경고: 같은 타깃의 중복 행 %d개를 상위 선별에서 제외했다 "
+                "(각 타깃의 최고값 행만 남긴다)." % dropped)
+        havekey = dedup
         top = havekey[:args.top]
         print()
         print("상위 %d건 (%s 기준). 이 목록이 2단계 전략의 재실행 후보다." % (len(top), key))
         for r in top[:20]:
-            print("  %-10s %-28s %s=%-8s pLDDT=%-8s 등급=%s"
-                  % (r["조건"], r["타깃"], key, r[key], r["pLDDT평균"], r["등급"]))
+            print("  %-10s %-24s %s=%-8s pLDDT=%-8s 등급=%-10s 폴더=%s"
+                  % (r["조건"], r["타깃"], key, r[key], r["pLDDT평균"], r["등급"],
+                     r.get("폴더명", "")))
         if len(top) > 20:
             print("  ... (%d건 더)" % (len(top) - 20))
         if top:

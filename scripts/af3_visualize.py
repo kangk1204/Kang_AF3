@@ -8,9 +8,16 @@ af3_visualize.py - AlphaFold 3 출력 폴더를 그림으로 만든다.
     <타깃>_pae.png      PAE(예측 정렬 오차) 히트맵. 도메인/사슬이 서로 얼마나 확실히
                         놓였는지 본다
 그리고 폴더 전체에 하나씩
-    af3_요약.png        타깃별 ranking score / pTM / pLDDT 를 한 화면에 비교
-    pymol_색칠.pml      PyMOL 에서 pLDDT 색칠까지 한 번에 하는 스크립트
-    chimerax_색칠.cxc   ChimeraX 용 같은 것
+    confidence_overview.png    타깃별 ranking score / pTM / pLDDT 를 한 화면에 비교
+    visualize_table.csv        그림에 들어간 값을 숫자로 확인하는 표
+    viewer_pymol_plddt.pml     PyMOL 에서 pLDDT 색칠까지 한 번에 하는 스크립트
+    viewer_chimerax_plddt.cxc  ChimeraX 용 같은 것
+
+    (2026-04 변경: 위 4개의 기본 이름이 한글에서 ASCII 로 바뀌었다.
+     옛 이름 af3_요약.png / af3_시각화표.csv / pymol_색칠.pml / chimerax_색칠.cxc 이
+     필요하면 --filename-lang ko 를 붙여라. 파일 내용은 완전히 같다.
+     타깃별 그림 이름 <타깃>_plddt.png / <타깃>_pae.png 의 규약은 바뀌지 않았다.
+     다만 그 <타깃> 은 2026-08 부터 폴더명이 아니라 산출물 stem 에서 얻은 타깃명이다.)
 
 무엇을 읽는가 (실물로 확인한 AF3 v3.0 출력 구조. 검증 호스트 gpu-5070ti)
     <출력폴더>/<타깃>/
@@ -39,8 +46,10 @@ af3_visualize.py - AlphaFold 3 출력 폴더를 그림으로 만든다.
 
 의존성
     matplotlib 하나. 나머지는 표준 라이브러리다.
+        python3 -m pip install matplotlib
     pandas / numpy / biopython 을 쓰지 않는다 (검증 호스트 python3 에 없어서).
-    matplotlib 이 없으면 --no-plot 으로 스크립트/표만 만들 수 있다.
+    matplotlib 이 없어도 이 스크립트는 죽지 않는다. 그림만 건너뛰고 표(CSV)와
+    뷰어 스크립트는 그대로 만든다. 처음부터 그림이 필요 없으면 --no-plot 을 써라.
 
 사용법
     # 폴더 하나를 전부 그린다
@@ -66,8 +75,10 @@ import csv
 import json
 import math
 import os
+import re
 import statistics
 import sys
+import time
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -122,6 +133,45 @@ L = {
 }
 
 _LANG = 0  # 0 = 한국어, 1 = 영문
+
+# ---------------------------------------------------------------------------
+# 출력 파일 이름
+#
+# 2026-04 변경: 기본 파일 이름을 ASCII 로 바꿨다.
+#   왜: 한글 파일 이름은 사람이 읽기엔 좋지만 후속 자동화에서 걸린다.
+#       엑셀 매크로/셸 반복문에서 따옴표를 빼먹으면 깨지고, git 은 기본 설정에서
+#       한글 경로를 8진 이스케이프(\355\225\234...)로 출력해 로그를 읽기 어렵게 하며,
+#       다른 OS 로 파일을 옮기면 유니코드 정규화(macOS NFD 대 리눅스 NFC)가 달라
+#       같은 이름이 다른 이름으로 보인다.
+#   호환: 옛 한글 이름이 필요하면 --filename-lang ko 를 쓴다. 파일 내용은 같다.
+#   참고: 여기 쓰는 ASCII 이름은 저장소에 이미 커밋된 예시 파일 이름과 같다
+#         (results_example/, figures/confidence_overview.png,
+#          examples/viewer_pymol_plddt.pml). 새로 만든 관례가 아니다.
+#
+#   --lang 과 --filename-lang 은 뜻이 다르다. 섞지 마라.
+#     --lang          그림 안 라벨 언어 (원래 의미. 폰트가 없으면 자동 en)
+#     --filename-lang 출력 파일 이름의 언어 (여기서 쓰는 것)
+#   타깃별 그림 이름 <타깃>_plddt.png / <타깃>_pae.png 는 바뀌지 않았다.
+#   다만 그 <타깃> 은 2026-08 부터 폴더명이 아니라 산출물 파일 stem 에서 얻은
+#   타깃명이다 (find_targets 참고). 파일 이름 규약은 그 새 타깃명 위에서 돈다.
+# ---------------------------------------------------------------------------
+TABLE_NAME_EN = "visualize_table.csv"
+TABLE_NAME_KO = "af3_시각화표.csv"
+SUMMARY_STEM_EN = "confidence_overview"
+SUMMARY_STEM_KO = "af3_요약"
+PYMOL_NAME_EN = "viewer_pymol_plddt.pml"
+PYMOL_NAME_KO = "pymol_색칠.pml"
+CHIMERAX_NAME_EN = "viewer_chimerax_plddt.cxc"
+CHIMERAX_NAME_KO = "chimerax_색칠.cxc"
+
+
+def out_names(filename_lang):
+    """출력 파일 이름 묶음. filename_lang 은 'en' 또는 'ko'."""
+    if filename_lang == "ko":
+        return {"table": TABLE_NAME_KO, "summary_stem": SUMMARY_STEM_KO,
+                "pymol": PYMOL_NAME_KO, "chimerax": CHIMERAX_NAME_KO}
+    return {"table": TABLE_NAME_EN, "summary_stem": SUMMARY_STEM_EN,
+            "pymol": PYMOL_NAME_EN, "chimerax": CHIMERAX_NAME_EN}
 
 
 def t(key):
@@ -213,9 +263,197 @@ def setup_font(force_font, lang_opt):
 # 읽기
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# AF3 결과 폴더에서 타깃명을 결정하는 규칙  [정본 블록]
+#
+# 왜 폴더명을 쓰면 안 되는가 (alphafold3 commit 97d2023 에서 확인한 사실)
+#   * 출력 폴더 이름은 입력 파일명이 아니라 JSON 의 name 을 정규화한 값이다
+#     (folding_input.py:1054 sanitised_name -> 공백을 _ 로 바꾸고 [A-Za-z0-9_-.] 만 남긴다.
+#      소문자화는 하지 않는다).
+#   * run_alphafold.py:861~866 - 출력 폴더가 이미 있고 비어 있지 않으면
+#     AF3 는 <폴더명>_<YYYYmmdd_HHMMSS> 폴더를 새로 만든다. 폴더 이름에는
+#     타임스탬프가 붙지만 그 안의 파일 stem 은 원래 타깃명 그대로다.
+#   따라서 폴더명을 타깃명으로 쓰면 재실행 결과가 별개 타깃으로 집계된다.
+#
+# 그래서 이 도구들은 폴더 안 산출물 파일의 stem 에서 타깃명을 얻는다.
+# stem 을 믿을 수 없는 경우의 처리도 아래 resolve_result_dir 에 규정했다.
+#
+# 이 블록은 af3_collect.py / af3_visualize.py / af3_batch.py 에 같은 내용으로
+# 들어 있다 (세 스크립트를 따로 복사해 쓰는 사용자가 있으므로 공용 모듈을 만들지
+# 않았다). 고칠 때는 세 곳을 함께 고쳐라. tests/test_naming.py 가 세 사본이
+# 같은 답을 내는지 검사하므로, 한 곳만 고치면 테스트가 실패한다.
+# ---------------------------------------------------------------------------
+
+# 완료의 정식 근거. 한 묶음 안의 하나라도 있으면 그 묶음은 충족으로 본다
+# (mmCIF 는 --compress_large_output_files 를 쓰면 .cif.zst 로 나온다).
+FINAL_SUFFIX_GROUPS = (
+    ("_ranking_scores.csv",),
+    ("_model.cif", "_model.cif.zst"),
+    ("_summary_confidences.json",),
+)
+# 데이터 파이프라인(MSA)만 돌렸을 때의 산출물. 추론 완료의 근거는 아니다.
+DATA_SUFFIX = "_data.json"
+
+# AF3 가 재실행 때 붙이는 접미사: _YYYYmmdd_HHMMSS
+AF3_TIMESTAMP_RE = re.compile(r"^(?P<base>.+)_(?P<ts>[0-9]{8}_[0-9]{6})$")
+
+
 def is_sidecar(name):
-    """macOS AppleDouble 사이드카(._*) 와 숨은 파일. 읽으면 UTF-8 오류로 죽는다."""
+    """집계에서 제외할 이름인지 판정한다. 두 가지를 한꺼번에 막는다.
+
+    1) macOS AppleDouble 사이드카('._foo'). UTF-8 이 아니어서 읽으면 죽는다.
+    2) 점으로 시작하는 모든 항목. 이것은 우연이 아니라 의도다.
+       배치 러너가 출력 폴더 안에 만드는 관리용 항목이 전부 점으로 시작한다:
+         .af3_incomplete/    미완료 결과 격리 보관소. 여기 있는 것은 완료가 아니므로
+                             집계에 섞이면 상위 후보 선별이 틀어진다.
+         .af3_pending_*/     실행 중 staging 폴더. 아직 결과가 아니다.
+         .run_af3_batch.lock 중복 실행 방지 lock 파일.
+       run_af3_batch_improved.py 의 is_safe_output_name 도 '.af3_' 로 시작하는
+       이름을 결과 이름으로 인정하지 않는다. 양쪽이 같은 약속을 지킨다.
+    """
     return name.startswith("._") or name.startswith(".")
+
+
+def strip_af3_timestamp(name):
+    """폴더명에서 AF3 재실행 접미사(_YYYYmmdd_HHMMSS)를 떼어낸다. 없으면 그대로.
+
+    주의: 이것은 stem 을 얻지 못했을 때의 되돌림 경로일 뿐이다. 타깃명이 원래
+    '..._20260820_101010' 인 경우를 잘못 자를 수 있으므로 1순위로 쓰지 않는다.
+    """
+    m = AF3_TIMESTAMP_RE.match(name)
+    return m.group("base") if m else name
+
+
+def af3_timestamp_of(name):
+    """폴더명의 재실행 접미사를 'YYYYmmdd_HHMMSS' 문자열로. 없으면 None."""
+    m = AF3_TIMESTAMP_RE.match(name)
+    return m.group("ts") if m else None
+
+
+def _nonempty(path):
+    try:
+        return path.is_file() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
+def scan_stems(dirpath):
+    """폴더 안 산출물 파일을 stem 별로 묶는다.
+
+    반환: {stem: {"final": 충족한 묶음 수, "data": bool}}
+    크기 0 인 파일은 없는 것으로 센다 (디스크가 찼거나 중간에 끊긴 흔적이다).
+    """
+    try:
+        entries = [p for p in dirpath.iterdir()
+                   if p.is_file() and not is_sidecar(p.name)]
+    except OSError:
+        return {}
+    found = {}
+    for group in FINAL_SUFFIX_GROUPS:
+        for p in entries:
+            for suf in group:
+                if p.name.endswith(suf) and _nonempty(p):
+                    stem = p.name[:-len(suf)]
+                    if not stem:
+                        continue
+                    rec = found.setdefault(stem, {"groups": set(), "data": False})
+                    rec["groups"].add(group[0])
+                    break
+    for p in entries:
+        if p.name.endswith(DATA_SUFFIX) and _nonempty(p):
+            stem = p.name[:-len(DATA_SUFFIX)]
+            if stem:
+                found.setdefault(stem, {"groups": set(), "data": False})["data"] = True
+    return {s: {"final": len(v["groups"]), "data": v["data"]}
+            for s, v in found.items()}
+
+
+def resolve_result_dir(dirpath, mode="full"):
+    """결과 폴더 하나의 타깃명과 완료 여부를 판정한다.
+
+    mode="full" : 추론까지 끝났는지 (정식 3종 모두)
+    mode="data" : MSA 단계만 끝났는지 (<타깃>_data.json)
+
+    반환 dict:
+        target      집계표에 쓸 타깃명
+        stem        산출물 파일의 stem (없으면 None)
+        source      타깃명을 어디서 얻었는가: "stem" | "folder" | "folder_stripped"
+        complete    mode 기준 완료 여부
+        n_final     충족한 정식 산출물 묶음 수 (0~3)
+        run_ts      폴더명의 AF3 재실행 접미사 (없으면 None)
+        note        사용자에게 알릴 특이사항 (없으면 "")
+
+    stem 을 신뢰할 수 없는 경우의 처리 (문서화된 규칙):
+      (a) 산출물이 하나도 없다  -> 결과 폴더가 아니다. target 은 폴더명에서
+          타임스탬프를 떼어낸 값(source="folder_stripped"), complete=False.
+      (b) 완료 stem 이 정확히 하나 -> 그것을 쓴다 (정상 경로).
+      (c) 완료 stem 이 여러 개    -> 폴더명(또는 타임스탬프를 뗀 폴더명)과 일치하는
+          stem 을 고른다. 일치하는 것이 없으면 사전순 첫 번째를 쓰고 note 에
+          섞인 stem 을 모두 적는다. 임의로 고르지 않고 규칙을 고정해 두어야
+          같은 폴더를 두 번 집계했을 때 답이 달라지지 않는다.
+      (d) 완료 stem 은 없고 미완료 stem 만 있다 -> 같은 규칙으로 이름만 정하고
+          complete=False. (추론 중 끊긴 폴더. 이름은 알려줘야 재시도할 수 있다.)
+    """
+    stems = scan_stems(dirpath)
+    folder = dirpath.name
+    stripped = strip_af3_timestamp(folder)
+    run_ts = af3_timestamp_of(folder)
+    def _ok(rec):
+        return rec["data"] if mode == "data" else rec["final"] >= 3
+
+    if not stems:
+        return {"target": stripped, "stem": None,
+                "source": "folder_stripped" if run_ts else "folder",
+                "complete": False, "n_final": 0, "run_ts": run_ts,
+                "note": "산출물 파일이 없다"}
+
+    good = sorted(s for s, rec in stems.items() if _ok(rec))
+    pool = good if good else sorted(stems)
+    note = ""
+    if len(pool) == 1:
+        stem = pool[0]
+    else:
+        # (c)/(d): 규칙을 고정한다 - 폴더명 일치 > 타임스탬프 뗀 폴더명 일치 > 사전순
+        if folder in pool:
+            stem = folder
+        elif stripped in pool:
+            stem = stripped
+        else:
+            stem = pool[0]
+        note = ("한 폴더에 stem 이 %d개 섞여 있다(%s). '%s' 를 대표로 골랐다"
+                % (len(pool), ", ".join(pool), stem))
+
+    rec = stems[stem]
+    return {"target": stem, "stem": stem, "source": "stem",
+            "complete": _ok(rec), "n_final": rec["final"], "run_ts": run_ts,
+            "note": note}
+
+
+def dir_run_time(dirpath, info):
+    """결과 폴더의 '실행 시각' 을 비교 가능한 숫자로 준다. 최신 판정에 쓴다.
+
+    1순위: 폴더명의 AF3 재실행 접미사(_YYYYmmdd_HHMMSS). AF3 가 직접 찍은 값이라
+           파일 복사/rsync 로 mtime 이 바뀌어도 살아남는다.
+    2순위: 정식 산출물의 mtime 중 가장 늦은 것 (접미사 없는 첫 실행 폴더).
+    두 경로 모두 실패하면 0.0 (가장 오래된 것으로 취급).
+    """
+    ts = info.get("run_ts")
+    if ts:
+        try:
+            return time.mktime(time.strptime(ts, "%Y%m%d_%H%M%S"))
+        except ValueError:
+            pass
+    best = 0.0
+    try:
+        for p in dirpath.iterdir():
+            if p.is_file() and not is_sidecar(p.name):
+                try:
+                    best = max(best, p.stat().st_mtime)
+                except OSError:
+                    continue
+    except OSError:
+        return 0.0
+    return best
 
 
 def load_json(path):
@@ -227,39 +465,92 @@ def load_json(path):
         return None
 
 
-def find_targets(root, only):
-    """출력 폴더 아래에서 <타깃>_summary_confidences.json 을 가진 폴더를 찾는다."""
+def find_targets(root, only, all_runs=False, include_partial=False):
+    """출력 폴더 아래에서 완료된 AF3 결과 폴더를 찾아 (타깃명, 폴더, stem) 목록으로.
+
+    타깃명은 폴더 이름이 아니라 폴더 안 산출물 파일의 stem 이다.
+    AF3 재실행 폴더(<타깃>_20260820_101010)의 그림 파일 이름이 폴더명으로 나오면
+    af3_collect.py 의 집계표와 이름이 어긋나 대조가 안 된다. 그래서 두 도구가
+    같은 규칙(resolve_result_dir)을 쓴다. docs/naming_fix_notes.md 참고.
+
+    같은 타깃이 여러 폴더에 있으면 기본으로 최신 실행 1건만 그린다.
+    (그렇지 않으면 같은 타깃의 그림이 여러 장 생겨 어느 것이 최신인지 알 수 없다.)
+    --all-runs 를 주면 전부 그리고, 파일 이름에 실행 시각을 붙여 구분한다.
+
+    --only 는 타깃명으로 고른다. 예전에는 폴더명으로 골랐는데, 재실행 폴더는
+    사용자가 폴더명을 알 수 없으므로 타깃명 쪽이 맞다. 폴더명을 줘도 받아준다
+    (예전 사용법을 깨지 않기 위해서다).
+    """
     root = Path(root)
     if not root.is_dir():
         die("'%s' 는 폴더가 아니다. AF3 --output_dir 로 준 폴더를 지정해라." % root)
     picks = set(x.strip() for x in only.split(",")) if only else None
-    found = []
+
     sidecars = 0
+    resolved = []
     for child in sorted(root.iterdir()):
         if is_sidecar(child.name):
-            sidecars += 1
+            # 점으로 시작하는 항목은 전부 건너뛴다. 여기에 배치 러너의
+            # 격리 폴더(.af3_incomplete/), staging(.af3_pending_*),
+            # lock(.run_af3_batch.lock) 이 들어간다. 격리 폴더 안은 미완료
+            # 결과이므로 그림을 그려서도, 표에 넣어서도 안 된다.
+            if child.name.startswith("._"):
+                sidecars += 1
             continue
         if not child.is_dir():
             continue
-        name = child.name
-        if picks and name not in picks:
-            continue
-        summ = child / ("%s_summary_confidences.json" % name)
-        if not summ.exists():
-            cand = [f for f in child.glob("*_summary_confidences.json")
-                    if not is_sidecar(f.name)]
-            if not cand:
+        info = resolve_result_dir(child, mode="full")
+        if info["note"]:
+            log("  주의: %s - %s" % (child.name, info["note"]))
+        if not info["complete"]:
+            # 정식 완료가 아니다. 기본은 건너뛴다 (af3_collect.py 와 같은 기준).
+            # --include-partial 은 예전 동작이다: summary 파일만 있어도 그린다.
+            # 추론 중 끊긴 결과를 보고 판단해야 할 때만 쓴다.
+            if not (include_partial and info["stem"]
+                    and (child / ("%s_summary_confidences.json"
+                                  % info["stem"])).is_file()):
                 continue
-            summ = cand[0]
-        stem = summ.name[:-len("_summary_confidences.json")]
-        found.append((name, child, stem))
+            log("  %s: 정식 완료가 아니다 (정식 산출물 %d/3). --include-partial 로 그린다."
+                % (info["target"], info["n_final"]))
+        resolved.append((child, info))
+
+    # 타깃별로 묶어 최신을 고른다
+    by_target = {}
+    for child, info in resolved:
+        by_target.setdefault(info["target"], []).append((child, info))
+
+    found = []
+    for target in sorted(by_target):
+        # --only 는 타깃명으로 고르지만 폴더명도 받아준다 (예전 사용법 호환)
+        runs = by_target[target]
+        if picks and target not in picks and not any(c.name in picks for c, _ in runs):
+            continue
+        runs.sort(key=lambda ci: (dir_run_time(ci[0], ci[1]), ci[0].name))
+        chosen = runs if all_runs else [runs[-1]]
+        if len(runs) > 1:
+            log("  %s: 결과 폴더가 %d개다 (%s). %s"
+                % (target, len(runs), ", ".join(c.name for c, _ in runs),
+                   "전부 그린다" if all_runs
+                   else "최신(%s)만 그린다. 전부 보려면 --all-runs" % runs[-1][0].name))
+        for child, info in chosen:
+            # 그림 파일 이름은 타깃명으로 짓는다. --all-runs 로 같은 타깃이
+            # 여러 개일 때만 실행 시각을 덧붙여 덮어쓰기를 막는다.
+            label = target
+            if all_runs and len(runs) > 1 and info["run_ts"]:
+                # 구분자는 '__' 를 쓴다. '@' 는 PyMOL 객체 이름에서 선택 문법과
+                # 부딪힐 수 있고, 파일 이름으로도 셸에서 다루기 번거롭다.
+                label = "%s__%s" % (target, info["run_ts"])
+            found.append((label, child, info["stem"]))
+
     if sidecars:
         log("주의: '%s' 에 AppleDouble 사이드카가 %d개 있다. 건너뛰었지만,"
             % (root, sidecars))
         log("      AF3 자체는 이것 때문에 죽는다. 지워라:  find %s -name '._*' -delete" % root)
     if not found:
-        die("'%s' 아래에서 AF3 출력 타깃을 찾지 못했다.\n"
+        die("'%s' 아래에서 완료된 AF3 출력 타깃을 찾지 못했다.\n"
             "      기대한 구조: %s/<타깃이름>/<타깃이름>_summary_confidences.json\n"
+            "      완료 판정은 _ranking_scores.csv, _model.cif(또는 .cif.zst),\n"
+            "      _summary_confidences.json 세 개가 모두 있고 크기가 0보다 큰 것이다.\n"
             "      실제 내용: %s"
             % (root, root, ", ".join(p.name for p in sorted(Path(root).iterdir())[:8])))
     return found
@@ -400,6 +691,58 @@ def read_ranking_csv(path):
 # ---------------------------------------------------------------------------
 # 그림
 # ---------------------------------------------------------------------------
+
+def probe_matplotlib():
+    """matplotlib 을 실제로 쓸 수 있는지 확인한다.
+
+    최상위 패키지 import 만으로는 부족하다. matplotlib 이 설치돼 있어도
+    pyplot 이 freetype/백엔드 결손으로 깨지는 환경이 있고, 그 경우 예전 코드는
+    그림을 그리는 시점에 ImportError 로 죽어서 표까지 잃었다.
+    그래서 그리기에 실제로 쓰는 pyplot 까지 여기서 미리 불러 본다.
+
+    반환: (쓸 수 있는가, 못 쓰는 이유 문자열)
+    """
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot  # noqa: F401  실제 그리기 경로를 미리 확인
+        return True, ""
+    except Exception as e:
+        # ImportError 뿐 아니라 백엔드 설정 실패(OSError 등)도 함께 잡는다.
+        return False, "%s: %s" % (type(e).__name__, e)
+
+
+def warn_no_matplotlib(why, names=None):
+    """matplotlib 을 못 쓸 때 초보 사용자가 다음에 무엇을 할지 알 수 있게 알린다.
+
+    names 는 out_names() 의 반환값이다. 실제로 만들 파일 이름을 그대로 적어야
+    사용자가 폴더에서 찾을 수 있다 (--filename-lang ko 면 한글 이름이 나온다).
+    """
+    if names is None:
+        names = out_names("en")
+    log("")
+    log("-" * 70)
+    log("주의: 그림을 그릴 수 없다. matplotlib 을 불러오지 못했다.")
+    if why:
+        log("      이유: %s" % why)
+    log("")
+    log("      그래도 이 스크립트는 계속 돌아간다. 아래 3개는 그대로 만든다:")
+    log("        - %s   (그림에 들어갈 값을 그대로 담은 표)" % names["table"])
+    log("        - %s      (PyMOL 에서 pLDDT 색칠)" % names["pymol"])
+    log("        - %s   (ChimeraX 에서 같은 것)" % names["chimerax"])
+    log("      구조를 눈으로 확인하는 데에는 이 뷰어 스크립트만으로 충분하다.")
+    log("")
+    log("      그림까지 필요하면 설치해라 (한 줄이면 된다):")
+    log("        python3 -m pip install matplotlib")
+    log("")
+    log("      권한 오류(externally-managed-environment 등)가 나면 사용자 영역에 깔아라:")
+    log("        python3 -m pip install --user matplotlib")
+    log("")
+    log("      애초에 그림이 필요 없으면 --no-plot 을 붙여라. 그러면 이 경고도 안 나온다:")
+    log("        python3 af3_visualize.py <AF3출력폴더> -o 그림 --no-plot")
+    log("-" * 70)
+    log("")
+
 
 def style():
     """글꼴 크기 사다리와 축 모양. 세 단계만 쓴다 (제목/축=9, 범례=8, 눈금=7)."""
@@ -743,8 +1086,14 @@ view
 """
 
 
-def write_viewer_scripts(outdir, targets, verify_note, relative_to):
-    """PyMOL / ChimeraX 스크립트를 만든다. 경로는 outdir 기준 상대경로."""
+def write_viewer_scripts(outdir, targets, verify_note, relative_to, names=None):
+    """PyMOL / ChimeraX 스크립트를 만든다. 경로는 outdir 기준 상대경로.
+
+    targets 의 이름은 find_targets 가 정한 타깃명(산출물 stem 기준)이다.
+    뷰어 객체 이름이 폴더명이 되면 af3_collect.py 의 집계표와 대조가 안 된다.
+    """
+    if names is None:
+        names = out_names("en")
     pml_lines = []
     cxc_lines = []
     for name, cifpath in targets:
@@ -755,14 +1104,14 @@ def write_viewer_scripts(outdir, targets, verify_note, relative_to):
         pml_lines.append('load %s, %s' % (rel, name))
         cxc_lines.append('open %s name %s' % (rel, name))
 
-    p1 = os.path.join(outdir, "pymol_색칠.pml")
+    p1 = os.path.join(outdir, names["pymol"])
     with open(p1, "w", encoding="utf-8") as fh:
-        fh.write(PYMOL_TEMPLATE.format(script_name="pymol_색칠.pml",
+        fh.write(PYMOL_TEMPLATE.format(script_name=names["pymol"],
                                        load_lines="\n".join(pml_lines),
                                        verify_note=verify_note))
-    p2 = os.path.join(outdir, "chimerax_색칠.cxc")
+    p2 = os.path.join(outdir, names["chimerax"])
     with open(p2, "w", encoding="utf-8") as fh:
-        fh.write(CHIMERAX_TEMPLATE.format(script_name="chimerax_색칠.cxc",
+        fh.write(CHIMERAX_TEMPLATE.format(script_name=names["chimerax"],
                                           load_lines="\n".join(cxc_lines),
                                           verify_note=verify_note))
     return p1, p2
@@ -787,7 +1136,15 @@ def build_parser():
     p.add_argument("outdir_af3", metavar="AF3출력폴더",
                    help="AF3 --output_dir 로 준 폴더")
     p.add_argument("-o", "--out", required=True, help="그림을 저장할 폴더")
-    p.add_argument("--only", help="이 타깃만 (콤마로 나열)")
+    p.add_argument("--only", help="이 타깃만 (콤마로 나열). 타깃명으로 고른다 "
+                                  "(폴더명을 줘도 받아준다)")
+    p.add_argument("--all-runs", action="store_true",
+                   help="같은 타깃의 결과 폴더가 여러 개일 때 전부 그린다 "
+                        "(기본은 최신 1건). 파일 이름에 실행 시각이 붙는다")
+    p.add_argument("--include-partial", action="store_true",
+                   help="정식 완료가 아닌 폴더도 그린다 (2026-08 이전 동작). "
+                        "기본은 _ranking_scores.csv / _model.cif / "
+                        "_summary_confidences.json 세 개가 모두 있는 폴더만 본다")
     p.add_argument("--max", type=int, default=200,
                    help="개별 그림을 만들 최대 타깃 수. 기본 200 "
                         "(2000건을 다 그리면 시간과 디스크가 낭비된다)")
@@ -799,7 +1156,12 @@ def build_parser():
                         "(matplotlib 이 없는 환경)")
     p.add_argument("--font", help="한글 폰트 이름을 강제로 지정")
     p.add_argument("--lang", choices=["ko", "en"], default="ko",
-                   help="라벨 언어. 기본 ko (폰트가 없으면 자동으로 en)")
+                   help="그림 안 라벨 언어. 기본 ko (폰트가 없으면 자동으로 en). "
+                        "파일 이름과는 무관하다")
+    p.add_argument("--filename-lang", choices=["en", "ko"], default="en",
+                   help="출력 파일 이름. 기본 en (visualize_table.csv 등 ASCII). "
+                        "ko 를 주면 옛 한글 이름(af3_시각화표.csv 등)을 쓴다. "
+                        "2026-04 에 기본값이 ko 에서 en 으로 바뀌었다")
     p.add_argument("--format", default="png", choices=["png", "pdf", "svg"],
                    help="그림 형식. 기본 png")
     return p
@@ -808,15 +1170,13 @@ def build_parser():
 def main(argv=None):
     args = build_parser().parse_args(argv)
 
+    names = out_names(args.filename_lang)
+
     have_mpl = True
     if not args.no_plot:
-        try:
-            import matplotlib
-            matplotlib.use("Agg")
-        except ImportError:
-            have_mpl = False
-            log("주의: matplotlib 이 없어 그림을 그릴 수 없다. 스크립트와 표만 만든다.")
-            log("      설치:  python3 -m pip install matplotlib")
+        have_mpl, why = probe_matplotlib()
+        if not have_mpl:
+            warn_no_matplotlib(why, names)
     else:
         have_mpl = False
 
@@ -827,8 +1187,10 @@ def main(argv=None):
         global _LANG
         _LANG = 1
 
-    targets = find_targets(args.outdir_af3, args.only)
-    log("타깃 %d개를 찾았다." % len(targets))
+    targets = find_targets(args.outdir_af3, args.only, all_runs=args.all_runs,
+                           include_partial=args.include_partial)
+    log("타깃 %d개를 찾았다 (이름은 폴더명이 아니라 산출물 파일 stem 에서 얻은 타깃명이다)."
+        % len(targets))
 
     os.makedirs(args.out, exist_ok=True)
 
@@ -849,6 +1211,12 @@ def main(argv=None):
         conf = load_json(d / ("%s_confidences.json" % stem))
         cifp = d / ("%s_model.cif" % stem)
         cif_atoms, cols = (None, None)
+        if not cifp.exists() and (d / ("%s_model.cif.zst" % stem)).exists():
+            # --compress_large_output_files 로 돌린 결과다. zstd 압축은 표준
+            # 라이브러리로 못 푼다. 그림은 confidences.json 만으로 그리고
+            # (값의 출처는 원래부터 JSON 이다) 잔기 매핑만 토큰으로 되돌린다.
+            log("  주의: %s 의 mmCIF 가 .cif.zst 다. 잔기 매핑을 토큰 단위로 되돌린다. "
+                "구조 뷰어 명령에는 이 타깃이 빠진다 (먼저 zstd -d 로 풀어라)." % name)
         if cifp.exists():
             cif_atoms, cols = parse_mmcif_atoms(str(cifp))
             cif_targets.append((name, str(cifp.resolve())))
@@ -900,15 +1268,16 @@ def main(argv=None):
         die("읽을 수 있는 타깃이 없었다.")
 
     verify_note = verify_notes[0] if verify_notes else "확인하지 못했다"
-    p1, p2 = write_viewer_scripts(args.out, cif_targets, verify_note, args.outdir_af3)
+    p1, p2 = write_viewer_scripts(args.out, cif_targets, verify_note,
+                                  args.outdir_af3, names)
 
     if have_mpl:
-        ps = os.path.join(args.out, "af3_요약.%s" % args.format)
+        ps = os.path.join(args.out, "%s.%s" % (names["summary_stem"], args.format))
         plot_summary(rows, ps)
         made.append(ps)
 
     # 표도 같이 남긴다 (그림에서 읽은 값을 숫자로 확인할 수 있게)
-    tbl = os.path.join(args.out, "af3_시각화표.csv")
+    tbl = os.path.join(args.out, names["table"])
     fields = ["name", "ranking_score", "ptm", "iptm", "mean_plddt", "min_plddt",
               "n_residue", "n_token", "n_chain", "fraction_disordered",
               "has_clash", "sample_sd"]
@@ -930,6 +1299,16 @@ def main(argv=None):
     print("만든 그림    : %d 개" % len(made))
     print("구조 스크립트: %s , %s" % (os.path.basename(p1), os.path.basename(p2)))
     print("표           : %s" % os.path.basename(tbl))
+    if args.filename_lang == "en":
+        print("")
+        print("[알림] 2026-04 부터 출력 파일 이름 기본값이 ASCII 로 바뀌었다.")
+        print("       옛 이름: %s / %s.%s / %s / %s"
+              % (TABLE_NAME_KO, SUMMARY_STEM_KO, args.format,
+                 PYMOL_NAME_KO, CHIMERAX_NAME_KO))
+        print("       새 이름: %s / %s.%s / %s / %s"
+              % (TABLE_NAME_EN, SUMMARY_STEM_EN, args.format,
+                 PYMOL_NAME_EN, CHIMERAX_NAME_EN))
+        print("       옛 이름을 그대로 쓰려면 --filename-lang ko 를 붙여라. 내용은 같다.")
     print("")
     print("B값 = pLDDT 확인")
     for n in verify_notes:
