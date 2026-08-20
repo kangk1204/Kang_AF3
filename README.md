@@ -36,10 +36,11 @@ VHH/나노바디처럼 **짧은 단백질 수천 건을 AlphaFold 3로 한 번�
 
 ### 이것은 무엇인가
 
-AlphaFold 3를 **대량으로 돌리기 위한 껍데기**다. 구체적으로 다음 6개를 제공한다.
+AlphaFold 3를 **대량으로 돌리기 위한 껍데기**다. 구체적으로 다음 7개를 제공한다.
 
 | 스크립트 | 하는 일 |
 |----------|---------|
+| `scripts/run_af3_batch_improved.py` | **권장 배치 러너.** 완료 판정을 최종 산출물로 하고, 미완료 결과를 격리 보존하며, 중복 실행을 차단한다 |
 | `scripts/af3_check.sh` | 환경 진단. GPU, 드라이버, 가중치, DB, 도커가 제자리에 있는지 |
 | `scripts/af3_prepare.py` | FASTA/CSV → AF3 입력 JSON 생성 |
 | `scripts/af3_batch.py` | 최적화 배치 러너. 컨테이너 1회 기동, MSA/추론 2단계 분리, 재시작·재시도 |
@@ -689,15 +690,60 @@ find vhh_001_in -name '._*' -delete
 
 ## 6. 배치 실행
 
-### 6-1. 가장 짧은 방법
+### 6-1. 권장 방법: `run_af3_batch_improved.py`
 
 ```bash
 cd ~/af3_work
+
+# 1. 계산 없이 상태만 본다. 이미 돌린 결과가 있으면 여기서 점검된다
+python3 scripts/run_af3_batch_improved.py --audit
+
+# 2. 소규모로 시험한다. 실행 전에 경로와 모드를 보여주고 한 번 물어본다
+python3 scripts/run_af3_batch_improved.py --input-dir test_in --output-dir test_out
+
+# 3. 전수 실행. 백그라운드로 돌릴 때는 --yes 가 필요하다
+nohup python3 scripts/run_af3_batch_improved.py --yes > af3.log 2>&1 &
+tail -f af3.log
+```
+
+`./vhh_001_in` 의 JSON 전부를 **컨테이너 1회 기동**으로 순회한다. 기본 폴더 이름은
+파일 위쪽 `INPUT_DIR_NAME` / `OUTPUT_DIR_NAME` 에서 바꾸거나 `--input-dir` /
+`--output-dir` 로 지정한다.
+
+**`--yes` 를 빼면 백그라운드에서 멈춘다.** 확인 질문을 띄울 수 없기 때문이고,
+로그에 그렇게 적힌다. 잘못된 폴더에 2000건을 쏟지 않으려는 안전장치다.
+
+주요 옵션은 다음과 같다.
+
+| 명령 | 하는 일 |
+|------|---------|
+| `--guide` | 경로·모드 설명만 보고 끝낸다. 아무것도 만들지 않는다 |
+| `--audit` | 실행 없이 완료/미완료와 잔여 폴더만 점검. 미완료가 있으면 종료코드 1 |
+| `--mode data` | MSA/템플릿만. **GPU를 할당하지 않아** 추론과 병행할 수 있다 |
+| `--mode inference` | 준비된 입력으로 추론만 |
+| `--per-file` | 파일마다 컨테이너를 따로 띄운다 (느리다. 문제 격리용) |
+| `--cleanup` | 격리 결과와 잔여 staging 을 미리 보여준 뒤 정리 |
+| `--yes` | 확인 질문에 자동 응답. 백그라운드 실행에 필요 |
+
+이 러너가 기존 방식과 다른 점은 세 가지다.
+
+- **완료 판정을 폴더 존재가 아니라 최종 산출물로 한다.** AF3 는 추론 *전* 에
+  `<name>_data.json` 을 쓰므로, 폴더만 보면 추론 중 끊긴 것을 완료로 오인한다.
+  `_ranking_scores.csv`, `_model.cif`, `_summary_confidences.json` 세 개가 모두
+  있고 크기가 0보다 커야 완료로 본다.
+- **미완료 결과를 지우지 않고 `.af3_incomplete/` 로 옮긴다.** 작업별로 최신 하나만
+  보존하므로 반복 실패해도 디스크가 차지 않는다.
+- **같은 출력 폴더에 두 번 실행되지 않는다.** 파일 잠금으로 막고, 어느 프로세스가
+  쓰고 있는지 알려준다.
+
+### 6-2. 더 많은 기능이 필요할 때: `af3run.sh`
+
+```bash
 bash scripts/af3run.sh vhh_001
 ```
 
-`./vhh_001_in` 의 JSON 전부를 **컨테이너 1회 기동**으로 순회한다. 이게 기본이고
-대부분의 경우 이거면 된다.
+경량 스크리닝 설정, 20건 벤치마크, 결과 집계까지 한 명령으로 묶은 래퍼다.
+`af3_batch.py` 를 호출한다.
 
 두 번째 인자로 모드를 준다.
 
@@ -725,7 +771,7 @@ bash scripts/af3run.sh vhh_001 screen     # 4. 전수
 bash scripts/af3run.sh vhh_001 collect    # 5. 집계
 ```
 
-### 6-2. `af3_batch.py` 직접 쓰기
+### 6-3. `af3_batch.py` 직접 쓰기
 
 래퍼가 부족하면 러너를 직접 쓴다. 전체 옵션은 `--help` 로 확인하라.
 
@@ -782,7 +828,7 @@ python3 scripts/af3_batch.py --name vhh_001 --stage both --retry
 --dry-run           실행하지 않고 명령만 출력
 ```
 
-### 6-3. `--buckets` 에 128을 반드시 포함하라
+### 6-4. `--buckets` 에 128을 반드시 포함하라
 
 > ### 경고
 >
@@ -803,7 +849,7 @@ python3 scripts/af3_batch.py --name vhh_001 --stage both --retry
 > `af3_batch.py` 는 기본값에 128을 포함하고 있으므로, 직접 넘기지 않으면 문제없다.
 > 결과 CSV의 `패딩버킷` 열이 256으로 나오면 이 함정에 빠진 것이다.
 
-### 6-4. 2단계 전략: MSA 먼저, 추론 나중
+### 6-5. 2단계 전략: MSA 먼저, 추론 나중
 
 MSA(CPU)와 추론(GPU)을 분리하면 다음이 가능해진다.
 
@@ -855,7 +901,7 @@ MSA 설정은 실측 기준으로 이미 최적값이 기본이다. **`--msa-wor
 
 AF3 기본값이 `min(코어수, 8)` 이므로 **8코어 이상이면 기본값이 이미 최적에 가깝다.**
 
-### 6-5. 진행 상황 보기
+### 6-6. 진행 상황 보기
 
 스크립트는 `<이름>_work/` 에 상태를 남긴다.
 
@@ -882,7 +928,7 @@ nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -l 5
 `utilization.gpu` 가 오르내리면 정상이다. `memory.used` 가 15GB 근처로 크게 나오는 것은
 정상이다 (XLA 선점량, [10절](#10-자주-만나는-문제) 참조).
 
-### 6-6. 중간에 끊겼을 때
+### 6-7. 중간에 끊겼을 때
 
 전원, 커널 OOM, ssh 끊김 등으로 멈추면 **그냥 같은 명령을 다시 실행하면 된다.**
 이미 끝난 타깃은 건너뛴다.
