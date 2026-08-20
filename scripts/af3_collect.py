@@ -254,17 +254,24 @@ def resolve_result_dir(dirpath, mode="full"):
 
 
 def dir_run_time(dirpath, info):
-    """결과 폴더의 '실행 시각' 을 비교 가능한 숫자로 준다. 최신 판정에 쓴다.
+    """결과 폴더의 '실행 순서' 를 비교 가능한 값으로 준다. 최신 판정에 쓴다.
 
-    1순위: 폴더명의 AF3 재실행 접미사(_YYYYmmdd_HHMMSS). AF3 가 직접 찍은 값이라
-           파일 복사/rsync 로 mtime 이 바뀌어도 살아남는다.
-    2순위: 정식 산출물의 mtime 중 가장 늦은 것 (접미사 없는 첫 실행 폴더).
-    두 경로 모두 실패하면 0.0 (가장 오래된 것으로 취급).
+    (계층, 시각) 짝을 준다. 계층을 먼저 보는 이유는 두 시계를 한 척도에서
+    비교할 수 없기 때문이다. 폴더명 접미사는 AF3 가 찍은 벽시계 문자열이고
+    mtime 은 파일시스템 값이라, 크기를 직접 견주면 접미사 폴더가 더 최신인데도
+    오래된 것으로 판정되는 일이 생긴다 (실제로 그런 결함이 있었다).
+
+    계층 0: 접미사 없는 폴더. AF3 는 출력 폴더가 비어 있지 않을 때만 접미사
+            폴더를 만들므로, 접미사 없는 쪽이 언제나 첫 실행이다.
+    계층 1: 접미사 있는 재실행 폴더.
+    같은 계층 안에서만 시각을 비교한다. 계층 0 은 정식 산출물 mtime 의 최댓값,
+    계층 1 은 폴더명 접미사를 초로 바꾼 값이다.
+    접미사 파싱이 실패하면 계층 0 으로 떨어뜨려 mtime 으로 비교한다.
     """
     ts = info.get("run_ts")
     if ts:
         try:
-            return time.mktime(time.strptime(ts, "%Y%m%d_%H%M%S"))
+            return (1, time.mktime(time.strptime(ts, "%Y%m%d_%H%M%S")))
         except ValueError:
             pass
     best = 0.0
@@ -276,8 +283,8 @@ def dir_run_time(dirpath, info):
                 except OSError:
                     continue
     except OSError:
-        return 0.0
-    return best
+        return (0, 0.0)
+    return (0, best)
 
 
 def load_json(path):
