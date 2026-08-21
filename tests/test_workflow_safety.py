@@ -66,6 +66,7 @@ def test_markdown_local_links_resolve():
     )
     for snippet in (
         "bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms",
+        "```bash\nnvidia-smi\n```",
         "python3 -m venv --without-pip --system-site-packages ~/af3_plot_env",
         "sudo apt install -y python3-matplotlib python3-venv",
         "~/af3_plot_env/bin/python scripts/af3_visualize.py",

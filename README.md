@@ -26,9 +26,19 @@ git clone https://github.com/kangk1204/Kang_AF3.git ~/af3_work/Kang_AF3
 cd ~/af3_work/Kang_AF3
 ```
 
-NVIDIA 드라이버가 이미 동작하고, Google의 현재 가중치 약관을 직접 확인·수락했다면
-설치 명령은 아래 한 줄이다. Docker, NVIDIA Container Toolkit, 확인된 AF3 소스 커밋으로
-빌드한 이미지, 가중치, full DB, 그림 환경을 설치하고 완료 후 환경을 점검한다.
+설치 전에 NVIDIA 드라이버 상태를 확인한다.
+
+```bash
+nvidia-smi
+```
+
+GPU 이름, Driver Version, Memory-Usage 표가 출력되면 다음 단계로 진행한다. `command not found`
+또는 드라이버와 통신할 수 없다는 오류가 나오면 설치기를 실행하지 않고 NVIDIA 드라이버를
+먼저 설정한다. 설치기는 드라이버를 설치하거나 업그레이드하지 않는다.
+
+Google의 현재 가중치 약관을 직접 확인·수락했다면 설치 명령은 아래 한 줄이다. Docker,
+NVIDIA Container Toolkit, 확인된 AF3 소스 커밋으로 빌드한 이미지, 가중치, full DB,
+그림 환경을 설치하고 완료 후 환경을 점검한다.
 
 ```bash
 bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
