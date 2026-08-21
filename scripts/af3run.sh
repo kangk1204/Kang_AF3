@@ -22,7 +22,7 @@
 #     ./<이름>_in    입력 JSON
 #     ./<이름>_out   결과
 #     ./<이름>_work  작업 공간(로그, MSA 보관, 요약 CSV)
-#     ~/public_databases, ~/af3_models
+#     ~/public_databases_full, ~/af3_models
 # =============================================================================
 set -uo pipefail
 

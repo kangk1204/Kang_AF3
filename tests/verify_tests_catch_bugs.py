@@ -58,8 +58,8 @@ INJECTIONS = [
         "name": "완료판정에서 크기 0 검사를 뺀다",
         "detail": "디스크가 꽉 차서 0바이트로 쓰인 산출물을 완료로 본다.",
         "script": "run_af3_batch_improved.py",
-        "old": """        return path.is_file() and path.stat().st_size > 0""",
-        "new": """        return path.is_file()""",
+        "old": """        return not path.is_symlink() and path.is_file() and path.stat().st_size > 0""",
+        "new": """        return not path.is_symlink() and path.is_file()""",
         "tests": ["test_data_json_only_is_not_complete"],
     },
     {
@@ -119,9 +119,12 @@ INJECTIONS = [
         "script": "run_af3_batch_improved.py",
         "old": """        print("[안내] 다시 실행하면 미완료 작업만 재시도합니다.")
         return 1
-    return 0""",
+    if run_failed:
+        print("[오류] 필수 산출물은 존재하지만 하나 이상의 Docker 실행이 0이 아닌 코드로 끝났습니다.")
+        return 1""",
         "new": """        print("[안내] 다시 실행하면 미완료 작업만 재시도합니다.")
-    return 0""",
+    if run_failed:
+        print("[오류] Docker 실패를 무시합니다.")""",
         "tests": ["test_exit_code_nonzero_when_jobs_remain"],
     },
     {

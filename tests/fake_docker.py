@@ -60,6 +60,7 @@ AF3_STUB_EXIT       중단 시 종료코드 (기본 1)
 AF3_STUB_SLEEP      작업 처리 전 대기 초 (중복 실행 차단 테스트용)
 AF3_STUB_COMPRESS   1 이면 .cif 를 .cif.zst 로 쓴다
 AF3_STUB_ZERO_SIZE  이 이름들의 최종 산출물을 크기 0 으로 쓴다 (쉼표 구분)
+AF3_STUB_EXIT_AFTER_FINALS  최종 산출물을 쓴 뒤 이 종료코드로 실패
 """
 
 from __future__ import annotations
@@ -138,6 +139,7 @@ def parse_docker_args(argv: list[str]) -> dict:
         "gpus": False,
         "image": None,
         "af3_flags": {},
+        "af3_flag_values": {},
         "af3_switches": [],
         "raw": list(argv),
     }
@@ -169,6 +171,7 @@ def parse_docker_args(argv: list[str]) -> dict:
         if token.startswith("--") and "=" in token:
             key, value = token[2:].split("=", 1)
             result["af3_flags"][key] = value
+            result["af3_flag_values"].setdefault(key, []).append(value)
         elif token.startswith("--"):
             result["af3_switches"].append(token[2:])
     return result
@@ -270,11 +273,37 @@ def write_finals(result_dir: Path, name: str, zero: bool) -> None:
 
 
 def main(argv: list[str]) -> int:
+    if not argv:
+        return 0
+    if argv[0] == "info":
+        return 0
+    if argv[0] == "--version":
+        print("Docker version 99.0.0, build stub")
+        return 0
+    if argv[:2] == ["image", "inspect"]:
+        if "--format" in argv:
+            print("stub-image-inspect")
+        return 0
+    if argv[0] in {"images", "image"}:
+        return 0
+
     parsed = parse_docker_args(argv)
     image = parsed["image"] or ""
 
+    # Environment-check probes that do not invoke run_alphafold.py.
+    if "nvidia-smi" in argv:
+        print("Stub NVIDIA GPU, 16384 MiB, 999.0")
+        return 0
+    if "jackhmmer" in argv and "-h" in argv:
+        print("HMMER 3.4 stub\n  --seq_limit <n> : truncate hits")
+        return 0
+
     # --helpfull 처리. 근거 (7): 실제로 종료코드 1 이다.
-    if "helpfull" in parsed["af3_switches"] or "--helpfull" in argv:
+    if (
+        "helpfull" in parsed["af3_switches"]
+        or "--helpfull" in argv
+        or "--help" in argv
+    ):
         log_event({"call": "help", "image": image})
         if "broken" in image:
             # docker 가 이미지를 못 찾은 상황. 근거: docker 관례상 125.
@@ -317,6 +346,7 @@ def main(argv: list[str]) -> int:
             "gpus": parsed["gpus"],
             "per_file": "json_path" in flags,
             "flags": sorted(flags),
+            "af3_flag_values": parsed["af3_flag_values"],
             "switches": sorted(switches),
             "mounts": [[h, c, o] for h, c, o in parsed["mounts"]],
         }
@@ -381,6 +411,9 @@ def main(argv: list[str]) -> int:
         return 1
 
     print(f"Done running {index} fold jobs.")
+    exit_after_finals = int(os.environ.get("AF3_STUB_EXIT_AFTER_FINALS", "0") or 0)
+    if exit_after_finals:
+        return exit_after_finals
     return 0
 
 

@@ -7,7 +7,7 @@ af3_prepare.py - FASTA 나 CSV 로 갖고 있는 서열을 AlphaFold 3 입력 JS
     손에 있는 것:  vhh_2000.fasta  (또는 vhh_2000.csv)
     필요한 것:     vhh_in/01_vhh_001.json, vhh_in/02_vhh_002.json, ... (AF3 가 읽는 형식)
     이 스크립트가 그 변환을 한다. 만들어진 폴더를 그대로
-    af3_batch.py --input_dir vhh_in 또는 run_alphafold.py --input_dir vhh_in 에 넘기면 된다.
+    scripts/run_af3_batch_improved.py --input-dir vhh_in 에 넘기면 된다.
 
 왜 필요한가
     af3_batch.py 는 JSON 을 '읽기만' 한다. 2000 건을 손으로 JSON 으로 쓰는 것은 불가능하고,
@@ -58,10 +58,8 @@ af3_prepare.py - FASTA 나 CSV 로 갖고 있는 서열을 AlphaFold 3 입력 JS
       AF3 가 읽는 순간 죽는다. 이 스크립트는 출력 폴더에 그런 파일이 있으면 경고한다.
       폴더를 옮길 때는 tar 대신 rsync 를 쓰거나, 리눅스에서 직접 만들어라.
     * AF3 패딩 버킷 사다리는 128 에서 시작한다. 토큰 128개까지는 128 버킷,
-      129개부터는 256 버킷이고 256 버킷은 실측으로 2.25배 느리다
-      (정상상태 4.20초 대 9.44초, 검증 호스트 RTX 5070 Ti).
-      즉 130 aa 서열은 129~130 토큰이라 256 버킷으로 넘어간다. 이 스크립트는 그 분포를
-      마지막에 요약해 보여준다. 태그를 붙이거나 링커를 넣어 길이를 늘리기 전에 꼭 봐라.
+      129개부터는 256 버킷이다. 큰 버킷은 연산·메모리를 더 쓰지만 정확한 배수는 GPU와
+      실행 설정마다 다르다. 이 스크립트는 분포만 보여주므로 실제 속도는 대표 입력으로 잰다.
 """
 
 import argparse
@@ -69,8 +67,10 @@ import csv
 import json
 import os
 import re
+import shlex
 import string
 import sys
+import tempfile
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -88,6 +88,52 @@ DEFAULT_BUCKETS = [128, 256, 384, 512, 768, 1024, 1280, 1536, 2048, 2560,
 
 # 표준 아미노산 20종. AF3 는 이 밖의 알파벳도 거부하지 않고 UNK 로 넘기므로 우리가 경고한다.
 STANDARD_AA = set("ACDEFGHIKLMNPQRSTVWY")
+
+
+def csv_safe_cell(value):
+    """Prevent spreadsheet programs from evaluating untrusted text as a formula."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+def suggested_output_dir(input_dir):
+    """Return a sibling output path that can never equal the input path."""
+    path = Path(input_dir).expanduser()
+    name = path.name or "af3"
+    output_name = name[:-3] + "_out" if name.endswith("_in") and len(name) > 3 else name + "_out"
+    return path.parent / output_name
+
+
+def atomic_write_json(path, obj, overwrite=False):
+    """Publish JSON without following a destination symlink or exposing partial data."""
+    destination = Path(path)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".%s." % destination.name,
+        suffix=".tmp",
+        dir=str(destination.parent),
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(obj, handle, indent=2, ensure_ascii=False)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if overwrite:
+            os.replace(temporary, destination)
+            return True
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            return False
+        temporary.unlink()
+        return True
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 # 자주 섞여 들어오는, 아미노산이 아닌 알파벳
 AMBIGUOUS_AA = {
     "B": "Asx (D 또는 N). AF3 는 UNK 로 처리한다",
@@ -176,28 +222,32 @@ def read_fasta(path):
     except OSError as e:
         die("'%s' 를 열 수 없다: %s" % (path, e))
 
-    with fh:
-        for lineno, line in enumerate(fh, 1):
-            line = line.rstrip("\r\n")
-            if not line.strip():
-                continue
-            # ';' 와 '#' 로 시작하는 줄은 주석으로 보고 건너뛴다 (구형 FASTA 관례).
-            if line.lstrip().startswith((";", "#")):
-                continue
-            if line.startswith(">"):
-                if name is not None:
-                    records.append((name, "".join(chunks), header_line))
-                header = line[1:].strip()
-                name = header.split()[0] if header.split() else ""
-                header_line = lineno
-                chunks = []
-            else:
-                if name is None:
-                    die("'%s' 의 %d번째 줄에 '>' 헤더 없이 서열이 먼저 나온다.\n"
-                        "      FASTA 는 반드시 '>이름' 줄로 시작해야 한다." % (path, lineno))
-                chunks.append(line.strip())
-        if name is not None:
-            records.append((name, "".join(chunks), header_line))
+    try:
+        with fh:
+            for lineno, line in enumerate(fh, 1):
+                line = line.rstrip("\r\n")
+                if not line.strip():
+                    continue
+                # ';' 와 '#' 로 시작하는 줄은 주석으로 보고 건너뛴다 (구형 FASTA 관례).
+                if line.lstrip().startswith((";", "#")):
+                    continue
+                if line.startswith(">"):
+                    if name is not None:
+                        records.append((name, "".join(chunks), header_line))
+                    header = line[1:].strip()
+                    name = header.split()[0] if header.split() else ""
+                    header_line = lineno
+                    chunks = []
+                else:
+                    if name is None:
+                        die("'%s' 의 %d번째 줄에 '>' 헤더 없이 서열이 먼저 나온다.\n"
+                            "      FASTA 는 반드시 '>이름' 줄로 시작해야 한다." % (path, lineno))
+                    chunks.append(line.strip())
+            if name is not None:
+                records.append((name, "".join(chunks), header_line))
+    except UnicodeDecodeError:
+        die("'%s' 를 UTF-8 로 읽을 수 없다. AppleDouble 사이드카(._로 시작하는 파일)이거나\n"
+            "      다른 인코딩일 수 있다. `file '%s'` 로 확인해 봐라." % (path, path))
 
     if not records:
         die("'%s' 에서 서열을 하나도 찾지 못했다. FASTA 파일인지 확인해라." % path)
@@ -312,7 +362,8 @@ def validate_records(records, source_label, min_len, max_len, allow_ambiguous):
     """
     problems = []
     seen_name = {}
-    seen_seq = {}
+    seen_file = {}
+    seen_af3 = {}
     ok = []
 
     for idx, (raw_name, raw_seq, lineno) in enumerate(records, 1):
@@ -370,19 +421,37 @@ def validate_records(records, source_label, min_len, max_len, allow_ambiguous):
         seen_name[name] = where
 
         safe = sanitise_name(name)
-        if safe in seen_seq:
+        if safe in seen_file:
             problems.append(Problem(
                 "오류", where, name,
                 "이름을 파일명으로 다듬으면 '%s' 가 되어 %s 와 충돌한다. "
-                "이름에서 특수문자를 빼라" % (safe, seen_seq[safe])))
+                "이름에서 특수문자를 빼라" % (safe, seen_file[safe])))
             continue
-        seen_seq[safe] = "%s(%s)" % (name, where)
+        seen_file[safe] = "%s(%s)" % (name, where)
 
         if safe != name:
             problems.append(Problem("경고", where, name,
                                     "파일명으로 쓸 수 없는 문자가 있어 '%s' 로 바꿨다" % safe))
 
         af3_name = af3_sanitised_name(name)
+        if not af3_name:
+            problems.append(Problem(
+                "오류", where, name,
+                "AF3 정규화 후 출력 폴더 이름이 빈 문자열이다. 영문/숫자를 포함해라"))
+            continue
+        if af3_name.startswith(".") or af3_name[0] in "=+-@":
+            problems.append(Problem(
+                "오류", where, name,
+                "AF3 출력 폴더 이름 '%s' 가 숨은 파일/명령/스프레드시트에서 위험한 문자로 시작한다"
+                % af3_name))
+            continue
+        if af3_name in seen_af3:
+            problems.append(Problem(
+                "오류", where, name,
+                "AF3 정규화 후 출력 폴더 이름 '%s' 가 %s 와 충돌한다"
+                % (af3_name, seen_af3[af3_name])))
+            continue
+        seen_af3[af3_name] = "%s(%s)" % (name, where)
         if af3_name != safe:
             problems.append(Problem(
                 "경고", where, name,
@@ -649,15 +718,21 @@ def main(argv=None):
         die("--seeds 는 정수를 콤마로 나열해야 한다 (예: 1,2,3). 받은 값: %r" % args.seeds)
     if not seeds:
         die("--seeds 가 비어 있다. AF3 는 modelSeeds 가 비면 거부한다. 최소 1개 필요.")
+    if any(seed < 0 or seed > 2**32 - 1 for seed in seeds):
+        die("--seeds 는 32-bit unsigned integer 범위(0~4294967295)여야 한다.")
+    # 중복 seed 는 계산만 반복하므로 입력 순서를 유지하며 제거한다.
+    seeds = list(dict.fromkeys(seeds))
 
     if args.buckets:
         try:
             buckets = sorted({int(b) for b in args.buckets.replace(" ", "").split(",") if b})
         except ValueError:
             die("--buckets 는 정수를 콤마로 나열해야 한다 (예: 128,256,384)")
+        if not buckets or any(bucket <= 0 for bucket in buckets):
+            die("--buckets 는 1 이상의 정수 목록이어야 한다.")
         if 128 not in buckets:
             log("주의: --buckets 에 128 이 없다. AF3 기본 사다리는 128 에서 시작하고,")
-            log("      130 aa 급 VHH 는 128 버킷에 담기지 못하면 2.25배 느려진다.")
+            log("      짧은 입력도 다음 버킷으로 패딩되어 연산량과 메모리가 늘 수 있다.")
     else:
         buckets = DEFAULT_BUCKETS
 
@@ -685,13 +760,26 @@ def main(argv=None):
         source_label = os.path.basename(args.csv)
     log("읽은 서열: %d 건 (%s)" % (len(records), source_label))
 
+    partner_requested = args.partner_fasta is not None or args.partner_seq is not None
     partner_name, partner_seq = read_single_sequence(
-        args.partner_fasta or args.partner_seq, "파트너")
+        args.partner_fasta if args.partner_fasta is not None else args.partner_seq,
+        "파트너",
+    )
+    if partner_requested and not partner_seq:
+        die("파트너 서열을 지정했지만 공백/숫자를 제거한 뒤 비어 있다.")
     if partner_seq:
         bad = sorted({ch for ch in partner_seq if not ch.isalpha()})
         if bad:
             die("파트너 서열에 아미노산이 아닌 문자 %s 가 있다."
                 % ", ".join(repr(b) for b in bad))
+        nonstd = sorted({ch for ch in partner_seq if ch not in STANDARD_AA})
+        if nonstd and not args.allow_ambiguous:
+            die("파트너 서열에 표준 아미노산이 아닌 문자 %s 가 있다. "
+                "허용하려면 --allow-ambiguous 를 명시하라."
+                % ", ".join(nonstd))
+        if len(partner_seq) < args.min_len or len(partner_seq) > args.max_len:
+            die("파트너 서열 길이 %d가 허용 범위 %d~%d 밖이다."
+                % (len(partner_seq), args.min_len, args.max_len))
         log("파트너 사슬: %s, %d 잔기, %d 부"
             % (partner_name or "(이름없음)", len(partner_seq), args.partner_copies))
 
@@ -757,14 +845,15 @@ def main(argv=None):
                              args.ligand_copies, seeds, args.json_version)
         if args.dry_run:
             continue
-        if os.path.exists(path) and not args.overwrite:
+        if os.path.lexists(path) and not args.overwrite:
             skipped += 1
             continue
-        # ensure_ascii=False 로 써도 AF3 는 UTF-8 로 읽는다. 이름에 한글이 있어도 안전.
-        with open(path, "w", encoding="utf-8") as fh:
-            json.dump(job, fh, indent=2, ensure_ascii=False)
-            fh.write("\n")
-        made += 1
+        # 같은 폴더의 임시 파일을 publish하므로 중단 시 부분 JSON을 노출하지 않고,
+        # --overwrite여도 destination symlink의 외부 대상을 따라가지 않는다.
+        if atomic_write_json(path, job, overwrite=args.overwrite):
+            made += 1
+        else:
+            skipped += 1
 
     # ---- 요약 ----
     n = len(rows)
@@ -801,8 +890,8 @@ def main(argv=None):
         print("  버킷 %-5d : %5d 건 (%5.1f%%) %s" % (b, cnt, 100.0 * cnt / n, bar))
     if len(b_count) > 1:
         print("")
-        print("  버킷이 섞여 있다. 실측 기준 버킷 256 은 버킷 128 보다 건당 2.25배 느리다")
-        print("  (정상상태 9.44초 대 4.20초, RTX 5070 Ti). 129 토큰이면 이미 256 버킷이다.")
+        print("  버킷이 섞여 있다. 큰 버킷은 일반적으로 연산·메모리를 더 쓴다.")
+        print("  정확한 시간 차이는 GPU와 실행 설정마다 다르므로 대표 입력으로 측정한다.")
         b128 = b_count.get(128, 0)
         b256 = b_count.get(256, 0)
         if b256 and b128:
@@ -815,8 +904,10 @@ def main(argv=None):
         print("        실제 토큰 수는 AF3 로그의 'Featurising ... with X tokens' 에서 확인해라.")
     print("")
     print("다음 단계")
-    print("  python3 af3_batch.py --input_dir %s --output_dir %s"
-          % (args.outdir, re.sub(r"_in$", "_out", args.outdir) or "out"))
+    next_output = suggested_output_dir(args.outdir)
+    print("  python3 scripts/run_af3_batch_improved.py --input-dir %s --output-dir %s \\"
+          % (shlex.quote(str(args.outdir)), shlex.quote(str(next_output))))
+    print("      --db-dir ~/public_databases_full")
     print("=" * 66)
 
     if args.report:
@@ -824,7 +915,10 @@ def main(argv=None):
         with open(args.report, "w", encoding="utf-8-sig", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=fields)
             w.writeheader()
-            w.writerows(rows)
+            w.writerows(
+                {key: csv_safe_cell(value) for key, value in row.items()}
+                for row in rows
+            )
         log("표를 저장했다: %s" % args.report)
 
     if errors and args.force:

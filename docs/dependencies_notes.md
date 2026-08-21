@@ -1,21 +1,26 @@
 # 의존성과 출력 파일명 정책
 
-작성 근거: 저장소 스크립트 6개의 import 문 전수 조사(AST 파싱)와, matplotlib 이 없는
-환경에서의 실제 실행. 추정과 측정을 구분해 적었다.
+작성 근거: 저장소 Python 스크립트의 import 문 조사와 matplotlib 없는 환경 실행.
+아래 뒤쪽의 행수·검증 로그는 작성 당시 역사적 기록이며 현재 release 판정은
+`python3 tests/run_all.py`를 사용한다.
 
 ---
 
 ## 1. 한 줄 요약
 
-파이썬 스크립트 5개 중 **4개는 표준 라이브러리만** 쓴다. 설치할 것이 없다.
-그림을 그리는 `af3_visualize.py` 하나만 **matplotlib** 이 필요하고, 그것마저 없어도
-스크립트가 죽지 않고 표(CSV)와 뷰어 스크립트는 만든다.
-(나머지 하나인 `af3_check.sh` 는 bash 라서 파이썬 의존성이 없다. 합쳐서 스크립트 6개다.)
+핵심 실행·DB·입력·집계 스크립트는 표준 라이브러리만 쓴다. 그림을 그리는
+`af3_visualize.py`만 matplotlib을 선택적으로 사용하며 없어도 표와 viewer command는 만든다.
+`af3_view3d.py`는 `.zst` 해제에 `zstandard`가 있으면 사용하고, 없으면 system `zstd`로
+fallback한다. `af3_prepare.py`의 rdkit도 SMILES token 추정용 선택 항목이다.
 
 ```
-# 그림까지 필요할 때만. 저장소 최상위에서
-python3 -m pip install -r requirements.txt
+# Ubuntu에서 그림까지 필요할 때. AF3 추론 환경과 분리한다
+sudo apt install python3-matplotlib python3-venv
+python3 -m venv --without-pip --system-site-packages ~/af3_plot_env
 ```
+
+배포 설치기는 서명된 Ubuntu 패키지를 사용한다. `requirements.txt`의 pip 경로는
+Ubuntu 패키지를 쓸 수 없는 별도 환경용 대안이다.
 
 ---
 
@@ -27,18 +32,20 @@ python3 -m pip install -r requirements.txt
 
 | 스크립트 | 행수 | 외부 의존성 | 없으면 어떻게 되는가 |
 |---|---:|---|---|
-| `run_af3_batch_improved.py` | 1255 | **없음** | — |
-| `af3_batch.py` | 925 | **없음** | — |
-| `af3_collect.py` | 563 | **없음** | — |
-| `af3_prepare.py` | 839 | `rdkit` (선택) | SMILES heavy atom 수가 빈칸이 된다. 그 외 정상 |
-| `af3_visualize.py` | 969 | **`matplotlib`** (필수) | 그림만 건너뛴다. 표와 뷰어 스크립트는 만든다 |
-| `af3_check.sh` | 381 | 없음 (bash. 내부에서 `python3` 호출) | — |
+| `run_af3_batch_improved.py`, `af3_batch.py`, `af3_db.py` | 현재 source | 없음 | — |
+| `af3_collect.py`, `af3_stage2.py`, `af3_rankcorr.py` | 현재 source | 없음 | — |
+| `af3_prepare.py` | 현재 source | `rdkit` 선택 | 없으면 SMILES heavy-atom token 추정만 비운다 |
+| `af3_visualize.py` | 현재 source | `matplotlib` 선택 | 없으면 그림만 건너뛴다 |
+| `af3_view3d.py` | 현재 source | `zstandard` 선택 | 없으면 system `zstd`; 둘 다 없으면 압축 CIF를 명확히 거부 |
+| `af3_check.sh`, `af3run.sh` | shell | 외부 Python package 없음 | Docker/HMMER 등 runtime은 별도 점검 |
 
 ### 쓰이는 표준 라이브러리 모듈
 
-전 스크립트를 합쳐서: `argparse`, `collections`, `contextlib`, `csv`, `dataclasses`,
-`datetime`, `fcntl`, `json`, `math`, `os`, `pathlib`, `re`, `shutil`, `socket`,
-`statistics`, `string`, `subprocess`, `sys`, `tempfile`, `time`, `typing`, `__future__`.
+전 스크립트를 합쳐서: `argparse`, `base64`, `collections`, `contextlib`, `csv`,
+`dataclasses`, `datetime`, `fcntl`, `hashlib`, `html`, `io`, `json`, `math`, `os`,
+`pathlib`, `re`, `selectors`, `shlex`, `shutil`, `socket`, `stat`, `statistics`, `string`,
+`subprocess`, `sys`, `tarfile`, `tempfile`, `time`, `typing`, `urllib`, `__future__`.
+`af3_db`는 같은 `scripts/` 폴더의 로컬 모듈이다.
 
 `pandas` / `numpy` / `scipy` / `biopython` 은 **하나도 쓰지 않는다.** 이것은 우연이
 아니라 의도된 것이다. 검증 호스트의 python3 에 이들이 없어서, 평균과 표준편차는
@@ -354,9 +361,10 @@ matplotlib 3.5 가 정말 하한인지 (3.5 로 내려 실행해 보지 않았�
 | `af3_collect.py` 3가지 호출 | 3개 파일 전부 `diff` 동일 |
 | `af3_check.sh` | 종료 0. 기존 10개 절 + 새 7d 절 전부 정상 |
 | `pip install -r requirements.txt` 후 | matplotlib 3.11.1 설치. 그림 5개 생성 확인 |
+| Ubuntu `python3-matplotlib` + `--system-site-packages` venv | matplotlib 3.10.7 import 확인 |
 
-즉 **matplotlib 없이도 표와 뷰어 스크립트가 나오고, requirements.txt 한 줄로 그림까지
-나온다** 는 것을 실제 대상 호스트에서 확인했다.
+즉 **matplotlib 없이도 표와 뷰어 스크립트가 나오고, Ubuntu 패키지나 requirements.txt
+경로로 그림까지 나온다** 는 것을 실제 대상 호스트에서 확인했다.
 
 부수적으로 확인된 사실: 이 호스트의 AF3 conda 환경에 matplotlib 을 넣는 것보다
 별도 venv 를 만드는 편이 안전하다. AF3 는 jax 0.10.2 + CUDA 12.9 로 고정돼 있고

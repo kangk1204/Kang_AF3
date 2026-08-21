@@ -8,8 +8,8 @@ af3_visualize.py - AlphaFold 3 출력 폴더를 그림으로 만든다.
     <타깃>_pae.png      PAE(예측 정렬 오차) 히트맵. 도메인/사슬이 서로 얼마나 확실히
                         놓였는지 본다
 그리고 폴더 전체에 하나씩
-    confidence_overview.png    타깃별 ranking score / pTM / pLDDT 를 한 화면에 비교
-    visualize_table.csv        그림에 들어간 값을 숫자로 확인하는 표
+    confidence_overview.png    타깃별 ranking score / pTM / 원자 가중 평균 pLDDT 비교
+    visualize_table.csv        원자 평균과 잔기 평균을 구분해 남기는 표
     viewer_pymol_plddt.pml     PyMOL 에서 pLDDT 색칠까지 한 번에 하는 스크립트
     viewer_chimerax_plddt.cxc  ChimeraX 용 같은 것
 
@@ -81,6 +81,13 @@ import sys
 import time
 from pathlib import Path
 
+
+def csv_safe_cell(value):
+    """Prevent spreadsheet programs from evaluating untrusted text as a formula."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
 # ---------------------------------------------------------------------------
 # pLDDT 신뢰 구간. AF3/AF2 논문과 EBI AlphaFold DB 가 쓰는 구간과 색을 따랐다.
 # (매우 높음 90+, 높음 70-90, 낮음 50-70, 매우 낮음 <50)
@@ -115,7 +122,7 @@ L = {
     "rank":      ("ranking score (클수록 좋다)", "ranking score (higher = better)"),
     "ptm":       ("pTM (0-1)", "pTM (0-1)"),
     "iptm":      ("ipTM (계면, 0-1)", "ipTM (interface, 0-1)"),
-    "meanpl":    ("평균 pLDDT", "mean pLDDT"),
+    "meanpl":    ("원자 가중 평균 pLDDT", "atom-weighted mean pLDDT"),
     "target":    ("타깃", "Target"),
     "sum_l":     ("어느 후보가 앞서는가: 오른쪽에 있을수록 좋다",
                   "Which candidates lead: further right = better"),
@@ -163,6 +170,8 @@ PYMOL_NAME_EN = "viewer_pymol_plddt.pml"
 PYMOL_NAME_KO = "pymol_색칠.pml"
 CHIMERAX_NAME_EN = "viewer_chimerax_plddt.cxc"
 CHIMERAX_NAME_KO = "chimerax_색칠.cxc"
+MAX_JSON_BYTES = 512 * 1024 * 1024
+MAX_PAE_TOKENS = 6144
 
 
 def out_names(filename_lang):
@@ -332,7 +341,7 @@ def af3_timestamp_of(name):
 
 def _nonempty(path):
     try:
-        return path.is_file() and path.stat().st_size > 0
+        return not path.is_symlink() and path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
 
@@ -465,6 +474,9 @@ def dir_run_time(dirpath, info):
 
 def load_json(path):
     try:
+        path = Path(path)
+        if path.is_symlink() or path.stat().st_size > MAX_JSON_BYTES:
+            raise OSError("symlink 또는 512MB 초과 JSON")
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
     except (OSError, ValueError, UnicodeDecodeError) as e:
@@ -519,6 +531,9 @@ def find_targets(root, only, all_runs=False, include_partial=False):
                 continue
             log("  %s: 정식 완료가 아니다 (정식 산출물 %d/3). --include-partial 로 그린다."
                 % (info["target"], info["n_final"]))
+        if not SAFE_VIEWER_NAME.fullmatch(str(info["target"])):
+            log("  주의: 안전하지 않은 타깃 이름을 건너뜀: %r" % info["target"])
+            continue
         resolved.append((child, info))
 
     # 타깃별로 묶어 최신을 고른다
@@ -604,9 +619,12 @@ def parse_mmcif_atoms(path):
     out = []
     for p in rows:
         try:
+            bfactor = float(p[idx["B_iso_or_equiv"]])
+            if not math.isfinite(bfactor):
+                continue
             out.append((p[idx["auth_asym_id"]], int(p[idx["auth_seq_id"]]),
                         p[idx["label_comp_id"]], p[idx["label_atom_id"]],
-                        float(p[idx["B_iso_or_equiv"]])))
+                        bfactor))
         except ValueError:
             continue
     return out, cols
@@ -623,7 +641,8 @@ def residue_plddt(conf, cif_atoms):
     mmCIF 를 못 읽거나 원자 수가 맞지 않으면 토큰 단위로 되돌아간다
     (표준 아미노산은 토큰 1개 = 잔기 1개다).
     """
-    ap = conf.get("atom_plddts") or []
+    ap = [float(value) for value in (conf.get("atom_plddts") or [])
+          if isinstance(value, (int, float)) and math.isfinite(float(value))]
     if cif_atoms and len(cif_atoms) == len(ap):
         acc = {}
         order = []
@@ -652,7 +671,11 @@ def verify_bfactor(conf, cif_atoms):
 
     반환: (판정, 설명문). 판정은 True(같다) / False(다르다) / None(확인 못함).
     """
-    ap = conf.get("atom_plddts") or []
+    raw_ap = conf.get("atom_plddts") or []
+    ap = [float(value) for value in raw_ap
+          if isinstance(value, (int, float)) and math.isfinite(float(value))]
+    if len(ap) != len(raw_ap):
+        return False, "confidences.json atom_plddts 에 비수치/비유한 값이 있다"
     if not cif_atoms:
         return None, "mmCIF 를 읽지 못해 확인하지 못했다"
     if len(cif_atoms) != len(ap):
@@ -746,7 +769,7 @@ def warn_no_matplotlib(why, names=None):
     log("        python3 -m pip install --user matplotlib")
     log("")
     log("      애초에 그림이 필요 없으면 --no-plot 을 붙여라. 그러면 이 경고도 안 나온다:")
-    log("        python3 af3_visualize.py <AF3출력폴더> -o 그림 --no-plot")
+    log("        python3 %s <AF3출력폴더> -o 그림 --no-plot" % Path(__file__).resolve())
     log("-" * 70)
     log("")
 
@@ -858,9 +881,21 @@ def plot_pae(conf, name, outpath):
     import matplotlib.pyplot as plt
 
     pae = conf.get("pae")
-    if not pae:
+    if not isinstance(pae, list) or not pae:
         return None
     n = len(pae)
+    if n > MAX_PAE_TOKENS:
+        log("  주의: %s PAE가 %d tokens로 안전 한도 %d를 넘어서 그림을 건너뜀"
+            % (name, n, MAX_PAE_TOKENS))
+        return None
+    if not all(
+        isinstance(row, list)
+        and len(row) == n
+        and all(isinstance(value, (int, float)) and math.isfinite(float(value)) for value in row)
+        for row in pae
+    ):
+        log("  주의: %s PAE가 유한한 정사각 행렬이 아니라 그림을 건너뜀" % name)
+        return None
     tc = conf.get("token_chain_ids") or ["A"] * n
     tr = conf.get("token_res_ids") or list(range(1, n + 1))
 
@@ -903,7 +938,7 @@ def plot_pae(conf, name, outpath):
 
 
 def plot_summary(rows, outpath):
-    """타깃 여러 개를 한 화면에 비교. 왼쪽: ranking score, 오른쪽: pTM 대 평균 pLDDT."""
+    """타깃 여러 개를 비교한다. 오른쪽 pLDDT는 집계 CSV와 같은 원자 평균이다."""
     import matplotlib.pyplot as plt
 
     rows = sorted(rows, key=lambda r: (r["ranking_score"] is None,
@@ -945,10 +980,13 @@ def plot_summary(rows, outpath):
                         ["AF3 1위 모델", "같은 서열의 다른 샘플"] if _LANG == 0
                         else ["AF3 top model", "other samples, same input"])
 
-    # --- 오른쪽: pTM 대 평균 pLDDT 산점 ---
-    xs = [r["ptm"] for r in rows if r["ptm"] is not None and r["mean_plddt"] is not None]
-    ys2 = [r["mean_plddt"] for r in rows if r["ptm"] is not None and r["mean_plddt"] is not None]
-    nm = [r["name"] for r in rows if r["ptm"] is not None and r["mean_plddt"] is not None]
+    # --- 오른쪽: pTM 대 원자 가중 평균 pLDDT 산점 ---
+    xs = [r["ptm"] for r in rows
+          if r["ptm"] is not None and r["mean_atom_plddt"] is not None]
+    ys2 = [r["mean_atom_plddt"] for r in rows
+           if r["ptm"] is not None and r["mean_atom_plddt"] is not None]
+    nm = [r["name"] for r in rows
+          if r["ptm"] is not None and r["mean_atom_plddt"] is not None]
     if xs:
         for lo, hi, color, _ko, _en in PLDDT_BANDS:
             ax2.axhspan(lo, hi, color=color, alpha=0.16, lw=0, zorder=0)
@@ -1093,6 +1131,35 @@ view
 """
 
 
+SAFE_VIEWER_NAME = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_.-]*\Z")
+
+
+def validate_viewer_object_name(name):
+    if not isinstance(name, str) or not SAFE_VIEWER_NAME.fullmatch(name):
+        raise ValueError("unsafe viewer object name: %r" % (name,))
+    return name
+
+
+def quote_chimerax(value):
+    text = str(value)
+    if any(ch in text for ch in ("\x00", "\r", "\n")):
+        raise ValueError("unsafe ChimeraX path/name contains control characters")
+    return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def is_safe_artifact_file(path, root):
+    path = Path(path)
+    root = Path(root)
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved.parent == root.resolve()
+
+
 def write_viewer_scripts(outdir, targets, verify_note, relative_to, names=None):
     """PyMOL / ChimeraX 스크립트를 만든다. 경로는 outdir 기준 상대경로.
 
@@ -1104,12 +1171,26 @@ def write_viewer_scripts(outdir, targets, verify_note, relative_to, names=None):
     pml_lines = []
     cxc_lines = []
     for name, cifpath in targets:
+        safe_name = validate_viewer_object_name(name)
         try:
             rel = os.path.relpath(cifpath, start=outdir)
         except ValueError:
             rel = cifpath
-        pml_lines.append('load %s, %s' % (rel, name))
-        cxc_lines.append('open %s name %s' % (rel, name))
+        if any(ch in str(rel) for ch in ("\x00", "\r", "\n")):
+            raise ValueError("unsafe viewer path contains control characters")
+        pml_lines.extend(
+            [
+                "python",
+                "from pymol import cmd",
+                "cmd.load(%r, %r)" % (str(rel), safe_name),
+                "python end",
+            ]
+        )
+        cxc_lines.append(
+            "open %s name %s" % (quote_chimerax(rel), quote_chimerax(safe_name))
+        )
+
+    verify_note = str(verify_note).replace("\r", " ").replace("\n", " ")
 
     p1 = os.path.join(outdir, names["pymol"])
     with open(p1, "w", encoding="utf-8") as fh:
@@ -1224,9 +1305,11 @@ def main(argv=None):
             # (값의 출처는 원래부터 JSON 이다) 잔기 매핑만 토큰으로 되돌린다.
             log("  주의: %s 의 mmCIF 가 .cif.zst 다. 잔기 매핑을 토큰 단위로 되돌린다. "
                 "구조 뷰어 명령에는 이 타깃이 빠진다 (먼저 zstd -d 로 풀어라)." % name)
-        if cifp.exists():
+        if is_safe_artifact_file(cifp, d):
             cif_atoms, cols = parse_mmcif_atoms(str(cifp))
             cif_targets.append((name, str(cifp.resolve())))
+        elif cifp.is_symlink():
+            log("  주의: %s 의 mmCIF 가 symlink라서 외부 파일 유출 방지를 위해 제외한다." % name)
 
         ok, note = (None, "")
         res = []
@@ -1243,7 +1326,13 @@ def main(argv=None):
 
         sc = [s for _sd, _sm, s in read_ranking_csv(
             str(d / ("%s_ranking_scores.csv" % stem)))]
-        mean_pl = statistics.fmean([r[2] for r in res]) if res else None
+        atom_plddts = [
+            float(value)
+            for value in ((conf or {}).get("atom_plddts") or [])
+            if isinstance(value, (int, float)) and math.isfinite(float(value))
+        ]
+        mean_atom_pl = statistics.fmean(atom_plddts) if atom_plddts else None
+        mean_residue_pl = statistics.fmean([r[2] for r in res]) if res else None
 
         rows.append({
             "name": name,
@@ -1255,8 +1344,13 @@ def main(argv=None):
             "n_chain": len(summ.get("chain_ptm") or []),
             "n_token": len(conf.get("pae")) if conf and conf.get("pae") else None,
             "n_residue": len(res) if res else None,
-            "mean_plddt": mean_pl,
+            # mean_plddt/min_plddt는 기존 visualize_table.csv 호환용 잔기 지표다.
+            "mean_plddt": mean_residue_pl,
             "min_plddt": min((r[2] for r in res), default=None),
+            "mean_atom_plddt": mean_atom_pl,
+            "min_atom_plddt": min(atom_plddts, default=None),
+            "mean_residue_plddt": mean_residue_pl,
+            "min_residue_plddt": min((r[2] for r in res), default=None),
             "sample_scores": sc,
             "sample_sd": (statistics.stdev(sc) if len(sc) > 1 else None),
         })
@@ -1286,15 +1380,21 @@ def main(argv=None):
     # 표도 같이 남긴다 (그림에서 읽은 값을 숫자로 확인할 수 있게)
     tbl = os.path.join(args.out, names["table"])
     fields = ["name", "ranking_score", "ptm", "iptm", "mean_plddt", "min_plddt",
+              "mean_atom_plddt", "min_atom_plddt",
+              "mean_residue_plddt", "min_residue_plddt",
               "n_residue", "n_token", "n_chain", "fraction_disordered",
               "has_clash", "sample_sd"]
     with open(tbl, "w", encoding="utf-8-sig", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=fields, extrasaction="ignore")
         w.writeheader()
         for r in rows:
-            w.writerow({k: ("" if r.get(k) is None else
-                            (round(r[k], 4) if isinstance(r[k], float) else r[k]))
-                        for k in fields})
+            w.writerow({
+                k: csv_safe_cell(
+                    "" if r.get(k) is None else
+                    (round(r[k], 4) if isinstance(r[k], float) else r[k])
+                )
+                for k in fields
+            })
 
     # ---- 요약 출력 ----
     print("=" * 70)
@@ -1323,15 +1423,16 @@ def main(argv=None):
     if not verify_notes:
         print("  확인하지 못했다 (mmCIF 또는 confidences.json 을 읽지 못함)")
     print("")
-    print("%-26s %8s %6s %6s %8s %8s" % ("타깃", "ranking", "pTM", "ipTM",
-                                          "평균pLDDT", "잔기"))
+    print("%-26s %8s %6s %6s %12s %8s" % ("타깃", "ranking", "pTM", "ipTM",
+                                            "원자평균pLDDT", "잔기"))
     for r in sorted(rows, key=lambda x: -(x["ranking_score"] or 0))[:15]:
-        print("%-26s %8s %6s %6s %8s %8s" % (
+        print("%-26s %8s %6s %6s %12s %8s" % (
             r["name"][:26],
             "%.3f" % r["ranking_score"] if r["ranking_score"] is not None else "-",
             "%.2f" % r["ptm"] if r["ptm"] is not None else "-",
             "%.2f" % r["iptm"] if r["iptm"] is not None else "-",
-            "%.1f" % r["mean_plddt"] if r["mean_plddt"] is not None else "-",
+            "%.1f" % r["mean_atom_plddt"]
+            if r["mean_atom_plddt"] is not None else "-",
             r["n_residue"] if r["n_residue"] is not None else "-"))
     if len(rows) > 15:
         print("  ... (%d개 더. 전체는 %s 를 봐라)" % (len(rows) - 15, os.path.basename(tbl)))

@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import json
+import inspect
 import os
 import subprocess
 import sys
@@ -493,28 +494,17 @@ def test_lock_file_is_not_mistaken_for_a_result():
     "끝낸 작업을 또 돌리는 버그.",
 )
 def test_pending_list_is_rechecked_after_acquiring_lock():
-    """잠금 획득 후 재판정 코드가 실제로 있는지 확인한다.
-
-    경합 상황을 테스트에서 확정적으로 만들 수 없으므로, 여기서는 재판정이
-    잠금 안쪽에서 일어나는지를 실행으로 확인한다. 잠금 획득 뒤 결과 폴더에
-    완료 산출물을 심어두고, 러너가 그것을 인식하는지 본다.
-    """
-    workspace = Workspace()
-    try:
-        workspace.write_json("a.json", workspace.monomer("vhh_a"))
-        # 미완료로 판정되게 아무 결과도 두지 않는다. 대신 확인 질문 직후,
-        # 즉 잠금 획득 전에 완료 결과를 심는다 -> 잠금 안쪽 재판정이 잡아야 한다.
-        workspace.make_result("vhh_a", stage="full")
-        proc = run_script(RUNNER, default_args(workspace, "--yes"), workspace)
-        check_equal(proc.returncode, 0, f"실행 실패\n{proc.stdout[-1200:]}")
-        check_in("모두 이미 끝나 있습니다", proc.stdout, "완료 결과를 다시 돌렸다")
-        check_equal(
-            [c for c in workspace.stub_calls() if c.get("call") == "run"],
-            [],
-            "완료된 작업으로 AF3 를 실행했다",
-        )
-    finally:
-        workspace.cleanup()
+    """잠금 안쪽에 실제 두 번째 완료 판정이 있는지 구조적으로 확인한다."""
+    mod = load_module(RUNNER)
+    source = inspect.getsource(mod.main)
+    lock_pos = source.find("with output_lock(output_dir):")
+    recheck_pos = source.find("pending = [", lock_pos)
+    check(lock_pos >= 0, "main 에 output lock 이 없다")
+    check(recheck_pos > lock_pos, "잠금 획득 뒤 pending 재판정이 없다")
+    check(
+        "is_complete(output_dir / job.output_name" in source[recheck_pos : recheck_pos + 400],
+        "잠금 안쪽 재판정이 정식 완료 기준을 쓰지 않는다",
+    )
 
 
 @regression(

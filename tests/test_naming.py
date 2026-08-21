@@ -22,6 +22,7 @@
 """
 
 import argparse
+import ast
 import csv
 import importlib.util
 import io
@@ -220,16 +221,22 @@ def test_visualize(root, tmp):
 
     # 뷰어 스크립트의 객체 이름도 타깃명이어야 한다
     pml = (vo / VIS_PYMOL).read_text(encoding="utf-8")
-    # load 줄은 'load <경로>, <객체이름>' 이다. 경로에는 실제 폴더명(타임스탬프
-    # 포함)이 들어가는 것이 맞다. 검사 대상은 콤마 뒤의 객체 이름이다.
-    objs = sorted(ln.rsplit(",", 1)[1].strip() for ln in pml.splitlines()
-                  if ln.startswith("load "))
+    # 보안상 PyMOL command 문자열 대신 Python API + repr 인자를 쓴다.
+    calls = []
+    for line in pml.splitlines():
+        if not line.startswith("cmd.load("):
+            continue
+        call = ast.parse(line, mode="eval").body
+        calls.append((ast.literal_eval(call.args[0]), ast.literal_eval(call.args[1])))
+    objs = sorted(obj for _path, obj in calls)
     check(all(o not in fixture.FORBIDDEN for o in objs),
           "PyMOL 객체 이름에 폴더명(타임스탬프 포함)이 쓰이지 않는다", str(objs))
     check(objs == sorted(fixture.EXPECTED),
           "PyMOL 객체 이름이 실제 타깃명 전체와 일치", str(objs))
-    check(", VHH_004\n" in pml, "재실행 폴더의 구조가 VHH_004 로 로드된다")
-    check(", VHH_009\n" in pml and "zzz_folder_9/VHH_009_model.cif" in pml,
+    check(any(obj == "VHH_004" for _path, obj in calls),
+          "재실행 폴더의 구조가 VHH_004 로 로드된다")
+    check(any(obj == "VHH_009" and "zzz_folder_9/VHH_009_model.cif" in path
+              for path, obj in calls),
           "폴더명이 달라도 객체 이름은 타깃명, 경로는 실제 폴더")
 
     # 그림 파일 이름.

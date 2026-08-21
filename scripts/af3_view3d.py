@@ -27,8 +27,8 @@ af3_view3d.py - AlphaFold 3 출력 폴더를 브라우저에서 돌려 보는 HT
 
 신뢰도 지표
     _summary_confidences.json 에서 ranking score, pTM, ipTM, fraction_disordered,
-    has_clash 를 읽어 구조 위에 같이 띄운다. 평균 pLDDT 는 mmCIF 의 원자별 값을
-    잔기별로 평균한 뒤 다시 평균한 값이다.
+    has_clash 를 읽어 구조 위에 같이 띄운다. 잔기 평균 pLDDT는 mmCIF의 원자별 값을
+    잔기별로 평균한 뒤 각 잔기에 같은 가중치를 주어 다시 평균한 값이다.
     ipTM 은 단량체에 없다 (JSON 에 null). 없으면 그 항목을 빼고 0 으로 쓰지 않는다.
 
 3D 라이브러리를 어디서 가져오는가 (읽고 고를 것)
@@ -80,11 +80,15 @@ af3_view3d.py - AlphaFold 3 출력 폴더를 브라우저에서 돌려 보는 HT
 """
 
 import argparse
+import base64
 import csv
+import hashlib
 import html
 import json
+import math
 import os
 import re
+import selectors
 import shutil
 import statistics
 import subprocess
@@ -93,6 +97,10 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+MAX_CIF_BYTES = 256 * 1024 * 1024
+MAX_LIBRARY_BYTES = 16 * 1024 * 1024
+MAX_TARBALL_BYTES = 32 * 1024 * 1024
 
 
 def log(msg):
@@ -174,7 +182,7 @@ def af3_timestamp_of(name):
 
 def _nonempty(path):
     try:
-        return path.is_file() and path.stat().st_size > 0
+        return not path.is_symlink() and path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
 
@@ -339,6 +347,10 @@ ENGINES = {
         "cache_js": "molstar-5.11.0.js",
         "cache_css": "molstar-5.11.0.css",
         "size_hint": "약 5.0MB (CSS 0.07MB 별도)",
+        "sha256_js": "7fad5561c74bc900930fb57d6ab028d1aafdda82223a901bf932b1098e84f1f3",
+        "sha256_css": "5b68ceb6d3642549b4e9b2c071e58e41b98a5350ae269180587b39da86925d55",
+        "sri_js": "sha384-5Mfx4eL50NkWPky+mcH//qY0sbml4il0CLFFmrMp8uv/saB3Z6uZMHn2dUpAnH92",
+        "sri_css": "sha384-RIontCdJN53gEl2fmiHN+4bscIBvaUaOiCeeGktXqmFqdEBF+COnSdt9O4IKFSvq",
     },
     "3dmol": {
         "version": "2.5.5",
@@ -351,13 +363,97 @@ ENGINES = {
         "cache_js": "3Dmol-min-2.5.5.js",
         "cache_css": None,
         "size_hint": "약 0.53MB",
+        "sha256_js": "f7cc78921ae72e7623e89cdd111434f58c2efddd2ffda1cd212644b406fb8016",
+        "sha256_css": None,
+        "sri_js": "sha384-OsczYbldvrHgslr9fFp/i4GiLSeuw9l+QIlv99ITw8soOwXcoGeflFMLg+CU/X1d",
+        "sri_css": None,
     },
 }
+
+
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def verify_asset_bytes(data: bytes, expected_hashes) -> bool:
+    return sha256_bytes(data) in set(expected_hashes)
+
+
+def script_safe_json(value) -> str:
+    """Serialize data for an executable script without HTML end-tag injection."""
+
+    return (
+        json.dumps(value, ensure_ascii=False, allow_nan=False)
+        .replace("&", "\\u0026")
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("\u2028", "\\u2028")
+        .replace("\u2029", "\\u2029")
+    )
+
+
+def is_safe_artifact_file(path, root) -> bool:
+    path = Path(path)
+    root = Path(root)
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root.resolve(strict=True))
+    except (OSError, RuntimeError, ValueError):
+        return False
+    return resolved.parent == root.resolve()
+
+
+def output_basename(value):
+    if not value:
+        raise ValueError("output name must not be empty")
+    path = Path(value)
+    if (
+        path.is_absolute()
+        or path.name != value
+        or value in {".", ".."}
+        or not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", value)
+    ):
+        raise ValueError("output name must be a single filename")
+    return value
+
+
+def plan_output_names(labels, index_name):
+    claimed = set()
+    if index_name:
+        claimed.add(output_basename(index_name))
+    out = {}
+    for label in labels:
+        filename = safe_filename(label) + ".html"
+        if filename in claimed:
+            raise ValueError("출력 파일 이름 충돌: %s" % filename)
+        claimed.add(filename)
+        out[label] = filename
+    return out
+
+
+def atomic_write_text(path, text):
+    path = Path(path)
+    tmp = path.with_name(path.name + ".tmp.%d" % os.getpid())
+    if tmp.exists() or tmp.is_symlink():
+        raise OSError("temporary output already exists: %s" % tmp)
+    try:
+        with tmp.open("x", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def load_json(path):
     """UTF-8 로 읽고, 실패하면 예외 대신 None 을 준다(한 건 때문에 전체가 죽지 않게)."""
     try:
+        path = Path(path)
+        if path.is_symlink() or path.stat().st_size > MAX_CIF_BYTES:
+            raise OSError("symlink 또는 256MB 초과 JSON")
         with open(path, "r", encoding="utf-8") as fh:
             return json.load(fh)
     except (OSError, UnicodeDecodeError, ValueError):
@@ -373,8 +469,9 @@ def read_ranking_csv(path):
         with open(path, "r", encoding="utf-8", newline="") as fh:
             for row in csv.DictReader(fh):
                 try:
-                    out.append((int(row["seed"]), int(row["sample"]),
-                                float(row["ranking_score"])))
+                    score = float(row["ranking_score"])
+                    if math.isfinite(score):
+                        out.append((int(row["seed"]), int(row["sample"]), score))
                 except (KeyError, ValueError, TypeError):
                     continue
     except (OSError, UnicodeDecodeError):
@@ -426,9 +523,12 @@ def parse_mmcif_atoms(text):
     out = []
     for p in rows:
         try:
+            bfactor = float(p[idx["B_iso_or_equiv"]])
+            if not math.isfinite(bfactor):
+                continue
             out.append((p[idx["auth_asym_id"]], int(p[idx["auth_seq_id"]]),
                         p[idx["label_comp_id"]], p[idx["label_atom_id"]],
-                        float(p[idx["B_iso_or_equiv"]])))
+                        bfactor))
         except ValueError:
             continue
     return out, cols
@@ -477,22 +577,66 @@ def decompress_zst(path):
     if zstandard is not None:
         try:
             with open(path, "rb") as fh:
-                data = zstandard.ZstdDecompressor().stream_reader(fh).read()
+                reader = zstandard.ZstdDecompressor().stream_reader(fh)
+                data = reader.read(MAX_CIF_BYTES + 1)
+            if len(data) > MAX_CIF_BYTES:
+                return None, "압축 해제 결과가 안전 한도 256MB를 넘는다"
             return data.decode("utf-8", "replace"), ""
         except Exception as exc:                      # 압축 파일이 깨진 경우
             return None, "zstandard 모듈로 풀다 실패했다 (%s)" % exc
     exe = shutil.which("zstd")
     if exe:
         try:
-            p = subprocess.run([exe, "-dc", str(path)], stdout=subprocess.PIPE,
-                               stderr=subprocess.PIPE, timeout=120)
+            p = subprocess.Popen(
+                [exe, "-dc", str(path)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            selector = selectors.DefaultSelector()
+            assert p.stdout is not None and p.stderr is not None
+            selector.register(p.stdout, selectors.EVENT_READ, "stdout")
+            selector.register(p.stderr, selectors.EVENT_READ, "stderr")
+            out_chunks, err_chunks = [], []
+            out_size = 0
+            deadline = time.monotonic() + 120
+            failed_reason = None
+            while selector.get_map():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    failed_reason = "zstd 명령이 120초 제한을 넘었다"
+                    break
+                events = selector.select(min(1.0, remaining))
+                for key, _mask in events:
+                    chunk = key.fileobj.read1(1024 * 1024)
+                    if not chunk:
+                        selector.unregister(key.fileobj)
+                        continue
+                    if key.data == "stdout":
+                        out_size += len(chunk)
+                        if out_size > MAX_CIF_BYTES:
+                            failed_reason = "압축 해제 결과가 안전 한도 256MB를 넘는다"
+                            break
+                        out_chunks.append(chunk)
+                    elif sum(map(len, err_chunks)) < 64 * 1024:
+                        err_chunks.append(chunk)
+                if failed_reason:
+                    break
+            if failed_reason:
+                p.kill()
+            p.wait(timeout=5)
+            stdout = b"".join(out_chunks)
+            stderr = b"".join(err_chunks)
+            if failed_reason:
+                return None, failed_reason
         except (OSError, subprocess.SubprocessError) as exc:
             return None, "zstd 명령 실행이 실패했다 (%s)" % exc
-        if p.returncode == 0 and p.stdout:
-            return p.stdout.decode("utf-8", "replace"), ""
+        if len(stdout) > MAX_CIF_BYTES:
+            return None, "압축 해제 결과가 안전 한도 256MB를 넘는다"
+        if p.returncode == 0 and stdout:
+            return stdout.decode("utf-8", "replace"), ""
         return None, ("zstd 명령이 실패했다 (rc=%d) %s"
                       % (p.returncode,
-                         p.stderr.decode("utf-8", "replace").strip()[:200]))
+                         stderr.decode("utf-8", "replace").strip()[:200]))
     return None, ("zstd 를 풀 방법이 없다. 다음 중 하나를 하라: "
                   "python3 -m pip install zstandard  또는  "
                   "zstd -d <파일>.cif.zst 로 미리 풀어 두기")
@@ -502,9 +646,21 @@ def decompress_zst(path):
 # 3Dmol.js 확보 (--lib embed 일 때만 필요하다)
 # ---------------------------------------------------------------------------
 
-def _http_text(url, timeout):
+def _http_bytes(url, timeout, limit):
     with urllib.request.urlopen(url, timeout=timeout) as fh:
-        return fh.read().decode("utf-8")
+        data = fh.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("download exceeds %d bytes" % limit)
+    return data
+
+
+def _verified_text(url, timeout, expected_sha256):
+    data = _http_bytes(url, timeout, MAX_LIBRARY_BYTES)
+    if not verify_asset_bytes(data, {expected_sha256}):
+        raise ValueError(
+            "integrity mismatch for %s (got %s)" % (url, sha256_bytes(data))
+        )
+    return data.decode("utf-8")
 
 
 def fetch_library(engine, cache_dir, lib_file=None, lib_css_file=None, timeout=90):
@@ -522,13 +678,19 @@ def fetch_library(engine, cache_dir, lib_file=None, lib_css_file=None, timeout=9
 
     if lib_file:
         try:
-            out["js"] = Path(lib_file).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
+            lib_path = Path(lib_file)
+            if lib_path.is_symlink() or lib_path.stat().st_size > MAX_LIBRARY_BYTES:
+                raise ValueError("trusted library file is a symlink or exceeds 16MB")
+            out["js"] = lib_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
             return None, "--lib-file '%s' 를 읽지 못했다 (%s)" % (lib_file, exc)
     if lib_css_file:
         try:
-            out["css"] = Path(lib_css_file).read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError) as exc:
+            css_path = Path(lib_css_file)
+            if css_path.is_symlink() or css_path.stat().st_size > MAX_LIBRARY_BYTES:
+                raise ValueError("trusted CSS file is a symlink or exceeds 16MB")
+            out["css"] = css_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
             return None, "--lib-css-file '%s' 를 읽지 못했다 (%s)" % (lib_css_file, exc)
     if out["js"] is not None:
         return out, "직접 준 파일을 인라인했다"
@@ -536,26 +698,39 @@ def fetch_library(engine, cache_dir, lib_file=None, lib_css_file=None, timeout=9
     cache = Path(os.path.expanduser(cache_dir))
     cjs = cache / spec["cache_js"]
     ccss = cache / spec["cache_css"] if spec["cache_css"] else None
-    if cjs.is_file() and cjs.stat().st_size > 100000:
-        out["js"] = cjs.read_text(encoding="utf-8")
-        if ccss is not None and ccss.is_file():
-            out["css"] = ccss.read_text(encoding="utf-8")
-        if ccss is None or out["css"]:
+    if (
+        cjs.is_file()
+        and not cjs.is_symlink()
+        and 100000 < cjs.stat().st_size <= MAX_LIBRARY_BYTES
+    ):
+        js_data = cjs.read_bytes()
+        if verify_asset_bytes(js_data, {spec["sha256_js"]}):
+            out["js"] = js_data.decode("utf-8")
+        if (
+            ccss is not None
+            and ccss.is_file()
+            and not ccss.is_symlink()
+            and ccss.stat().st_size <= MAX_LIBRARY_BYTES
+        ):
+            css_data = ccss.read_bytes()
+            if verify_asset_bytes(css_data, {spec["sha256_css"]}):
+                out["css"] = css_data.decode("utf-8")
+        if out["js"] is not None and (ccss is None or out["css"]):
             return out, "캐시 사용: %s" % cjs
 
     tried = []
     for url in spec["js"]:
         try:
-            out["js"] = _http_text(url, timeout)
+            out["js"] = _verified_text(url, timeout, spec["sha256_js"])
             break
-        except (urllib.error.URLError, OSError, UnicodeDecodeError) as exc:
+        except (urllib.error.URLError, OSError, UnicodeDecodeError, ValueError) as exc:
             tried.append("%s (%s)" % (url, exc))
     if out["js"] is not None and spec["css"]:
         for url in spec["css"]:
             try:
-                out["css"] = _http_text(url, timeout)
+                out["css"] = _verified_text(url, timeout, spec["sha256_css"])
                 break
-            except (urllib.error.URLError, OSError, UnicodeDecodeError) as exc:
+            except (urllib.error.URLError, OSError, UnicodeDecodeError, ValueError) as exc:
                 tried.append("%s (%s)" % (url, exc))
         if out["css"] is None:
             out["js"] = None                       # CSS 없이는 화면이 깨진다
@@ -565,16 +740,28 @@ def fetch_library(engine, cache_dir, lib_file=None, lib_css_file=None, timeout=9
         import tarfile
         try:
             with urllib.request.urlopen(spec["tarball"], timeout=timeout) as fh:
-                blob = fh.read()
+                blob = fh.read(MAX_TARBALL_BYTES + 1)
+            if len(blob) > MAX_TARBALL_BYTES:
+                raise ValueError("npm tarball exceeds safety limit")
             with tarfile.open(fileobj=io.BytesIO(blob), mode="r:gz") as tf:
                 m = tf.extractfile(spec["tar_js"])
                 if m is None:
                     raise KeyError(spec["tar_js"])
-                out["js"] = m.read().decode("utf-8")
+                js_data = m.read(MAX_LIBRARY_BYTES + 1)
+                if len(js_data) > MAX_LIBRARY_BYTES or not verify_asset_bytes(
+                    js_data, {spec["sha256_js"]}
+                ):
+                    raise ValueError("npm JavaScript integrity mismatch")
+                out["js"] = js_data.decode("utf-8")
                 if spec["tar_css"]:
                     m2 = tf.extractfile(spec["tar_css"])
                     if m2 is not None:
-                        out["css"] = m2.read().decode("utf-8")
+                        css_data = m2.read(MAX_LIBRARY_BYTES + 1)
+                        if len(css_data) > MAX_LIBRARY_BYTES or not verify_asset_bytes(
+                            css_data, {spec["sha256_css"]}
+                        ):
+                            raise ValueError("npm CSS integrity mismatch")
+                        out["css"] = css_data.decode("utf-8")
         except Exception as exc:
             tried.append("%s (%s)" % (spec["tarball"], exc))
             return None, ("%s 라이브러리를 내려받지 못했다. 시도한 곳:\n        %s\n"
@@ -585,9 +772,9 @@ def fetch_library(engine, cache_dir, lib_file=None, lib_css_file=None, timeout=9
                              "\n        ".join(spec["js"][:1] + spec["css"][:1])))
     try:
         cache.mkdir(parents=True, exist_ok=True)
-        cjs.write_text(out["js"], encoding="utf-8")
+        atomic_write_text(cjs, out["js"])
         if ccss is not None and out["css"]:
-            ccss.write_text(out["css"], encoding="utf-8")
+            atomic_write_text(ccss, out["css"])
         msg = "내려받아 캐시에 저장했다: %s" % cache
     except OSError:
         msg = "내려받았다 (캐시 저장 실패. 다음에 또 내려받는다)"
@@ -703,7 +890,7 @@ def gather_target(label, tdir, stem):
         summary   _summary_confidences.json 원본 (없으면 {})
         residues  [{"c","i","n","p","a"}] 잔기별 pLDDT (없으면 [])
         chains    사슬 id 목록 (출현 순서)
-        mean_plddt, min_plddt
+        mean_plddt, min_plddt  (둘 다 잔기 단위)
         rank      ranking score (정렬용 숫자. 없으면 None)
         n_sample  ranking_scores.csv 의 샘플 수
         sample_sd 샘플 간 ranking score 표준편차 (2건 이상일 때)
@@ -716,7 +903,11 @@ def gather_target(label, tdir, stem):
 
     summ = load_json(tdir / ("%s_summary_confidences.json" % stem)) or {}
     rec["summary"] = summ
-    rec["rank"] = summ.get("ranking_score")
+    try:
+        rank = float(summ.get("ranking_score"))
+    except (TypeError, ValueError):
+        rank = None
+    rec["rank"] = rank if rank is not None and math.isfinite(rank) else None
 
     scores = [s for _sd, _sm, s in
               read_ranking_csv(str(tdir / ("%s_ranking_scores.csv" % stem)))]
@@ -726,17 +917,22 @@ def gather_target(label, tdir, stem):
 
     cif_plain = tdir / ("%s_model.cif" % stem)
     cif_zst = tdir / ("%s_model.cif.zst" % stem)
-    if cif_plain.is_file():
+    if is_safe_artifact_file(cif_plain, tdir):
         try:
-            rec["cif"] = cif_plain.read_text(encoding="utf-8", errors="replace")
+            if cif_plain.stat().st_size > MAX_CIF_BYTES:
+                rec["problem"] = "mmCIF 가 안전 한도 256MB를 넘는다"
+            else:
+                rec["cif"] = cif_plain.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             rec["problem"] = "mmCIF 를 읽지 못했다 (%s)" % exc
-    elif cif_zst.is_file():
+    elif is_safe_artifact_file(cif_zst, tdir):
         text, why = decompress_zst(cif_zst)
         if text is None:
             rec["problem"] = ("mmCIF 가 .cif.zst 압축이고 풀지 못했다. %s" % why)
         else:
             rec["cif"] = text
+    elif cif_plain.is_symlink() or cif_zst.is_symlink():
+        rec["problem"] = "symlinked mmCIF 산출물은 외부 파일 유출 방지를 위해 거부했다"
     else:
         rec["problem"] = "mmCIF 파일이 없다 (_model.cif / _model.cif.zst 둘 다)"
 
@@ -761,7 +957,8 @@ def gather_target(label, tdir, stem):
             m = re.search(r"_ma_qa_metric_global\.metric_value\s+([0-9.]+)",
                           rec["cif"])
             if m:
-                rec["global_plddt_cif"] = float(m.group(1))
+                value = float(m.group(1))
+                rec["global_plddt_cif"] = value if math.isfinite(value) else None
     return rec
 
 
@@ -769,7 +966,8 @@ def fmt_num(v, nd=3):
     if v is None:
         return None
     try:
-        return ("%." + str(nd) + "f") % float(v)
+        value = float(v)
+        return ("%." + str(nd) + "f") % value if math.isfinite(value) else None
     except (TypeError, ValueError):
         return None
 
@@ -793,9 +991,9 @@ def metric_rows(rec):
     if s.get("iptm") is not None:
         add("ipTM", fmt_num(s.get("iptm"), 3),
             "사슬 사이 계면 신뢰도 (0~1). 복합체에만 있다")
-    add("평균 pLDDT", fmt_num(rec["mean_plddt"], 1),
-        "잔기별 pLDDT 의 평균 (0~100)")
-    add("최저 pLDDT", fmt_num(rec["min_plddt"], 1),
+    add("잔기 평균 pLDDT", fmt_num(rec["mean_plddt"], 1),
+        "각 잔기에 같은 가중치를 준 평균 (0~100)")
+    add("최저 잔기 pLDDT", fmt_num(rec["min_plddt"], 1),
         "가장 자신 없는 잔기의 값")
     if s.get("fraction_disordered") is not None:
         add("무질서 비율", fmt_num(s.get("fraction_disordered"), 3),
@@ -1033,6 +1231,7 @@ PAGE_TMPL = """<!DOCTYPE html>
 <html lang="ko"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; img-src data: blob:; connect-src 'none'; font-src data:; worker-src blob:">
 <title>__TITLE__</title>
 __LIBHEAD__
 <style>__CSS__</style>
@@ -1066,7 +1265,12 @@ __LIBHEAD__
 <script id="af3-cif" type="text/plain">__CIF__</script>
 <script>
 var AF3 = __DATA__;
-AF3.cif = document.getElementById('af3-cif').textContent;
+var AF3_B64 = document.getElementById('af3-cif').textContent.trim();
+if (AF3_B64) {
+  var AF3_RAW = atob(AF3_B64), AF3_BYTES = new Uint8Array(AF3_RAW.length);
+  for (var AF3_I = 0; AF3_I < AF3_RAW.length; AF3_I++) AF3_BYTES[AF3_I] = AF3_RAW.charCodeAt(AF3_I);
+  AF3.cif = new TextDecoder('utf-8').decode(AF3_BYTES);
+} else { AF3.cif = ''; }
 function af3MarkButton(mode){
   var ids = {plddt:'b-plddt', chain:'b-chain'};
   for (var k in ids) {
@@ -1117,12 +1321,9 @@ __LIBBODY__
 
 
 def js_string_block(text):
-    """mmCIF 를 <script type="text/plain"> 안에 안전하게 넣는다.
+    """Encode mmCIF as base64 for a non-executable script data block."""
 
-    브라우저는 </script 를 만나면 종료 태그로 해석한다. mmCIF 에 그런 문자열이
-    나올 일은 없지만, 나오면 페이지가 깨지므로 확실히 막는다.
-    """
-    return text.replace("</", "<\\/")
+    return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
 def html_metrics(rec):
@@ -1215,12 +1416,18 @@ def build_page(rec, engine, lib_mode, lib_text, index_name):
                     "그래도 안 되면 --engine 을 바꿔서 다시 만들어라.")
     else:
         if cdn_css:
-            libhead.append('<link rel="stylesheet" href="%s">' % cdn_css)
-        libbody.append('<script src="%s"></script>' % cdn_js)
+            libhead.append(
+                '<link rel="stylesheet" href="%s" integrity="%s" crossorigin="anonymous">'
+                % (html.escape(cdn_css, quote=True), spec["sri_css"])
+            )
+        libbody.append(
+            '<script src="%s" integrity="%s" crossorigin="anonymous"></script>'
+            % (html.escape(cdn_js, quote=True), spec["sri_js"])
+        )
         failhint = ("이 파일은 3D 라이브러리를 인터넷(CDN)에서 불러온다. "
                     "인터넷이 안 되거나 사내망이 CDN 을 막으면 이 화면이 나온다. "
                     "인터넷 없이 열려면 다시 만들어라: "
-                    "python3 af3_view3d.py &lt;출력폴더&gt; --out-dir 뷰어 "
+                    "python3 scripts/af3_view3d.py &lt;출력폴더&gt; --out-dir 뷰어 "
                     "--lib embed")
 
     data = {
@@ -1233,7 +1440,7 @@ def build_page(rec, engine, lib_mode, lib_text, index_name):
 
     sub = []
     if rec["mean_plddt"] is not None:
-        sub.append("평균 pLDDT %.1f" % rec["mean_plddt"])
+        sub.append("잔기 평균 pLDDT %.1f" % rec["mean_plddt"])
     if rec["rank"] is not None:
         sub.append("ranking score %s" % fmt_num(rec["rank"], 3))
     sub.append("결과 폴더 %s" % os.path.basename(rec["dir"]))
@@ -1248,7 +1455,7 @@ def build_page(rec, engine, lib_mode, lib_text, index_name):
     idxlink = ""
     if index_name:
         idxlink = ('<h2>목록</h2><div><a href="%s">전체 타깃 목록으로</a></div>'
-                   % html.escape(index_name))
+                   % html.escape(index_name, quote=True))
 
     page = PAGE_TMPL
     page = page.replace("__CSS__", PAGE_CSS)
@@ -1262,7 +1469,7 @@ def build_page(rec, engine, lib_mode, lib_text, index_name):
     page = page.replace("__LIBHEAD__", "\n".join(libhead))
     page = page.replace("__LIBBODY__", "\n".join(libbody))
     page = page.replace("__FAILHINT__", failhint.replace("'", "\\'"))
-    page = page.replace("__DATA__", json.dumps(data, ensure_ascii=False))
+    page = page.replace("__DATA__", script_safe_json(data))
     # __CIF__ 와 __ENGINEJS__ 는 마지막에 넣는다 (안에 __XXX__ 가 있어도 안전하게).
     page = page.replace("__ENGINEJS__", engine_js)
     if rec["cif"]:
@@ -1279,6 +1486,7 @@ INDEX_TMPL = """<!DOCTYPE html>
 <html lang="ko"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'">
 <title>AF3 구조 보기 목록</title>
 <style>__CSS__
 body { padding:14px 18px; }
@@ -1301,7 +1509,7 @@ __BADBOX__
 <table class="t">
 <thead><tr>
 <th>타깃</th><th>ranking score</th><th>pTM</th><th>ipTM</th>
-<th>평균 pLDDT</th><th>사슬</th><th>잔기</th><th>pLDDT 구간 분포</th>
+<th>잔기 평균 pLDDT</th><th>사슬</th><th>잔기</th><th>pLDDT 구간 분포</th>
 </tr></thead>
 <tbody>
 __ROWS__
@@ -1332,7 +1540,7 @@ def build_index(records, files, subtitle):
                     % "".join('<i style="background:%s;width:%.1f%%"></i>'
                               % (c, pct) for c, _l, _n, pct in hist))
         iptm = fmt_num(s.get("iptm"), 3) or "-"
-        link = html.escape(files.get(rec["label"], ""))
+        link = html.escape(files.get(rec["label"], ""), quote=True)
         name_cell = ('<a href="%s">%s</a>' % (link, html.escape(rec["label"]))
                      if link else html.escape(rec["label"]))
         if rec["problem"]:
@@ -1453,6 +1661,15 @@ def build_parser():
 
 def main(argv=None):
     args = build_parser().parse_args(argv)
+    if args.top < 0:
+        die("--top 은 0 이상이어야 한다.")
+    if args.max <= 0:
+        die("--max 는 1 이상이어야 한다.")
+    if not args.no_index:
+        try:
+            args.index_name = output_basename(args.index_name)
+        except ValueError as exc:
+            die(str(exc))
 
     targets = find_targets(args.outdir_af3, args.only, all_runs=args.all_runs,
                            include_partial=args.include_partial)
@@ -1497,14 +1714,16 @@ def main(argv=None):
         todo = todo[:args.max]
 
     index_name = None if args.no_index else args.index_name
-    files = {}
+    try:
+        files = plan_output_names([rec["label"] for rec in todo], index_name)
+    except ValueError as exc:
+        die(str(exc))
     made = []
     for rec in todo:
-        fname = safe_filename(rec["label"]) + ".html"
+        fname = files[rec["label"]]
         page = build_page(rec, args.engine, args.lib, lib_text, index_name)
         path = outdir / fname
-        path.write_text(page, encoding="utf-8")
-        files[rec["label"]] = fname
+        atomic_write_text(path, page)
         made.append(path)
         log("  만들었다: %s (%.2f MB)" % (path, path.stat().st_size / 1048576.0))
 
@@ -1513,7 +1732,7 @@ def main(argv=None):
                % (len(records), args.outdir_af3, args.engine, args.lib,
                   time.strftime("%Y-%m-%d %H:%M")))
         ipath = outdir / index_name
-        ipath.write_text(build_index(records, files, sub), encoding="utf-8")
+        atomic_write_text(ipath, build_index(records, files, sub))
         made.append(ipath)
         log("  만들었다: %s" % ipath)
 

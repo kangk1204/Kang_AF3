@@ -85,16 +85,37 @@ af3_batch.py - AlphaFold 3 대량 스크리닝용 최적화 배치 러너
 
 import argparse
 import csv
+import fcntl
 import json
 import os
 import re
+import shlex
 import shutil
+import stat
 import string
 import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from af3_db import verify_database_roots, verify_model_dir  # noqa: E402
+
+TOP_LEVEL_KEYS = {
+    "name",
+    "modelSeeds",
+    "sequences",
+    "dialect",
+    "version",
+    "bondedAtomPairs",
+    "userCCD",
+    "userCCDPath",
+}
+MAX_INPUT_JSON_BYTES = 512 * 1024 * 1024
 
 # AF3 기본 버킷 사다리.
 # run_alphafold.py 의 _BUCKETS 기본값은 **128 에서 시작한다** (소스 대조 및 실측 확인).
@@ -114,6 +135,13 @@ C_OUT = "/root/af3_out"
 C_CACHE = "/root/af3_cache"
 
 
+def csv_safe_cell(value):
+    """Prevent spreadsheet programs from evaluating untrusted text as a formula."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
 def log(msg):
     print("[%s] %s" % (datetime.now().strftime("%H:%M:%S"), msg), flush=True)
 
@@ -122,21 +150,23 @@ def log(msg):
 # 도커 실행 방법 결정
 # =============================================================================
 def find_docker(force=None):
-    """sudo 없이 docker 가 되면 그대로, 아니면 sudo 를 붙인다."""
+    """비대화형 Docker 명령을 고른다. 암호를 묻는 sudo 는 추측하지 않는다."""
     if force:
-        return force.split()
+        command = shlex.split(force)
+        return command or None
     if shutil.which("docker") is None:
         return None
-    try:
-        r = subprocess.run(["docker", "info"], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL, timeout=60)
-        if r.returncode == 0:
-            return ["docker"]
-    except Exception:
-        pass
-    log("경고: sudo 없이 docker 를 쓸 수 없다. sudo 를 붙여서 실행한다.")
-    log("      영구 해결: sudo usermod -aG docker $USER  실행 후 재로그인")
-    return ["sudo", "docker"]
+    for command in (["docker"], ["sudo", "-n", "docker"]):
+        if command[0] == "sudo" and shutil.which("sudo") is None:
+            continue
+        try:
+            r = subprocess.run(command + ["info"], stdout=subprocess.DEVNULL,
+                               stderr=subprocess.DEVNULL, timeout=30)
+            if r.returncode == 0:
+                return command
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+    return None
 
 
 def probe_flags(docker, image):
@@ -153,11 +183,97 @@ def probe_flags(docker, image):
         found = set(re.findall(r"--(\[no\])?([a-z0-9_]+)", text))
         flags = set(f for _, f in found)
         if len(flags) < 5:
+            log("오류: AF3 이미지 플래그를 확인하지 못했다 (exit=%d)." % r.returncode)
             return None
         return flags
     except Exception as e:
-        log("경고: 플래그 탐지 실패(%s). 지원 여부를 확인하지 않고 진행한다." % e)
+        log("오류: 플래그 탐지 실패(%s). 추측 실행하지 않는다." % e)
         return None
+
+
+def validate_fold_job(obj):
+    if not isinstance(obj, dict):
+        return "최상위가 객체가 아니다"
+    unknown_top = sorted(set(obj) - TOP_LEVEL_KEYS)
+    if unknown_top:
+        return "AF3 가 모르는 최상위 키가 있다: %s" % ", ".join(unknown_top)
+    if obj.get("dialect") != "alphafold3":
+        return "dialect 는 'alphafold3' 이어야 한다"
+    version = obj.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version not in {1, 2, 3, 4}:
+        return "version 은 1, 2, 3, 4 중 하나여야 한다"
+    if not isinstance(obj.get("name"), str) or not obj["name"].strip():
+        return "name 이 비어 있지 않은 문자열이 아니다"
+    output_name = sanitise_name(obj["name"])
+    if not output_name or output_name.startswith(".") or output_name[0] in "=+-@":
+        return "AF3 정규화 후 출력 이름이 비어 있거나 위험하다"
+    seeds = obj.get("modelSeeds")
+    if (
+        not isinstance(seeds, list)
+        or not seeds
+        or any(
+            not isinstance(seed, int)
+            or isinstance(seed, bool)
+            or seed < 0
+            or seed > 2**32 - 1
+            for seed in seeds
+        )
+    ):
+        return "modelSeeds 는 32-bit unsigned integer 목록이어야 한다"
+    sequences = obj.get("sequences")
+    if not isinstance(sequences, list) or not sequences:
+        return "sequences 가 비어 있다"
+    allowed_kinds = {"protein", "rna", "dna", "ligand"}
+    seen_ids = set()
+    for index, entry in enumerate(sequences, 1):
+        if not isinstance(entry, dict):
+            return "sequences %d번째 항목은 객체여야 한다" % index
+        kinds = [key for key in entry if key in allowed_kinds]
+        if len(kinds) != 1 or set(entry) - allowed_kinds:
+            return "sequences %d번째 항목은 protein/rna/dna/ligand 중 정확히 하나여야 한다" % index
+        kind = kinds[0]
+        body = entry[kind]
+        if not isinstance(body, dict):
+            return "sequences %d번째 %s 값은 객체여야 한다" % (index, kind)
+        ids = body.get("id")
+        valid_ids = (
+            isinstance(ids, str) and bool(ids)
+            or isinstance(ids, list) and bool(ids)
+            and all(isinstance(value, str) and value for value in ids)
+        )
+        if not valid_ids:
+            return "sequences %d번째 id가 올바르지 않다" % index
+        id_values = [ids] if isinstance(ids, str) else ids
+        for chain_id in id_values:
+            if (
+                not chain_id.isalpha()
+                or not chain_id.isascii()
+                or chain_id.upper() != chain_id
+            ):
+                return "chain id는 대문자 영문자만 허용된다: %r" % chain_id
+            if chain_id in seen_ids:
+                return "중복 chain id가 있다: %s" % chain_id
+            seen_ids.add(chain_id)
+        if kind in {"protein", "rna", "dna"}:
+            sequence = body.get("sequence")
+            if not isinstance(sequence, str) or not sequence:
+                return "sequences %d번째 %s sequence가 비어 있다" % (index, kind)
+        else:
+            has_ccd = isinstance(body.get("ccdCodes"), list) and bool(body.get("ccdCodes"))
+            has_smiles = isinstance(body.get("smiles"), str) and bool(body.get("smiles"))
+            if has_ccd == has_smiles:
+                return "sequences %d번째 ligand는 ccdCodes/smiles 중 하나가 필요하다" % index
+    stack = [obj]
+    while stack:
+        current = stack.pop()
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if key in {"mmcifPath", "unpairedMsaPath", "pairedMsaPath", "userCCDPath"} and value:
+                    return "%s sidecar는 legacy runner가 staging하지 않는다. 권장 runner를 사용하라" % key
+                stack.append(value)
+        elif isinstance(current, list):
+            stack.extend(current)
+    return None
 
 
 # =============================================================================
@@ -387,6 +503,14 @@ def sanitise_name(name):
 
 
 def read_fold_json(path):
+    info = os.lstat(path)
+    if path.is_symlink() or not stat.S_ISREG(info.st_mode):
+        raise ValueError("일반 파일이 아닌 JSON 또는 symlink는 허용하지 않는다")
+    if info.st_size > MAX_INPUT_JSON_BYTES:
+        raise ValueError(
+            "JSON이 안전 한도 %d bytes를 넘는다 (%d bytes)"
+            % (MAX_INPUT_JSON_BYTES, info.st_size)
+        )
     with open(path, "r", encoding="utf-8") as fh:
         return json.load(fh)
 
@@ -519,9 +643,16 @@ def stage_files(paths, dest, mode="link"):
                  추론 단계 입력은 원본이 아니라 복사본을 넘긴다. MSA 산출물은
                  재계산이 비싼 자산이므로, 전제가 틀려도 복사본을 쓰는 편이 안전하다)
     """
+    marker_name = ".af3_legacy_stage"
+    if dest.is_symlink():
+        raise OSError("staging 경로가 symlink다: %s" % dest)
     if dest.exists():
+        marker = dest / marker_name
+        if not marker.is_file() or marker.is_symlink() or marker.read_text(encoding="utf-8") != "Kang_AF3 legacy stage v1\n":
+            raise OSError("소유 marker 없는 staging 경로를 삭제하지 않는다: %s" % dest)
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
+    (dest / marker_name).write_text("Kang_AF3 legacy stage v1\n", encoding="utf-8")
     for p in paths:
         target = dest / p.name
         if mode == "link":
@@ -609,9 +740,13 @@ def build_cmd(args, docker, stage, input_dir, output_dir, buckets,
     def absp(p):
         return os.path.abspath(os.path.expanduser(str(p)))
 
-    cmd += ["-v", "%s:%s" % (absp(args.db_dir), C_DB),
-            "-v", "%s:%s" % (absp(args.model_dir), C_MODEL),
-            "-v", "%s:%s" % (absp(input_dir), C_IN),
+    db_mounts = []
+    for index, db_dir in enumerate(args.db_dirs):
+        container_db = "/root/af3_db_%d" % index
+        db_mounts.append(container_db)
+        cmd += ["-v", "%s:%s:ro" % (absp(db_dir), container_db)]
+    cmd += ["-v", "%s:%s:ro" % (absp(args.model_dir), C_MODEL),
+            "-v", "%s:%s:ro" % (absp(input_dir), C_IN),
             "-v", "%s:%s" % (absp(output_dir), C_OUT)]
     if args.cache_dir:
         cmd += ["-v", "%s:%s" % (absp(args.cache_dir), C_CACHE)]
@@ -619,8 +754,8 @@ def build_cmd(args, docker, stage, input_dir, output_dir, buckets,
     cmd += [args.image, "python", "run_alphafold.py",
             "--input_dir=%s" % C_IN,
             "--model_dir=%s" % C_MODEL,
-            "--db_dir=%s" % C_DB,
             "--output_dir=%s" % C_OUT]
+    cmd += ["--db_dir=%s" % path for path in db_mounts]
 
     def ok(flag):
         return flags is None or flag in flags
@@ -709,6 +844,14 @@ def collect_msa_outputs(msa_raw, msa_store):
     return moved
 
 
+def msa_store_is_complete(work, fold_name):
+    path = work / "msa_store" / (sanitise_name(fold_name) + "_data.json")
+    try:
+        return path.is_file() and not path.is_symlink() and path.stat().st_size > 0
+    except OSError:
+        return False
+
+
 def msa_n_cpu(args, n_shards=1):
     """--jackhmmer_n_cpu / --nhmmer_n_cpu 에 넘길 값을 정한다.
 
@@ -763,14 +906,22 @@ def do_stage_msa(args, docker, flags, work, targets):
         if args.dry_run:
             print("\n[드라이런] MSA 갈래 %d (%d건):\n  %s" % (si, len(paths), " ".join(cmd)))
             continue
-        procs.append((si, subprocess.Popen(cmd, stdout=open(lf, "a"),
-                                           stderr=subprocess.STDOUT), lf))
+        handle = open(lf, "a", encoding="utf-8")
+        try:
+            process = subprocess.Popen(cmd, stdout=handle, stderr=subprocess.STDOUT)
+        except BaseException:
+            handle.close()
+            raise
+        procs.append((si, process, lf, handle))
     if args.dry_run:
         return {}, 0.0
 
     rcs = {}
-    for si, p, lf in procs:
-        rc = p.wait()
+    for si, p, lf, handle in procs:
+        try:
+            rc = p.wait()
+        finally:
+            handle.close()
         rcs[si] = rc
         log("  MSA 갈래 %d 종료 (exit=%d, 로그=%s)" % (si, rc, lf))
     wall = time.time() - t0
@@ -892,8 +1043,12 @@ def parse_args(argv=None):
                    choices=["msa", "infer", "both", "oneshot"],
                    help="msa=MSA만, infer=추론만, both=MSA후추론(권장), oneshot=한프로세스에서둘다")
     p.add_argument("--image", default=os.environ.get("AF3_IMAGE", "alphafold3"))
-    p.add_argument("--db-dir", default=os.environ.get(
-        "AF3_DB_DIR", str(Path.home() / "public_databases")))
+    p.add_argument(
+        "--db-dir",
+        action="append",
+        default=None,
+        help="AF3 DB root. overlay/fallback 우선순서대로 반복 가능",
+    )
     p.add_argument("--model-dir", default=os.environ.get(
         "AF3_MODEL_DIR", str(Path.home() / "af3_models")))
     p.add_argument("--cache-dir", default=os.environ.get(
@@ -946,6 +1101,18 @@ def main(argv=None):
     args = parse_args(argv)
     base = Path.cwd()
 
+    for label, value in (
+        ("--msa-workers", args.msa_workers),
+        ("--msa-n-cpu", args.msa_n_cpu),
+        ("--diffusion-samples", args.diffusion_samples),
+        ("--recycles", args.recycles),
+        ("--limit", args.limit),
+        ("--ligand-tokens", args.ligand_tokens),
+    ):
+        if value is not None and value <= 0:
+            print("오류: %s 는 1 이상이어야 한다." % label)
+            return 2
+
     if args.input_dir:
         input_dir = Path(args.input_dir).resolve()
     elif args.name:
@@ -966,7 +1133,12 @@ def main(argv=None):
 
     if args.cache_dir:
         args.cache_dir = str(Path(args.cache_dir).expanduser())
-    args.db_dir = str(Path(args.db_dir).expanduser())
+    db_values = args.db_dir or [
+        os.environ.get("AF3_DB_DIR", str(Path.home() / "public_databases_full"))
+    ]
+    args.db_dirs = [str(Path(value).expanduser()) for value in db_values]
+    # Keep the first-root attribute for old integrations that inspect it.
+    args.db_dir = args.db_dirs[0]
     args.model_dir = str(Path(args.model_dir).expanduser())
 
     print("=" * 79)
@@ -979,10 +1151,14 @@ def main(argv=None):
 
     # ---- 필수 경로 확인 -------------------------------------------------
     missing = []
-    for label, path in (("입력 폴더", input_dir), ("DB 폴더", Path(args.db_dir)),
-                        ("가중치 폴더", Path(args.model_dir))):
-        if not Path(path).exists():
-            missing.append("%s 없음: %s" % (label, path))
+    if not input_dir.is_dir():
+        missing.append("입력 폴더 없음: %s" % input_dir)
+    db_report = verify_database_roots(args.db_dirs)
+    if not db_report["ok"]:
+        missing.extend("DB 오류: %s" % error for error in db_report["errors"])
+    model_report = verify_model_dir(args.model_dir)
+    if not model_report["ok"]:
+        missing.extend("가중치 오류: %s" % error for error in model_report["errors"])
     if missing:
         for m in missing:
             print("오류: %s" % m)
@@ -992,6 +1168,25 @@ def main(argv=None):
 
     output_dir.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
+    lock_path = work / ".af3_batch.lock"
+    lock_flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        lock_flags |= os.O_NOFOLLOW
+    try:
+        lock_fd = os.open(lock_path, lock_flags, 0o600)
+        lock_stat = os.fstat(lock_fd)
+        if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
+            os.close(lock_fd)
+            raise OSError("legacy lock is not a single regular file")
+        lock_file = os.fdopen(lock_fd, "r+", encoding="utf-8")
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (OSError, BlockingIOError) as exc:
+        print("오류: 같은 work 폴더를 다른 legacy 실행이 사용 중이거나 잠금 경로가 안전하지 않다: %s" % exc)
+        return 1
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write("pid=%d\n" % os.getpid())
+    lock_file.flush()
     if args.cache_dir:
         # 컴파일 캐시는 '있으면 좋은' 것이다. 만들 수 없으면 경고만 남기고 캐시 없이 진행한다.
         try:
@@ -1021,12 +1216,27 @@ def main(argv=None):
         except Exception as e:
             unreadable.append((p.name, str(e)))
             continue
-        name = obj.get("name") or p.stem
+        schema_error = validate_fold_job(obj)
+        if schema_error:
+            unreadable.append((p.name, schema_error))
+            continue
+        name = obj["name"]
         targets.append({"path": p, "name": name,
                         "tokens": count_tokens(obj, args.ligand_tokens)})
     if unreadable:
-        log("경고: 읽을 수 없는 JSON %d건 (건너뜀): %s"
-            % (len(unreadable), ", ".join(n for n, _ in unreadable[:5])))
+        log("오류: 사용할 수 없는 JSON %d건:" % len(unreadable))
+        for name, why in unreadable[:20]:
+            log("  - %s: %s" % (name, why))
+        return 2
+
+    seen_names = {}
+    for target in targets:
+        output_name = sanitise_name(target["name"])
+        if output_name in seen_names:
+            log("오류: AF3 출력 이름 충돌: %s <-> %s"
+                % (seen_names[output_name], target["path"].name))
+            return 2
+        seen_names[output_name] = target["path"].name
 
     log("입력 JSON %d건 확인. 토큰 수로 정렬한다 (로그 가독성 목적. "
         "정렬 자체의 시간 이득은 실측 0.00초/건이다)." % len(targets))
@@ -1062,6 +1272,9 @@ def main(argv=None):
         if args.lenient_done:
             log("  --lenient-done: 완료 표식 하나만 있어도 완료로 본다 (2026-08 이전 동작)")
         for t in targets:
+            if chk_mode == "data" and msa_store_is_complete(work, t["name"]):
+                done += 1
+                continue
             dirs = find_result_dirs(output_dir, t["name"])
             if any(outdir_is_complete(d, mode=chk_mode, lenient=args.lenient_done)
                    for d in dirs):
@@ -1074,7 +1287,10 @@ def main(argv=None):
                         and not args.keep_partial and not args.dry_run):
                     ptdir = work / "partial"
                     ptdir.mkdir(parents=True, exist_ok=True)
-                    dest = ptdir / ("%s_%s" % (d.name, datetime.now().strftime("%H%M%S")))
+                    dest = ptdir / (
+                        "%s_%s_%d" %
+                        (d.name, datetime.now().strftime("%Y%m%d_%H%M%S_%f"), os.getpid())
+                    )
                     shutil.move(str(d), str(dest))
                     log("  미완성 결과를 옮김: %s -> %s" % (d.name, dest))
             pending.append(t)
@@ -1102,18 +1318,19 @@ def main(argv=None):
     if not args.no_probe and not args.dry_run:
         log("이미지가 지원하는 플래그를 --help 로 확인한다 (1회, 수십 초)")
         flags = probe_flags(docker, args.image)
-        if flags is not None:
-            need = ["input_dir", "buckets", "num_diffusion_samples",
-                    "num_recycles", "jax_compilation_cache_dir",
-                    "jackhmmer_n_cpu", "run_inference", "run_data_pipeline"]
-            log("  지원: %s" % ", ".join(f for f in need if f in flags))
-            absent = [f for f in need if f not in flags]
-            if absent:
-                log("  미지원(전달하지 않음): %s" % ", ".join(absent))
-            if "input_dir" not in flags:
-                log("치명적: 이 이미지는 --input_dir 을 지원하지 않는다. 단일 프로세스 순회가"
-                    " 불가능하므로 이미지를 최신 버전으로 다시 만들어야 한다.")
-                return 1
+        if flags is None:
+            return 1
+        need = ["input_dir", "buckets", "num_diffusion_samples",
+                "num_recycles", "jax_compilation_cache_dir",
+                "jackhmmer_n_cpu", "run_inference", "run_data_pipeline"]
+        log("  지원: %s" % ", ".join(f for f in need if f in flags))
+        absent = [f for f in need if f not in flags]
+        if absent:
+            log("  미지원(전달하지 않음): %s" % ", ".join(absent))
+        if "input_dir" not in flags:
+            log("치명적: 이 이미지는 --input_dir 을 지원하지 않는다. 단일 프로세스 순회가"
+                " 불가능하므로 이미지를 최신 버전으로 다시 만들어야 한다.")
+            return 1
     if args.msa_gpus:
         log("--msa-gpus: MSA 단계에도 GPU를 붙인다.")
 
@@ -1128,11 +1345,11 @@ def main(argv=None):
     else:
         if args.stage in ("msa", "both"):
             rcs, _ = do_stage_msa(args, docker, flags, work, targets)
-            if rcs and all(v != 0 for v in rcs.values()):
-                log("경고: 모든 MSA 갈래가 0이 아닌 코드로 끝났다. 로그를 확인하라.")
+            if rcs and any(v != 0 for v in rcs.values()):
+                log("오류: 하나 이상의 MSA 갈래가 0이 아닌 코드로 끝났다. 로그를 확인하라.")
                 rc_all = 1
         if args.stage in ("infer", "both"):
-            rc, timings, wall, ran = do_stage_infer(
+            rc, timings, wall, _ready = do_stage_infer(
                 args, docker, flags, work, output_dir, targets)
             rc_all = rc_all or (rc or 0)
 
@@ -1148,8 +1365,11 @@ def main(argv=None):
     rows, failed = [], []
     for t in ran:
         dirs = find_result_dirs(output_dir, t["name"])
-        ok = any(outdir_is_complete(d, mode=chk_mode, lenient=args.lenient_done)
-                 for d in dirs)
+        if args.stage == "msa":
+            ok = msa_store_is_complete(work, t["name"])
+        else:
+            ok = any(outdir_is_complete(d, mode=chk_mode, lenient=args.lenient_done)
+                     for d in dirs)
         if not ok:
             failed.append(t["name"])
         rows.append({
@@ -1159,7 +1379,11 @@ def main(argv=None):
             "status": "완료" if ok else "실패",
             "wall_seconds": ("%.1f" % tmap[sanitise_name(t["name"])])
                             if sanitise_name(t["name"]) in tmap else "",
-            "output": str(dirs[0]) if dirs else "",
+            "output": (
+                str(work / "msa_store" / (sanitise_name(t["name"]) + "_data.json"))
+                if args.stage == "msa" and ok
+                else str(dirs[0]) if dirs else ""
+            ),
         })
 
     csv_path = work / "run_summary.csv"
@@ -1167,7 +1391,10 @@ def main(argv=None):
         w = csv.DictWriter(fh, fieldnames=["name", "tokens", "bucket", "status",
                                            "wall_seconds", "output"])
         w.writeheader()
-        w.writerows(rows)
+        w.writerows(
+            {key: csv_safe_cell(value) for key, value in row.items()}
+            for row in rows
+        )
 
     state["failed"] = failed
     state["history"].append({
@@ -1192,7 +1419,10 @@ def main(argv=None):
               % (wall / n_ok * 2000 / 3600.0))
     if failed:
         print("  실패 %d건: %s" % (len(failed), ", ".join(failed[:10])))
-        print("  재시도    : python3 af3_batch.py --name <이름> --stage %s --retry" % args.stage)
+        batch_script = shlex.quote(str(Path(__file__).resolve()))
+        print("  재시도    : python3 %s --name <이름> --stage %s --retry"
+              % (batch_script, args.stage))
+        rc_all = rc_all or 1
     print("  요약 CSV    : %s" % csv_path)
     print("  로그        : %s" % (work / "logs"))
     print("=" * 79)

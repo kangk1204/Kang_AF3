@@ -6,11 +6,12 @@
 ## 한 줄 요약
 
 ```
-python3 tests/run_tests.py
+python3 tests/run_all.py
 ```
 
-Docker 도, pip install 도 필요 없다. Python 3 만 있으면 된다. 42개 테스트가
-약 13초에 끝난다 (macOS arm64 / Python 3.11 실측).
+Docker도 pip install도 필요 없다. 등록 회귀만 빠르게 돌릴 때는
+`python3 tests/run_tests.py --strict`를 쓴다. release entry point는 등록 회귀,
+명명·파일명 통합, mutation 검증, 통계 self-test, Python AST와 shell syntax를 모두 실행한다.
 
 ## 왜 만들었나
 
@@ -89,15 +90,15 @@ Docker 도, pip install 도 필요 없다. Python 3 만 있으면 된다. 42개 
 | `test_incomplete_targets_are_reported_not_hidden` | 집계가 미완성 폴더를 조용히 빼먹고 완료 건수만 보고한다. |
 | `test_empty_collection_exits_nonzero` | 완료 결과가 하나도 없는데 종료코드 0 을 돌려줘 자동화가 빈 CSV 를 정상으로 오인한다. |
 | `test_top_selection_warns_on_mixed_conditions` | 상위 N건 선정이 여러 조건을 섞어 같은 타깃을 중복 선정한다. |
-| `test_timestamp_suffix_folders_are_not_separate_targets` | **(현재 실패 예상)** AF3 타임스탬프 접미사 폴더가 별개 타깃으로 집계돼 같은 VHH 가 두 번 세어진다. |
-| `test_timestamp_suffix_folders_are_normalized_in_visualization` | **(현재 실패 예상)** 위와 같은 문제를 시각화 쪽에서. |
+| `test_timestamp_suffix_folders_are_not_separate_targets` | AF3 타임스탬프 접미사 폴더가 별개 타깃으로 집계돼 같은 VHH 가 두 번 세어지는 회귀를 막는다. |
+| `test_timestamp_suffix_folders_are_normalized_in_visualization` | 같은 타임스탬프 접미사 문제를 시각화 쪽에서 막는다. |
 | `test_batch_finds_timestamp_suffix_result_dirs` | 반대 방향. `af3_batch.py` 가 타임스탬프 접미사 폴더를 못 찾아 이미 끝난 건을 다시 돌린다. |
 
 ## docker 스텁의 설계 근거
 
 `tests/fake_docker.py` 가 `docker` 를 가로챈다. `tests/harness.py` 가 PATH 앞에
-가짜 `sudo` 와 `docker` 를 놓는 방식이다 (러너가 `DOCKER_COMMAND = ("sudo",
-"docker")` 를 모듈 상수로 갖고 있어 옵션으로 바꿀 수 없기 때문).
+가짜 `sudo` 와 `docker` 를 놓는 방식이다. 가짜 `sudo`는 기본적으로 실패하고 명시적으로
+허용한 테스트에서만 동작하므로, 러너가 암호형 sudo에 몰래 의존하는 회귀도 드러난다.
 
 ### 왜 스텁인가
 
@@ -209,30 +210,12 @@ python3 tests/verify_tests_catch_bugs.py
 테스트가 통과하는지 먼저 확인하고, 통과하지 않으면 "기준선 실패" 로 보고한다.
 이 때문에 역검증 시간이 12초에서 22초로 늘었지만, 없으면 안 되는 검사다.
 
-## 현재 저장소 버전에서의 결과
+## 현재 저장소 버전의 release gate
 
-```
-통과 40개, 실패 0개, 예상된 실패 2개 / 총 42개, 13.1초
-```
-
-**예상된 실패 2건은 진짜 문제가 아니라 아직 안 고친 동작이다.** 항목 12(타깃명
-정규화) 는 다른 트랙이 작업 중이며, 테스트는 고쳐진 뒤의 동작을 검증하도록 써
-두었다. `expect_fail_on_current=True` 표시가 붙어 있어 실패로 계산되지 않는다.
-
-- `test_timestamp_suffix_folders_are_not_separate_targets`
-- `test_timestamp_suffix_folders_are_normalized_in_visualization`
-
-두 테스트는 `vhh_a` 와 `vhh_a_20260101_010101`(안의 파일 stem 은 둘 다 `vhh_a`)을
-심어두고 집계 결과에 타임스탬프 이름이 나오지 않기를 요구한다. 현재
-`af3_collect.py` 의 `walk_output_dir` 은 폴더 이름을 그대로 타깃 이름으로 쓰므로
-두 건으로 집계된다 (실측 확인).
-
-**해당 동작이 고쳐지면 이 테스트는 통과하고, 실행기가 "실패 예상이었으나 통과 —
-고쳐진 것 같다" 라고 알려준다.** 그때 `expect_fail_on_current=True` 를 지워라.
-그렇게 하지 않으면 나중에 이 동작이 다시 깨져도 조용히 넘어간다.
-
-`--strict` 를 주면 예상된 실패도 실패로 계산한다. CI 에서 "지금 상태 그대로 유지"
-를 원할 때는 기본값을, "모두 고쳐졌는지 확인" 하려면 `--strict` 를 쓴다.
+등록된 테스트는 `--strict`에서 known failure 없이 전부 통과해야 한다. 별도 통합 suite와
+mutation 17건도 전부 통과해야 한다. `.github/workflows/tests.yml`은 Python 3.9, 3.12,
+3.14에서 `tests/run_all.py`를 실행하고, 3.12 lane은 `requirements.txt`를 설치해
+matplotlib 그림 생성 경로도 실행한다. 실제 Docker/AF3/GPU smoke는 수동 gate다.
 
 ## 테스트를 추가하는 방법
 
@@ -283,32 +266,17 @@ def test_무엇을_확인하는지():
 | `load_module("af3_collect.py")` | 스크립트를 모듈로 불러 함수 단위 검증 |
 | `check`, `check_equal`, `check_in`, `check_not_in` | 실패 메시지가 친절한 단정 |
 
-## pytest 를 쓰고 싶다면
+## pytest에 대하여
 
-테스트 함수 이름이 `test_*` 이므로 pytest 로도 수집된다. 실측 확인했다.
+이 저장소의 정식 진입점은 custom registry와 standalone integration을 모두 아는
+`tests/run_all.py`다. pytest는 설치 의존성을 추가하고 standalone suite를 자동으로 같은
+의미로 실행하지 않으므로 release 판정에 사용하지 않는다.
 
-```
-python3 -m pytest tests/ -q
-# 2 failed, 40 passed in 12.64s
-```
+## 실행 환경
 
-**pytest 로 돌리면 "예상된 실패" 2건이 그냥 실패로 나온다.** pytest 는
-`expect_fail_on_current` 표시를 모르기 때문이다. "막는 버그" 설명도 표시되지
-않는다. 그래서 `tests/run_tests.py` 가 정식 진입점이다. pytest 는 이미 그 도구에
-익숙한 사람이 IDE 통합이나 `-x`, `--pdb` 같은 기능을 쓰고 싶을 때의 선택지다.
-
-## 실행 환경별 실측 결과
-
-| 환경 | 결과 | 소요 |
-| --- | --- | --- |
-| macOS arm64 / Python 3.11.15 | 통과 40, 실패 0, 예상된 실패 2 | 13.1초 |
-| Linux x86_64 / Python 3.12.13 (검증 호스트, conda af3 환경) | 통과 40, 실패 0, 예상된 실패 2 | 6.7초 |
-| 역검증 (macOS) | 재주입 17건 전부 잡음 | 21.6초 |
-| 역검증 (Linux 검증 호스트) | 재주입 17건 전부 잡음 | 11.1초 |
-| pytest (macOS, pytest 9.x) | 40 passed, 2 failed(= 예상된 실패) | 12.6초 |
-
-검증 호스트에는 pytest 가 설치되어 있지 않다. `tests/run_tests.py` 가 외부 패키지를
-요구하지 않는 이유가 이것이다.
+CI matrix와 현재 검증 호스트의 정확한 결과는 workflow와 최신 release log를 기준으로 한다.
+핵심 테스트는 외부 Python package와 Docker를 요구하지 않는다. matplotlib이 있는 3.12
+lane에서는 선택적 그림 생성까지 추가로 검증한다.
 
 ## 알려진 한계 (테스트가 덮지 않는 것)
 
@@ -323,7 +291,8 @@ python3 -m pytest tests/ -q
 - **경합 상황의 완전한 재현.** `test_pending_list_is_rechecked_after_acquiring_lock`
   은 실제 경합이 아니라 잠금 안쪽 재판정이 일어나는지만 본다. 진짜 경합은
   타이밍에 의존해 확정적으로 만들 수 없다.
-- **`af3_prepare.py`, `af3_check.sh`, `af3run.sh`.** 이번 회귀 테스트 범위에 없다.
+- **실제 배포판별 Docker 설치와 NVIDIA Container Toolkit.** stub은 CLI 계약만 본다.
+- **`af3run.sh`의 모든 대화형 조합.** 핵심 collect/file-name 호환만 본다.
 - **여러 호스트가 공유 스토리지를 함께 쓰는 상황.** `scan_stage_dirs` 의
   hostname 판정은 단위 수준으로만 검증했다. 실제 NFS 환경에서 `flock` 동작은
   검증하지 않았다.

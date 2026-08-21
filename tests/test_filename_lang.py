@@ -28,6 +28,7 @@
 """
 
 import argparse
+import csv
 import os
 import shutil
 import subprocess
@@ -90,15 +91,26 @@ def make_import_blocker(tmp, subdir, blocked, message):
     d = tmp / subdir
     d.mkdir(parents=True, exist_ok=True)
     (d / "sitecustomize.py").write_text(
+        "import importlib.util\n"
         "import sys\n"
         "_BLOCKED = %r\n"
         "_MSG = %r\n"
         "class _Block:\n"
-        "    def find_module(self, name, path=None):\n"
+        "    def _blocked(self, name):\n"
         "        for b in _BLOCKED:\n"
         "            if name == b or (b.endswith('.') and name.startswith(b)):\n"
-        "                return self\n"
+        "                return True\n"
+        "        return False\n"
+        "    def find_spec(self, name, path=None, target=None):\n"
+        "        if self._blocked(name):\n"
+        "            return importlib.util.spec_from_loader(name, self)\n"
         "        return None\n"
+        "    def create_module(self, spec):\n"
+        "        return None\n"
+        "    def exec_module(self, module):\n"
+        "        raise ImportError(_MSG)\n"
+        "    def find_module(self, name, path=None):\n"
+        "        return self if self._blocked(name) else None\n"
         "    def load_module(self, name):\n"
         "        raise ImportError(_MSG)\n"
         "sys.meta_path.insert(0, _Block())\n" % (blocked, message),
@@ -202,6 +214,38 @@ def test_visualize_names(root, tmp):
     for n in VIS_KO:
         check(not (vo / n).exists(), "옛 이름 %s 는 생기지 않는다" % n)
     check("알림" in so, "기본값이 바뀐 사실을 실행 끝에 알린다")
+
+    with (vo / "visualize_table.csv").open(encoding="utf-8-sig", newline="") as fh:
+        visualize_rows = list(csv.DictReader(fh))
+    with (tmp / "c_en" / "af3_summary.csv").open(
+        encoding="utf-8-sig", newline=""
+    ) as fh:
+        collect_rows = {row["타깃"]: row for row in csv.DictReader(fh)}
+    check(
+        visualize_rows
+        and {"mean_atom_plddt", "mean_residue_plddt"}.issubset(visualize_rows[0]),
+        "시각화 표가 원자 평균과 잔기 평균 pLDDT를 구분한다",
+        str(sorted(visualize_rows[0]) if visualize_rows else []),
+    )
+    if visualize_rows and "mean_atom_plddt" in visualize_rows[0]:
+        max_diff = max(
+            (
+                abs(
+                    float(row["mean_atom_plddt"])
+                    - float(collect_rows[row["name"]]["pLDDT평균"])
+                )
+                for row in visualize_rows
+                if row["name"] in collect_rows
+            ),
+            default=float("inf"),
+        )
+    else:
+        max_diff = float("inf")
+    check(
+        max_diff <= 0.0001,
+        "시각화 표의 원자 평균 pLDDT가 집계 CSV와 일치한다",
+        "최대 차 %.6f" % max_diff,
+    )
 
     vk = tmp / "v_ko"
     rc, sok, sek = run_script("af3_visualize.py",

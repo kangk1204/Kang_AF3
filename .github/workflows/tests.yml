@@ -1,0 +1,28 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-free:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.9", "3.12", "3.14"]
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install optional plotting dependency
+        if: matrix.python-version == '3.12'
+        run: python -m pip install -r requirements.txt
+      - name: Run release verification
+        run: python tests/run_all.py

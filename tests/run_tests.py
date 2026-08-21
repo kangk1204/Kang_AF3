@@ -32,6 +32,10 @@ TEST_MODULES = (
     "test_inputs",
     "test_state",
     "test_reporting",
+    "test_database",
+    "test_workflow_safety",
+    "test_security",
+    "test_analysis_safety",
 )
 
 

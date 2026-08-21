@@ -24,7 +24,9 @@ import fcntl
 import json
 import os
 import shutil
+import shlex
 import socket
+import stat
 import string
 import subprocess
 import sys
@@ -36,6 +38,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator, Sequence
 
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from af3_db import verify_database_roots, verify_model_dir  # noqa: E402
+
 
 # =========================================================
 # USER CONFIG (CLI 옵션을 생략했을 때 쓰는 기본값)
@@ -45,11 +53,10 @@ OUTPUT_DIR_NAME = "vhh_001_out"
 RUN_MODE = "full"  # full | data | inference
 USE_SINGLE_RUN = True
 
-DOCKER_COMMAND = ("sudo", "docker")
-AF3_IMAGE = "alphafold3"
-DB_DIR = "~/public_databases"
-MODEL_DIR = "~/af3_models"
-CACHE_DIR = "~/af3_cache"
+AF3_IMAGE = os.environ.get("AF3_IMAGE", "alphafold3")
+DB_DIR = os.environ.get("AF3_DB_DIR", "~/public_databases_full")
+MODEL_DIR = os.environ.get("AF3_MODEL_DIR", "~/af3_models")
+CACHE_DIR = os.environ.get("AF3_CACHE_DIR", "~/af3_cache")
 HELP_TIMEOUT_SECONDS = 300
 QUARANTINE_KEEP_PER_JOB = 1
 STALE_STAGE_HOURS = 24
@@ -62,6 +69,7 @@ STAGE_PREFIX = ".af3_pending_"
 STAGE_MARKER_NAME = ".af3_stage_marker"
 QUARANTINE_DIR_NAME = ".af3_incomplete"
 QUARANTINE_MARKER_NAME = ".af3_quarantine_marker"
+MAX_INPUT_JSON_BYTES = 512 * 1024 * 1024
 FINAL_REQUIRED_SUFFIXES = (
     ("_ranking_scores.csv",),
     ("_model.cif", "_model.cif.zst"),
@@ -69,6 +77,18 @@ FINAL_REQUIRED_SUFFIXES = (
 )
 SIDECAR_KEYS = frozenset(
     {"mmcifPath", "unpairedMsaPath", "pairedMsaPath", "userCCDPath"}
+)
+TOP_LEVEL_KEYS = frozenset(
+    {
+        "name",
+        "modelSeeds",
+        "sequences",
+        "dialect",
+        "version",
+        "bondedAtomPairs",
+        "userCCD",
+        "userCCDPath",
+    }
 )
 KNOWN_FLAGS = frozenset(
     {
@@ -122,21 +142,95 @@ def is_safe_output_name(name: str) -> bool:
     return (
         bool(name)
         and name not in {".", "..", ".run_af3_batch.lock"}
-        and not name.startswith(".af3_")
+        and not name.startswith(".")
+        and name[0] not in "=+-@"
         and Path(name).name == name
     )
 
 
+def _valid_seed(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= 2**32 - 1
+    )
+
+
+def validate_fold_job(obj: object) -> str | None:
+    """Validate the AF3 job fields that can otherwise abort a whole directory run."""
+
+    if not isinstance(obj, dict):
+        return (
+            "최상위가 객체(dict)가 아닙니다. AlphaFold Server의 list 형식은 "
+            "이 재개형 배치 스크립트에서 지원하지 않습니다"
+        )
+    unknown_top = sorted(set(obj) - TOP_LEVEL_KEYS)
+    if unknown_top:
+        return "AF3 가 모르는 최상위 키가 있습니다: " + ", ".join(unknown_top)
+    if obj.get("dialect") != "alphafold3":
+        return "dialect 는 'alphafold3' 이어야 합니다"
+    version = obj.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version not in {1, 2, 3, 4}:
+        return "version 은 1, 2, 3, 4 중 하나여야 합니다"
+    seeds = obj.get("modelSeeds")
+    if not isinstance(seeds, list) or not seeds or not all(_valid_seed(seed) for seed in seeds):
+        return "modelSeeds 는 비어 있지 않은 32-bit unsigned integer 목록이어야 합니다"
+    sequences = obj.get("sequences")
+    if not isinstance(sequences, list) or not sequences:
+        return "sequences 는 비어 있지 않은 목록이어야 합니다"
+    allowed_kinds = {"protein", "rna", "dna", "ligand"}
+    seen_ids: set[str] = set()
+    for index, entry in enumerate(sequences, 1):
+        if not isinstance(entry, dict):
+            return f"sequences {index}번째 항목은 객체여야 합니다"
+        kinds = [key for key in entry if key in allowed_kinds]
+        if len(kinds) != 1:
+            return f"sequences {index}번째 항목은 protein/rna/dna/ligand 중 정확히 하나여야 합니다"
+        unknown_entry = sorted(set(entry) - allowed_kinds)
+        if unknown_entry:
+            return f"sequences {index}번째 항목에 모르는 키가 있습니다: {', '.join(unknown_entry)}"
+        body = entry[kinds[0]]
+        if not isinstance(body, dict):
+            return f"sequences {index}번째 {kinds[0]} 값은 객체여야 합니다"
+        ids = body.get("id")
+        valid_ids = (
+            isinstance(ids, str)
+            and bool(ids)
+            or isinstance(ids, list)
+            and bool(ids)
+            and all(isinstance(value, str) and value for value in ids)
+        )
+        if not valid_ids:
+            return f"sequences {index}번째 id 는 비어 있지 않은 문자열 또는 문자열 목록이어야 합니다"
+        id_values = [ids] if isinstance(ids, str) else ids
+        for chain_id in id_values:
+            if not chain_id.isalpha() or not chain_id.isascii() or chain_id.upper() != chain_id:
+                return f"sequences {index}번째 id={chain_id!r} 는 대문자 영문자만 허용됩니다"
+            if chain_id in seen_ids:
+                return f"중복 chain id 가 있습니다: {chain_id}"
+            seen_ids.add(chain_id)
+        if kinds[0] in {"protein", "rna", "dna"}:
+            sequence = body.get("sequence")
+            if not isinstance(sequence, str) or not sequence:
+                return f"sequences {index}번째 {kinds[0]} sequence 가 비어 있습니다"
+        else:
+            has_ccd = isinstance(body.get("ccdCodes"), list) and bool(body.get("ccdCodes"))
+            has_smiles = isinstance(body.get("smiles"), str) and bool(body.get("smiles"))
+            if has_ccd == has_smiles:
+                return f"sequences {index}번째 ligand 는 ccdCodes 또는 smiles 중 정확히 하나가 필요합니다"
+    return None
+
+
 def nonempty_file(path: Path) -> bool:
     try:
-        return path.is_file() and path.stat().st_size > 0
+        return not path.is_symlink() and path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
 
 
 def is_complete(result_dir: Path, output_name: str, mode: str = "full") -> bool:
     """선택한 실행 단계가 끝났는지 정식 산출물로 판정한다."""
-    if not result_dir.is_dir():
+    if result_dir.is_symlink() or not result_dir.is_dir():
         return False
     if mode == "data":
         return nonempty_file(result_dir / f"{output_name}_data.json")
@@ -164,6 +258,17 @@ def iter_sidecar_values(obj: object) -> Iterator[tuple[str, object]]:
 def read_job(json_file: Path, input_dir: Path) -> tuple[Job | None, str | None]:
     """JSON 하나를 읽고 이름과 staging할 sidecar를 검증한다."""
     try:
+        info = os.lstat(json_file)
+    except OSError as exc:
+        return None, f"파일 상태를 확인할 수 없습니다 ({exc})"
+    if json_file.is_symlink() or not stat.S_ISREG(info.st_mode):
+        return None, "일반 파일이 아닌 JSON 또는 symlink는 허용하지 않습니다"
+    if info.st_size > MAX_INPUT_JSON_BYTES:
+        return None, (
+            f"JSON이 안전 한도 {MAX_INPUT_JSON_BYTES} bytes를 넘습니다 "
+            f"({info.st_size} bytes)"
+        )
+    try:
         with json_file.open(encoding="utf-8") as handle:
             obj = json.load(handle)
     except UnicodeDecodeError:
@@ -173,11 +278,9 @@ def read_job(json_file: Path, input_dir: Path) -> tuple[Job | None, str | None]:
     except OSError as exc:
         return None, f"파일을 읽을 수 없습니다 ({exc})"
 
-    if not isinstance(obj, dict):
-        return None, (
-            "최상위가 객체(dict)가 아닙니다. AlphaFold Server의 list 형식은 "
-            "이 재개형 배치 스크립트에서 지원하지 않습니다"
-        )
+    schema_error = validate_fold_job(obj)
+    if schema_error is not None:
+        return None, schema_error
 
     raw_name = obj.get("name")
     if not isinstance(raw_name, str) or not raw_name.strip():
@@ -191,7 +294,7 @@ def read_job(json_file: Path, input_dir: Path) -> tuple[Job | None, str | None]:
     if not is_safe_output_name(output_name):
         return None, (
             f"name={raw_name!r}은 안전한 결과 폴더 이름으로 사용할 수 없습니다. "
-            "'.', '..', '.af3_'로 시작하는 이름은 피하세요"
+            "점(.) 또는 = + - @ 로 시작하는 이름과 '.', '..', 관리 파일 이름은 피하세요"
         )
 
     input_root = input_dir.resolve()
@@ -201,13 +304,19 @@ def read_job(json_file: Path, input_dir: Path) -> tuple[Job | None, str | None]:
             continue
         if not isinstance(value, str):
             return None, f"{key}는 문자열 경로여야 합니다"
-        raw_path = Path(value)
+        try:
+            raw_path = Path(value)
+        except (OSError, ValueError) as exc:
+            return None, f"{key} 경로를 해석할 수 없습니다: {exc}"
         if raw_path.is_absolute():
             return None, (
                 f"{key}={value!r}은 절대경로입니다. Docker 안에서도 동작하도록 "
                 "JSON 파일 기준 상대경로로 바꿔 주세요"
             )
-        source = (json_file.parent / raw_path).resolve()
+        try:
+            source = (json_file.parent / raw_path).resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            return None, f"{key} 경로를 확인할 수 없습니다: {exc}"
         try:
             relative_path = source.relative_to(input_root)
         except ValueError:
@@ -265,16 +374,36 @@ def path_has_content(path: Path) -> bool:
 
 
 def write_marker(path: Path, payload: dict[str, object]) -> None:
-    path.write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        mode = os.fstat(descriptor).st_mode
+        if not stat.S_ISREG(mode):
+            raise OSError(f"marker is not a regular file: {path}")
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
+            handle.write(
+                json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
+
+
+def quarantine_marker_path(snapshot: Path) -> Path:
+    return snapshot.with_name(snapshot.name + ".af3_quarantine_marker.json")
 
 
 def valid_quarantine_snapshot(
     snapshot: Path, output_dir: Path, output_name: str
 ) -> bool:
-    marker = snapshot / QUARANTINE_MARKER_NAME
+    marker = quarantine_marker_path(snapshot)
+    if not marker.is_file() or marker.is_symlink():
+        # Read-only compatibility with snapshots created by older releases.
+        marker = snapshot / QUARANTINE_MARKER_NAME
     if snapshot.is_symlink() or not snapshot.is_dir():
         return False
     if marker.is_symlink() or not marker.is_file():
@@ -308,6 +437,7 @@ def prune_job_quarantine(job_root: Path, output_dir: Path, output_name: str, kee
     removed = 0
     for old_snapshot in managed[keep:]:
         shutil.rmtree(old_snapshot)
+        quarantine_marker_path(old_snapshot).unlink(missing_ok=True)
         removed += 1
         print(f"[정리] 오래된 격리 결과 삭제: {old_snapshot}")
     return removed
@@ -354,7 +484,7 @@ def quarantine_incomplete(
     marker_written = False
     try:
         write_marker(
-            target / QUARANTINE_MARKER_NAME,
+            quarantine_marker_path(target),
             {
                 "script": SCRIPT_ID,
                 "version": STATE_FORMAT_VERSION,
@@ -381,6 +511,28 @@ def stage_jobs(
     marker_output_dir = parent_dir if output_dir is None else output_dir
     stage_dir = Path(tempfile.mkdtemp(prefix=STAGE_PREFIX, dir=str(parent_dir)))
     try:
+        planned: dict[Path, Path] = {
+            Path(STAGE_MARKER_NAME): stage_dir / STAGE_MARKER_NAME
+        }
+        for job in jobs:
+            rel_json = Path(job.json_file.name)
+            if rel_json in planned:
+                raise OSError(f"staging 이름 충돌: {rel_json}")
+            planned[rel_json] = job.json_file
+            for sidecar in job.sidecars:
+                rel = sidecar.relative_path
+                if rel in planned and planned[rel] != sidecar.source:
+                    raise OSError(f"staging sidecar 이름 충돌: {rel}")
+                planned[rel] = sidecar.source
+        file_targets = sorted(planned, key=lambda path: len(path.parts))
+        for index, path in enumerate(file_targets):
+            for other in file_targets[index + 1 :]:
+                try:
+                    other.relative_to(path)
+                except ValueError:
+                    continue
+                raise OSError(f"staging 파일/폴더 경로 충돌: {path} <-> {other}")
+
         write_marker(
             stage_dir / STAGE_MARKER_NAME,
             {
@@ -399,7 +551,9 @@ def stage_jobs(
             for sidecar in job.sidecars:
                 target = stage_dir / sidecar.relative_path
                 if target.exists():
-                    continue
+                    if target.samefile(sidecar.source):
+                        continue
+                    raise OSError(f"staging 대상이 이미 다른 파일로 존재합니다: {target}")
                 target.parent.mkdir(parents=True, exist_ok=True)
                 try:
                     os.link(sidecar.source, target)
@@ -534,6 +688,48 @@ def flag_is_listed(help_text: str, name: str) -> bool:
     return f"--{name}" in help_text or f"--[no]{name}" in help_text
 
 
+def parse_docker_command(value: str) -> tuple[str, ...]:
+    command = tuple(shlex.split(value))
+    if not command:
+        raise ValueError("--docker 명령이 비어 있습니다")
+    return command
+
+
+def _command_works(command: Sequence[str], timeout: int = 30) -> bool:
+    try:
+        process = subprocess.run(
+            [*command, "info"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return process.returncode == 0
+
+
+def detect_docker_command(force: str | None = None) -> tuple[tuple[str, ...] | None, str | None]:
+    """Choose a non-interactive Docker command; never guess an interactive sudo."""
+
+    requested = force or os.environ.get("AF3_DOCKER")
+    if requested:
+        try:
+            return parse_docker_command(requested), None
+        except ValueError as exc:
+            return None, str(exc)
+    if shutil.which("docker") is None:
+        return None, "docker 명령을 찾을 수 없습니다"
+    if _command_works(("docker",)):
+        return ("docker",), None
+    if shutil.which("sudo") and _command_works(("sudo", "-n", "docker")):
+        return ("sudo", "-n", "docker"), None
+    return None, (
+        "docker 데몬에 비대화형으로 접근할 수 없습니다. docker 그룹/rootless 설정을 "
+        "고치거나 --docker 'sudo docker' 를 대화형 실행에서 명시하세요"
+    )
+
+
 def probe_flags(
     docker_command: Sequence[str], image: str, timeout: int
 ) -> set[str] | None:
@@ -598,7 +794,7 @@ def docker_base(
     mode: str,
     input_mount: Path,
     output_dir: Path,
-    db_dir: Path,
+    db_dirs: Sequence[Path],
     model_dir: Path,
     cache_dir: Path,
     use_cache: bool,
@@ -609,8 +805,12 @@ def docker_base(
 
     command.extend(("-v", f"{input_mount}:{CONTAINER_INPUT}:ro"))
     command.extend(("-v", f"{output_dir}:{CONTAINER_OUTPUT}"))
+    db_mounts: list[str] = []
     if mode in {"full", "data"}:
-        command.extend(("-v", f"{db_dir}:{CONTAINER_DATABASES}:ro"))
+        for index, db_dir in enumerate(db_dirs):
+            container_db = f"/root/af3_db_{index}"
+            db_mounts.append(container_db)
+            command.extend(("-v", f"{db_dir}:{container_db}:ro"))
     if mode in {"full", "inference"}:
         command.extend(("-v", f"{model_dir}:{CONTAINER_MODELS}:ro"))
     if use_cache:
@@ -619,7 +819,7 @@ def docker_base(
     command.extend((image, "python", "run_alphafold.py"))
     command.append(f"--output_dir={CONTAINER_OUTPUT}")
     if mode in {"full", "data"}:
-        command.append(f"--db_dir={CONTAINER_DATABASES}")
+        command.extend(f"--db_dir={path}" for path in db_mounts)
     if mode in {"full", "inference"}:
         command.append(f"--model_dir={CONTAINER_MODELS}")
     if use_cache:
@@ -647,14 +847,15 @@ def run_one_by_one(
     mode: str,
     docker_command: Sequence[str],
     image: str,
-    db_dir: Path,
+    db_dirs: Sequence[Path],
     model_dir: Path,
     cache_dir: Path,
     use_cache: bool,
     quarantine_keep: int = QUARANTINE_KEEP_PER_JOB,
-) -> None:
+) -> bool:
     """한 입력의 실패가 다음 입력을 막지 않도록 파일별로 실행한다."""
     print("[안내] 남은 입력을 파일별로 실행합니다. 컨테이너 기동 비용은 반복됩니다.\n")
+    had_failure = False
     for index, job in enumerate(jobs, 1):
         if is_complete(output_dir / job.output_name, job.output_name, mode):
             continue
@@ -662,6 +863,7 @@ def run_one_by_one(
             quarantine_incomplete(output_dir, job, mode, quarantine_keep)
         except OSError as exc:
             print(f"[경고] {job.output_name}의 미완료 결과를 보존하지 못했습니다: {exc}")
+            had_failure = True
             continue
 
         print(f"[{index}/{len(jobs)}] 연산 중: {job.json_file.name}")
@@ -671,7 +873,7 @@ def run_one_by_one(
             mode=mode,
             input_mount=stage_dir,
             output_dir=output_dir,
-            db_dir=db_dir,
+            db_dirs=db_dirs,
             model_dir=model_dir,
             cache_dir=cache_dir,
             use_cache=use_cache,
@@ -680,11 +882,13 @@ def run_one_by_one(
         returncode = run_docker(command)
         complete = is_complete(output_dir / job.output_name, job.output_name, mode)
         if returncode != 0 or not complete:
+            had_failure = True
             reason = f"종료코드 {returncode}" if returncode != 0 else "필수 결과물 누락"
             print(f"[경고] {job.json_file.name} 실패: {reason}")
         if returncode in INFRASTRUCTURE_EXIT_CODES:
             print("[오류] Docker 실행 환경 오류이므로 반복 재시도를 중단합니다.")
-            return
+            return True
+    return had_failure
 
 
 def run_batch_with_fallback(
@@ -695,12 +899,12 @@ def run_batch_with_fallback(
     mode: str,
     docker_command: Sequence[str],
     image: str,
-    db_dir: Path,
+    db_dirs: Sequence[Path],
     model_dir: Path,
     cache_dir: Path,
     use_cache: bool,
     quarantine_keep: int = QUARANTINE_KEEP_PER_JOB,
-) -> None:
+) -> bool:
     for job in jobs:
         quarantine_incomplete(output_dir, job, mode, quarantine_keep)
 
@@ -710,7 +914,7 @@ def run_batch_with_fallback(
         mode=mode,
         input_mount=stage_dir,
         output_dir=output_dir,
-        db_dir=db_dir,
+        db_dirs=db_dirs,
         model_dir=model_dir,
         cache_dir=cache_dir,
         use_cache=use_cache,
@@ -727,36 +931,45 @@ def run_batch_with_fallback(
         if not is_complete(output_dir / job.output_name, job.output_name, mode)
     ]
     if not remaining:
-        return
+        return returncode != 0
     if returncode in INFRASTRUCTURE_EXIT_CODES:
         print(f"[오류] Docker 실행 환경 오류(종료코드 {returncode})로 배치를 중단합니다.")
-        return
+        return True
 
     if returncode != 0:
         print(f"\n[경고] 배치 실행이 종료코드 {returncode}로 중단됐습니다.")
     else:
         print("\n[경고] 배치는 종료됐지만 필수 결과물이 없는 입력이 있습니다.")
     print(f"       완료 결과는 유지하고 남은 {len(remaining)}건만 파일별로 재시도합니다.\n")
-    run_one_by_one(
+    fallback_failed = run_one_by_one(
         remaining,
         stage_dir=stage_dir,
         output_dir=output_dir,
         mode=mode,
         docker_command=docker_command,
         image=image,
-        db_dir=db_dir,
+        db_dirs=db_dirs,
         model_dir=model_dir,
         cache_dir=cache_dir,
         use_cache=use_cache,
         quarantine_keep=quarantine_keep,
     )
+    return returncode != 0 or fallback_failed
 
 
 @contextmanager
 def output_lock(output_dir: Path) -> Iterator[None]:
     """같은 출력 폴더를 대상으로 한 이 스크립트의 중복 실행을 막는다."""
     lock_path = output_dir / ".run_af3_batch.lock"
-    with lock_path.open("a+", encoding="utf-8") as lock_file:
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(lock_path, flags, 0o600)
+    lock_stat = os.fstat(descriptor)
+    if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
+        os.close(descriptor)
+        raise RuntimeError(f"잠금 경로가 단일 일반 파일이 아닙니다: {lock_path}")
+    with os.fdopen(descriptor, "r+", encoding="utf-8") as lock_file:
         try:
             fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -787,10 +1000,20 @@ def build_parser() -> argparse.ArgumentParser:
         default=OUTPUT_DIR_NAME,
         help=f"결과 폴더 (기본값: {OUTPUT_DIR_NAME})",
     )
-    parser.add_argument("--db-dir", default=DB_DIR, help="AF3 데이터베이스 폴더")
+    parser.add_argument(
+        "--db-dir",
+        action="append",
+        default=None,
+        help="AF3 데이터베이스 폴더. overlay/fallback 우선순서대로 반복 가능",
+    )
     parser.add_argument("--model-dir", default=MODEL_DIR, help="AF3 모델 가중치 폴더")
     parser.add_argument("--cache-dir", default=CACHE_DIR, help="JAX 컴파일 캐시 폴더")
     parser.add_argument("--image", default=AF3_IMAGE, help="Docker 이미지 이름")
+    parser.add_argument(
+        "--docker",
+        default=None,
+        help="Docker 실행 명령 강제 지정 (예: 'docker' 또는 비대화형 'sudo -n docker')",
+    )
     parser.add_argument(
         "--mode",
         choices=("full", "data", "inference"),
@@ -852,7 +1075,7 @@ def print_quick_guide(
     *,
     input_dir: Path,
     output_dir: Path,
-    db_dir: Path,
+    db_dirs: Sequence[Path],
     model_dir: Path,
     cache_dir: Path,
     image: str,
@@ -874,19 +1097,20 @@ def print_quick_guide(
     print(
         "[사전 준비]\n"
         "- Python 외부 패키지는 필요 없습니다(Python 3 표준 기능만 사용).\n"
-        f"- Docker 명령과 AlphaFold 3 이미지가 필요합니다: "
-        f"{' '.join(DOCKER_COMMAND)}, 이미지={image}\n"
+        "- Docker 명령과 AlphaFold 3 이미지가 필요합니다. 기본은 비대화형 자동 탐지이며 "
+        "--docker 로 명시할 수 있습니다.\n"
         "- full/inference 모드는 NVIDIA GPU 드라이버와 Docker GPU 지원이 필요합니다.\n"
         "- 아래 DB/모델 폴더에는 AlphaFold 3용 실제 파일이 준비되어 있어야 합니다.\n"
     )
     print(f"[현재 모드] {mode}: {mode_description(mode)}")
     print(f"[입력 JSON] {input_dir}")
     print(f"[결과 저장] {output_dir}")
-    print(f"[유전정보 DB] {db_dir}")
+    for index, db_dir in enumerate(db_dirs, 1):
+        print(f"[유전정보 DB {index}] {db_dir}")
     print(f"[모델 정보] {model_dir}")
     print(f"[JAX 캐시] {cache_dir}")
     print(f"[미완료 보존] 작업별 최신 {quarantine_keep}개")
-    script_name = Path(__file__).name
+    script_name = shlex.quote(str(Path(__file__).resolve()))
     print(
         "\n[권장 첫 실행 순서]\n"
         f"  1) python3 {script_name} --audit    # 계산 없이 상태 점검\n"
@@ -931,10 +1155,58 @@ def print_quarantine_report(output_dir: Path) -> None:
         print("[점검] 격리된 미완료 결과가 없습니다.")
 
 
+def managed_quarantine_snapshots(output_dir: Path) -> list[Path]:
+    quarantine_root = output_dir / QUARANTINE_DIR_NAME
+    if quarantine_root.is_symlink() or not quarantine_root.is_dir():
+        return []
+    managed: list[Path] = []
+    try:
+        job_roots = list(quarantine_root.iterdir())
+    except OSError:
+        return []
+    for job_root in job_roots:
+        if job_root.is_symlink() or not job_root.is_dir():
+            continue
+        try:
+            entries = list(job_root.iterdir())
+        except OSError:
+            continue
+        for snapshot in entries:
+            if valid_quarantine_snapshot(snapshot, output_dir, job_root.name):
+                managed.append(snapshot)
+    return sorted(managed)
+
+
+def remove_managed_quarantine(output_dir: Path) -> int:
+    snapshots = managed_quarantine_snapshots(output_dir)
+    removed = 0
+    for snapshot in snapshots:
+        shutil.rmtree(snapshot)
+        quarantine_marker_path(snapshot).unlink(missing_ok=True)
+        legacy_marker = snapshot / QUARANTINE_MARKER_NAME
+        legacy_marker.unlink(missing_ok=True)
+        removed += 1
+        print(f"[정리] 관리되는 격리 결과 삭제: {snapshot}")
+    quarantine_root = output_dir / QUARANTINE_DIR_NAME
+    if quarantine_root.is_dir() and not quarantine_root.is_symlink():
+        for job_root in list(quarantine_root.iterdir()):
+            if job_root.is_dir() and not job_root.is_symlink():
+                try:
+                    job_root.rmdir()
+                except OSError:
+                    pass
+        try:
+            quarantine_root.rmdir()
+        except OSError:
+            pass
+    return removed
+
+
 def cleanup_managed_state(output_dir: Path, assume_yes: bool) -> int:
     """사용자가 명시적으로 승인한 정확한 관리 폴더만 정리한다."""
     quarantine_root = output_dir / QUARANTINE_DIR_NAME
-    quarantine_deletable = quarantine_root.is_dir() and not quarantine_root.is_symlink()
+    managed_snapshots = managed_quarantine_snapshots(output_dir)
+    quarantine_deletable = bool(managed_snapshots)
     if quarantine_root.is_symlink() or (
         quarantine_root.exists() and not quarantine_root.is_dir()
     ):
@@ -955,9 +1227,10 @@ def cleanup_managed_state(output_dir: Path, assume_yes: bool) -> int:
 
     if quarantine_deletable:
         print(
-            "[삭제 예정] 격리 폴더 전체(이전 버전의 표식 없는 보존본 포함): "
-            f"{quarantine_root}"
+            f"[삭제 예정] 소유 표식이 유효한 격리 snapshot {len(managed_snapshots)}개"
         )
+    if quarantine_root.is_dir() and not quarantine_root.is_symlink():
+        print("[보존] 표식이 없거나 소유가 불명확한 격리 내용은 삭제하지 않습니다.")
     print("[주의] 정상 완료 결과 폴더는 삭제하지 않습니다.")
     decision = confirm_action(
         assume_yes,
@@ -972,10 +1245,7 @@ def cleanup_managed_state(output_dir: Path, assume_yes: bool) -> int:
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         with output_lock(output_dir):
-            quarantine_root = output_dir / QUARANTINE_DIR_NAME
-            if quarantine_root.is_dir() and not quarantine_root.is_symlink():
-                shutil.rmtree(quarantine_root)
-                print(f"[정리] 격리 결과 삭제: {quarantine_root}")
+            remove_managed_quarantine(output_dir)
             current = scan_stage_dirs(
                 output_dir.parent,
                 output_dir,
@@ -1010,7 +1280,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     base_dir = Path.cwd().resolve()
     input_dir = resolve_path(base_dir, args.input_dir)
     output_dir = resolve_path(base_dir, args.output_dir)
-    db_dir = resolve_path(base_dir, args.db_dir)
+    db_values = args.db_dir or [DB_DIR]
+    db_dirs = [resolve_path(base_dir, value) for value in db_values]
     model_dir = resolve_path(base_dir, args.model_dir)
     cache_dir = resolve_path(base_dir, args.cache_dir)
 
@@ -1018,7 +1289,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_quick_guide(
             input_dir=input_dir,
             output_dir=output_dir,
-            db_dir=db_dir,
+            db_dirs=db_dirs,
             model_dir=model_dir,
             cache_dir=cache_dir,
             image=args.image,
@@ -1043,7 +1314,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print_quick_guide(
             input_dir=input_dir,
             output_dir=output_dir,
-            db_dir=db_dir,
+            db_dirs=db_dirs,
             model_dir=model_dir,
             cache_dir=cache_dir,
             image=args.image,
@@ -1108,12 +1379,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("[완료] 모두 이미 끝나 있습니다.")
         return 0
 
-    if args.mode in {"full", "data"} and not db_dir.is_dir():
-        print(f"[오류] 데이터베이스 폴더를 찾을 수 없습니다: {db_dir}")
-        return 2
-    if args.mode in {"full", "inference"} and not model_dir.is_dir():
-        print(f"[오류] 모델 가중치 폴더를 찾을 수 없습니다: {model_dir}")
-        return 2
+    if args.mode in {"full", "data"}:
+        db_report = verify_database_roots(db_dirs)
+        if not db_report["ok"]:
+            print("[오류] 데이터베이스 구성이 완전하지 않습니다.")
+            for error in db_report["errors"]:
+                print(f"       - {error}")
+            return 2
+    if args.mode in {"full", "inference"}:
+        model_report = verify_model_dir(model_dir)
+        if not model_report["ok"]:
+            print("[오류] 모델 가중치 구성이 완전하지 않습니다.")
+            for error in model_report["errors"]:
+                print(f"       - {error}")
+            return 2
 
     staged_preview = scan_stage_dirs(
         output_dir.parent,
@@ -1134,12 +1413,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("[취소] Docker를 실행하거나 결과를 변경하지 않았습니다.")
         return 0
 
+    docker_command, docker_error = detect_docker_command(args.docker)
+    if docker_command is None:
+        print(f"[오류] {docker_error}")
+        return 2
+
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         print(f"[오류] 출력 폴더를 만들 수 없습니다: {output_dir} ({exc})")
         return 1
-    supported = probe_flags(DOCKER_COMMAND, args.image, args.probe_timeout)
+    supported = probe_flags(docker_command, args.image, args.probe_timeout)
     if supported is None:
         return 1
     unsupported_reason = validate_supported_flags(supported, args.mode)
@@ -1162,6 +1446,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("[안내] 이 AF3 이미지에는 JAX compilation cache 플래그가 없어 생략합니다.")
 
     started = time.monotonic()
+    run_failed = False
+    cleanup_failed = False
     try:
         with output_lock(output_dir):
             pending = [
@@ -1172,6 +1458,18 @@ def main(argv: Sequence[str] | None = None) -> int:
             if not pending:
                 print("[완료] 잠금 대기 중 다른 실행이 모든 작업을 끝냈습니다.")
                 return 0
+
+            # Creating empty result directories as the host user prevents a
+            # root-running container from making the directory itself.  Empty
+            # directories are valid AF3 destinations and are not treated as
+            # completed output.
+            for job in pending:
+                result_dir = output_dir / job.output_name
+                if result_dir.is_symlink() or (
+                    result_dir.exists() and not result_dir.is_dir()
+                ):
+                    raise OSError(f"안전하지 않은 결과 경로입니다: {result_dir}")
+                result_dir.mkdir(exist_ok=True)
 
             stale_stages = scan_stage_dirs(
                 output_dir.parent,
@@ -1187,35 +1485,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if not use_batch and not args.per_file and USE_SINGLE_RUN:
                     print("[안내] 이 AF3 이미지에는 --input_dir이 없어 파일별 방식으로 전환합니다.")
                 if use_batch:
-                    run_batch_with_fallback(
+                    run_failed = run_batch_with_fallback(
                         pending,
                         stage_dir=stage_dir,
                         output_dir=output_dir,
                         mode=args.mode,
-                        docker_command=DOCKER_COMMAND,
+                        docker_command=docker_command,
                         image=args.image,
-                        db_dir=db_dir,
+                        db_dirs=db_dirs,
                         model_dir=model_dir,
                         cache_dir=cache_dir,
                         use_cache=use_cache,
                         quarantine_keep=args.quarantine_keep,
                     )
                 else:
-                    run_one_by_one(
+                    run_failed = run_one_by_one(
                         pending,
                         stage_dir=stage_dir,
                         output_dir=output_dir,
                         mode=args.mode,
-                        docker_command=DOCKER_COMMAND,
+                        docker_command=docker_command,
                         image=args.image,
-                        db_dir=db_dir,
+                        db_dirs=db_dirs,
                         model_dir=model_dir,
                         cache_dir=cache_dir,
                         use_cache=use_cache,
                         quarantine_keep=args.quarantine_keep,
                     )
             finally:
-                shutil.rmtree(stage_dir, ignore_errors=True)
+                try:
+                    shutil.rmtree(stage_dir)
+                except OSError as exc:
+                    cleanup_failed = True
+                    print(f"[경고] staging 폴더를 정리하지 못했습니다: {stage_dir} ({exc})")
     except RuntimeError as exc:
         print(f"[오류] {exc}")
         return 1
@@ -1243,6 +1545,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         for job in failures:
             print(f"   - {job.json_file.name} -> {job.output_name}")
         print("[안내] 다시 실행하면 미완료 작업만 재시도합니다.")
+        return 1
+    if run_failed:
+        print("[오류] 필수 산출물은 존재하지만 하나 이상의 Docker 실행이 0이 아닌 코드로 끝났습니다.")
+        return 1
+    if cleanup_failed:
+        print("[오류] 계산은 끝났지만 staging 정리가 실패했습니다. --cleanup 으로 확인하세요.")
         return 1
     return 0
 

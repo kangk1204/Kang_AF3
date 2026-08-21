@@ -74,11 +74,13 @@ AF3 출력은 두 값을 같게 쓴다. 실측으로 확인했다 (복합체 277
   오프라인에서 여러 건이 필요하면 `--engine 3dmol --lib embed` 가 8배 작다.
 
 라이브러리 원본은 `--lib-cache` (기본 `~/.cache/af3_view3d`) 에 한 번 내려받아
-둔다. 캐시가 있으면 그 다음부터 인터넷 없이 embed 파일을 만들 수 있다.
+둔다. 고정 SHA-256이 맞는 cache만 재사용한다. CDN mode는 같은 고정 byte의 SRI와
+`crossorigin=anonymous`를 사용하고 generated page는 CSP로 외부 연결을 차단한다.
 CDN 두 곳(jsdelivr, unpkg)이 모두 막히면 npm 레지스트리 tarball 을 받아
 안에서 필요한 파일만 꺼낸다 (`tarfile` 은 표준 라이브러리다). 셋 다 막히면
 실패 이유와 함께 "인터넷 되는 컴퓨터에서 이 URL 을 저장해 `--lib-file` 로
-넘겨라" 를 알려주고 멈춘다.
+넘겨라" 를 알려주고 멈춘다. `--lib-file`은 신뢰한 executable JavaScript를
+명시적으로 제공하는 경로이므로 출처를 사용자가 검증해야 한다.
 
 버전을 `latest` 로 두지 않고 고정했다 (molstar 5.11.0, 3dmol 2.5.5).
 `latest` 는 어느 날 API 가 바뀌어 조용히 깨진다. 아래 4절의 확인은 이 두 버전에서
@@ -128,7 +130,8 @@ python 3.13.7) 와 로컬에서 돌렸다. 입력은 실제 AF3 v3.0 출력이�
 
 `_model.cif` 원본과 HTML 안에 들어간 값을 대조했다. 4건 전부에서:
 
-- HTML 안 mmCIF 블록이 원본과 **바이트 단위 일치** (`</` 이스케이프만 되돌린 뒤).
+- HTML 안 mmCIF는 base64 data block으로 저장되고 브라우저에서 UTF-8로 복원된다.
+  복원한 byte가 원본과 일치한다. 이 방식은 `</script>` data injection도 막는다.
 - 잔기 수, 원자 수가 원본과 일치 (138/1082, 135/1035, 123/939, 277/2101).
 - HTML 에 심긴 잔기별 pLDDT 와 원본 `B_iso_or_equiv` 의 잔기 평균의
   **최대 차 0.0000**. (같은 코드로 계산하므로 당연하지만, HTML 로 옮기는

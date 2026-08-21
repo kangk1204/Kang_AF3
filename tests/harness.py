@@ -73,6 +73,24 @@ class Workspace:
         self.cache_dir = self.root / "af3_cache"
         for path in (self.db_dir, self.model_dir, self.cache_dir):
             path.mkdir()
+        fasta = ">stub\nACDEFGHIKLMN\n"
+        for name in (
+            "bfd-first_non_consensus_sequences.fasta",
+            "mgy_clusters_2022_05.fa",
+            "uniref90_2022_05.fa",
+            "uniprot_all_2021_04.fa",
+            "pdb_seqres_2022_09_28.fasta",
+            "nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta",
+            "rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta",
+            "rnacentral_active_seq_id_90_cov_80_linclust.fasta",
+        ):
+            (self.db_dir / name).write_text(fasta, encoding="utf-8")
+        mmcif = self.db_dir / "mmcif_files"
+        mmcif.mkdir()
+        (mmcif / "stub.cif").write_text("data_stub\n", encoding="utf-8")
+        # Sparse file: exact pinned-model size without consuming 1.15 GB of blocks.
+        with (self.model_dir / "af3.bin").open("wb") as handle:
+            handle.truncate(1_146_811_260)
         self.stub_log = self.root / "stub_calls.jsonl"
 
     def write_json(self, filename: str, obj, *, raw_text: str | None = None) -> Path:
@@ -169,13 +187,25 @@ def make_stub_bin(root: Path) -> Path:
     bin_dir = root / "stub_bin"
     bin_dir.mkdir(exist_ok=True)
     sudo = bin_dir / "sudo"
-    sudo.write_text('#!/bin/sh\nexec "$@"\n', encoding="utf-8")
+    sudo.write_text(
+        '#!/bin/sh\n'
+        'if [ "${AF3_TEST_ALLOW_SUDO:-0}" != "1" ]; then exit 97; fi\n'
+        'if [ "$1" = "-n" ]; then shift; fi\nexec "$@"\n',
+        encoding="utf-8",
+    )
     sudo.chmod(0o755)
     docker = bin_dir / "docker"
     docker.write_text(
         f'#!/bin/sh\nexec "{sys.executable}" "{FAKE_DOCKER}" "$@"\n', encoding="utf-8"
     )
     docker.chmod(0o755)
+    nvidia = bin_dir / "nvidia-smi"
+    nvidia.write_text(
+        "#!/bin/sh\n"
+        "echo '0, Stub NVIDIA GPU, 999.0, 16384 MiB, 0 MiB, 16384 MiB, 0 %, 9.0'\n",
+        encoding="utf-8",
+    )
+    nvidia.chmod(0o755)
     return bin_dir
 
 
@@ -192,6 +222,9 @@ def run_script(
     """scripts/<script> 를 가짜 docker 가 놓인 PATH 로 실행한다."""
     bin_dir = make_stub_bin(workspace.root)
     env = dict(os.environ)
+    for key in list(env):
+        if key.startswith("AF3_STUB_") or key.startswith("AF3_TEST_"):
+            env.pop(key, None)
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env["AF3_STUB_LOG"] = str(workspace.stub_log)
     env["PYTHONIOENCODING"] = "utf-8"

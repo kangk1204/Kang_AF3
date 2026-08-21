@@ -13,25 +13,55 @@ VHH/나노바디처럼 짧은 단백질 수백에서 수천 건을 AlphaFold 3�
 
 **무엇을 하는 도구인가.** JSON 하나마다 `docker run` 을 새로 띄우는 방식을 컨테이너
 1회 기동으로 바꾼다. GPU 추론 단계가 건당 31.95초에서 5.39초로 **5.93배** 빨라지고
-(32건 곱하기 3반복 중앙값), 2000건 스크리닝이 축소 DB 구성에서 약 4.1시간이다
-(연구자 현재 방식 189시간). 필요한 것은 AF3 소스, 모델 가중치(Google DeepMind 승인 필요),
-서열 DB 세 개이고 모두 이 저장소에 없다
+(32건 곱하기 3반복 중앙값), 서로 다른 소규모 실험의 건당 시간을 합치면
+2000건이 약 4.1시간으로 **투영**된다
+(연구자 현재 방식 189시간). 필요한 것은 AF3 소스, Google 이용약관이 적용되는 모델 가중치,
+공식 DB root이며 모두 이 저장소에 없다
 ([3-1 다운로드 목록](#3-1-다운로드-목록)).
 
-**전체 흐름은 명령 4줄이다.**
+**Ubuntu에서 처음 설치한다면.** 저장소를 아직 받지 않았다면 먼저 내려받는다.
 
 ```bash
-# 0. 환경이 제자리에 있는지 (GPU, 가중치, DB, 도커, HMMER)
-bash scripts/af3_check.sh
+sudo apt update && sudo apt install -y git   # git이 이미 있으면 생략
+mkdir -p ~/af3_work
+git clone https://github.com/kangk1204/Kang_AF3.git ~/af3_work/Kang_AF3
+cd ~/af3_work/Kang_AF3
+```
+
+NVIDIA 드라이버가 이미 동작하고, Google의 현재 가중치 약관을 직접 확인·수락했다면
+설치 명령은 아래 한 줄이다. Docker, NVIDIA Container Toolkit, 확인된 AF3 소스 커밋으로
+빌드한 이미지, 가중치, full DB, 그림 환경을 설치하고 마지막에 전부 점검한다.
+
+```bash
+bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
+```
+
+full 설치는 시작 시 약 1TB의 빈 공간을 확인하고, DB 다운로드와 deep hash에 수 시간이
+걸릴 수 있다. 다시 실행하면 이미 완료되어 검증된 항목은 재사용한다.
+
+full DB를 아직 받지 않을 때는 `bash scripts/install_af3_ubuntu.sh`만 실행한다. 이 core
+모드는 Docker/GPU, AF3 이미지와 그림 환경까지만 설치한다. 새로 docker 그룹에 들어간
+경우 설치가 끝난 뒤 한 번 로그아웃·로그인한다.
+
+**설치 후 분석 흐름.**
+
+```bash
+# 0. 환경이 제자리에 있는지. 하나라도 필수 항목이 없으면 종료코드 1
+AF3_DB_DIR=~/public_databases_full bash scripts/af3_check.sh
 
 # 1. FASTA/CSV 에서 입력 JSON 을 타깃당 하나씩 만든다 -> vhh_001_in/
 python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta -o vhh_001_in
 
 # 2. 전수 실행. 컨테이너 1회 기동으로 vhh_001_in/ 전체를 순회한다 -> vhh_001_out/
-python3 scripts/run_af3_batch_improved.py --input-dir vhh_001_in --output-dir vhh_001_out --yes
+python3 scripts/run_af3_batch_improved.py --input-dir vhh_001_in --output-dir vhh_001_out \
+    --db-dir ~/public_databases_full --yes
 
 # 3. 결과를 CSV 한 장으로 집계한다
 python3 scripts/af3_collect.py vhh_001_out -o vhh_001_결과요약.csv
+
+# 4. pLDDT/PAE 그림과 브라우저 3D 뷰어를 만든다
+~/af3_plot_env/bin/python scripts/af3_visualize.py vhh_001_out -o figs
+python3 scripts/af3_view3d.py vhh_001_out --out-dir viewer
 ```
 
 **결과를 어떻게 읽나.** CSV 의 `등급` 열로 걸러내고, 단량체는 pTM 과 pLDDT평균, 복합체는
@@ -54,18 +84,22 @@ ipTM 을 본다. 신뢰도는 정답과의 일치도가 아니라 모델의 자�
 
 ## 1. 이 저장소의 범위
 
-AlphaFold 3 를 대량으로 돌리기 위한 껍데기다. 스크립트 8개를 제공한다.
+AlphaFold 3 를 대량으로 돌리기 위한 껍데기다. 설치·실행·입력·DB·후처리 스크립트 12개를 제공한다.
 
 | 스크립트 | 하는 일 |
 |----------|---------|
+| `scripts/install_af3_ubuntu.sh` | Ubuntu 단일 설치기. core 설치와 명시적 full 설치 |
 | `scripts/af3_check.sh` | 환경 진단. GPU, 드라이버, 가중치, DB, 도커, HMMER |
 | `scripts/af3_prepare.py` | FASTA/CSV 에서 AF3 입력 JSON 생성 |
+| `scripts/af3_db.py` | full DB 검증과 원자적 reduced-MSA overlay 생성 |
 | `scripts/run_af3_batch_improved.py` | 권장 배치 러너. 완료 판정을 최종 산출물로 하고 미완료 결과를 격리 보존하며 중복 실행을 차단한다 |
 | `scripts/af3_batch.py` | 배치 러너. 컨테이너 1회 기동, MSA/추론 2단계 분리, 재시작, 재시도 |
-| `scripts/af3run.sh` | 위 러너의 래퍼. 작업 이름 하나만 주면 된다 |
+| `scripts/af3run.sh` | legacy `af3_batch.py` 래퍼. 작업 이름 하나로 실행 |
 | `scripts/af3_collect.py` | 출력 폴더 전체를 훑어 신뢰도 지표 CSV 한 장으로 |
 | `scripts/af3_visualize.py` | pLDDT 플롯, PAE 히트맵, PyMOL/ChimeraX 색칠 명령 생성 |
 | `scripts/af3_stage2.py` | `_data.json` 재사용으로 MSA 를 건너뛰는 2단계 입력 생성 |
+| `scripts/af3_rankcorr.py` | 두 설정의 순위 상관·top-N 보존 비교 |
+| `scripts/af3_view3d.py` | 무결성 검증된 Mol*/3Dmol 기반 로컬 HTML 뷰어 생성 |
 
 **AlphaFold 3 자체가 아니다.** AF3 코드도, 가중치도, 데이터베이스도 이 저장소에 없다
 ([3-1](#3-1-다운로드-목록)). 그리고 **이 저장소는 공개다. 가중치 파일,
@@ -82,14 +116,15 @@ AlphaFold 3 를 대량으로 돌리기 위한 껍데기다. 스크립트 8개를
 
 | 항목 | 요구 | 근거 |
 |------|------|------|
-| GPU | **16GB 면 충분하고도 남는다.** Blackwell sm_120 (RTX 5070 Ti / 5090 계열) 확인 | 실측 |
+| GPU | **짧은 VHH는 RTX 3080 Ti 12GB에서도 실제 추론됐다.** 1024-token 공식 stress는 기본 메모리 설정에서 OOM, unified memory에서 통과했다. 일반 입력의 보장은 아니다 | 2026-08-20 실측 |
 | 실제 VRAM 피크 (VHH 116~144 aa, sample 5 곱하기 recycle 10) | **2,942~2,963 MiB** | gpu-5070ti 23런 |
 | CPU | 8코어 이상 권장. MSA 단계 속도를 직접 결정한다 | 실측 |
 | RAM | 검증 호스트는 126GB. 축소 DB 만 쓰면 훨씬 적어도 된다 (하한 미측정) | |
-| 디스크 | 축소 DB 경로 약 5GB, 전체 DB 경로 약 855GB. 전체 DB 계획이면 여유 1TB | 실측 |
+| 디스크 | full DB 해제본 약 627GiB. 압축본 223GiB를 함께 보존하면 peak 약 850GiB. reduced-MSA overlay는 약 2GB지만 템플릿 fallback용 full DB를 유지해야 한다 | 2026-08-21 실측 |
 
-`nvidia-smi` 는 15,157 MiB 를 쓰고 있다고 표시한다. **이건 수요가 아니라 XLA 의
-선점량(미리 예약한 메모리)이다.** 이 숫자를 보고 VRAM 이 부족하다고 판단하면 틀린다.
+이전 RTX 5070 Ti 측정에서 `nvidia-smi`는 15,157 MiB를 사용 중이라고 표시했다. 이는
+실사용량이 아니라 XLA 선점량이었다. 현재 Docker full 실행에서도 MSA 단계에 약 11.7GB를
+미리 잡았지만 GPU 연산은 아직 시작하지 않은 상태였다.
 
 ![gpu-5070ti 추론 실측: 컴파일 상환, 캐시 효과, VRAM 선점 대 실제 요구량](figures/baseline_gpu5070ti.png)
 
@@ -101,17 +136,19 @@ AlphaFold 3 를 대량으로 돌리기 위한 껍데기다. 스크립트 8개를
 
 ### 동작이 확인된 버전 조합
 
-아래 조합에서 처음부터 끝까지 돌아갔다. 막히면 여기로 돌아오라.
+공통 기준은 AF3 commit `97d20234c6eb89e8d05376e9eecc9321e60a559b`
+(tag `v3.0.4-15-g97d2023`), JAX/jaxlib 0.10.2, HMMER 3.4와 AF3의
+`--seq_limit` 패치다.
 
-AF3 commit `97d20234c6eb89e8d05376e9eecc9321e60a559b` (tag `v3.0.4-15-g97d2023`),
-Python 3.12.13 (AF3 가 `requires-python >=3.12`), JAX/jaxlib 0.10.2
-(`jax[cuda12]==0.10.2`), jax-cuda12-plugin/pjrt 0.10.2, CUDA 12.9 (JAX 번들: cublas
-12.9.2.10, cudnn 9.24.0.43, nvcc 12.9.86, runtime 12.9.79, nccl 2.31.2), numpy 2.5.2,
-rdkit 2025.9.4, dm-haiku 0.0.17, tokamax 0.0.12, HMMER 3.4 + AF3 의 `--seq_limit` 패치.
+현재 Docker 경로는 Ubuntu 26.04, kernel 7.0.0, Docker Engine 29.7.2,
+NVIDIA Container Toolkit 1.20.0, RTX 3080 Ti 12GB, driver 595.84에서 검증했다.
+이미지는 CUDA 12.6.3 기반, Python 3.12.3, AF3 3.0.4이며 컨테이너 안의 JAX가
+`CudaDevice(id=0)`을 확인했다.
 
-`flash_attention` 은 triton 기본값으로 sm_120 에서 동작한다. **시스템 nvcc 를 따로 깔
-필요가 없다.** JAX 가 번들로 가져온다. PTX 관련 오류는 나오지 않았다. 설치 실측 기록은
-[docs/install_log.md](docs/install_log.md).
+이전 native 측정은 RTX 5070 Ti에서 Python 3.12.13, CUDA 12.9 JAX 번들,
+jax-cuda12-plugin/pjrt 0.10.2, numpy 2.5.2, rdkit 2025.9.4, dm-haiku 0.0.17,
+tokamax 0.0.12 조합이었다. 두 경로 모두 시스템 `nvcc`를 따로 설치하지 않았다.
+세부 설치 기록은 [docs/install_log.md](docs/install_log.md)에 있다.
 
 ---
 
@@ -121,25 +158,26 @@ rdkit 2025.9.4, dm-haiku 0.0.17, tokamax 0.0.12, HMMER 3.4 + AF3 의 `--seq_limi
 
 | 경로 | 실작업 시간 | 디스크 | 어떤 경우에 |
 |------|-------------|--------|-------------|
-| **A. 축소 DB** | 약 **40분~1시간 30분** | 약 5GB | 단량체 전수 스크리닝. 대부분의 경우 이쪽 |
-| **B. 전체 DB** | 약 **4~5시간** | 약 **855GB** | 복합체(항원 결합) 예측, 소수 정밀 재계산 |
+| **A. reduced-MSA overlay + full fallback** | full 다운로드 후 10~20분 추가 | full 해제본 627GiB + overlay 약 2GB | MSA 속도 실험·단량체 스크리닝 |
+| **B. full DB** | 회선에 따라 수 시간 | 해제본 약 **627GiB**; 압축본 보존 시 peak 약 850GiB | 공식에 가장 가까운 기본 경로·복합체 예측 |
 
-두 경로 모두 가중치 접근 승인 대기 시간은 별도다 (Google 측 처리, 수일 걸릴 수 있음, 추정).
-**승인 요청은 설치 첫날에 넣어 두고 나머지를 진행하면 대기 시간이 겹친다.**
-
-주 경로는 Docker 다. Docker 를 못 쓰는 경우의 conda 네이티브 설치는 [3-7](#3-7-conda-네이티브-설치-docker-를-못-쓰는-경우)에 있다.
+모델 가중치는 Google이 제공하는 URL에서 직접 받아야 하며 현재 약관을 먼저 확인한다.
+배치 러너는 Docker 전용이다. Ubuntu 설치 명령은 아래에 있고, 다른 배포판은
+[Docker Engine 설치 문서](https://docs.docker.com/engine/install/)와
+[NVIDIA Container Toolkit 설치 문서](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)를
+따른다. native 설치는 [3-7](#3-7-native-설치-러너와-별도)의 별도 경로다.
 
 ### 3-1. 다운로드 목록
 
 | 단계 | 받을 것 | 용량 | 어디서 | 시간 |
 |------|---------|------|--------|------|
 | ① | **AF3 소스 코드** | 수십 MB | https://github.com/google-deepmind/alphafold3 (Apache 2.0) | 1~2분 (추정) |
-| ② | **도커 이미지** | 수십 GB (추정, 중간 레이어 포함) | 위 소스의 `docker/Dockerfile` 로 빌드 | 20~40분 (**미측정 추정.** 검증 호스트에 Docker 없음) |
-| ③ | **가중치 접근 승인** | | **Google DeepMind 에 직접 요청.** 우리가 대신 받아줄 수 없다 | 요청 10분, **승인 대기 수일 (추정)** |
-| ④ | **모델 가중치 `af3.bin`** | 1,146,811,260 B (약 1.15GB) | 승인 후 안내받은 경로 | 1~5분 (회선에 따라) |
-| ⑤ | **`ccd.pickle`** | 542,994,372 B (약 543MB) | 받는 것이 아니라 `build_data` 로 굽는다 | 수 분 (미측정). 설치 시 1회 |
-| ⑥-A | **축소 DB** | 약 2GB | 공식 축소 세트는 없다. 전체 DB 파일을 잘라 만든다 (3-5) | 10~20분 |
-| ⑥-B | **전체 DB** | 압축 238.8GB, 해제 후 **850GB 점유** | `fetch_databases.sh` (승인 불필요) | **3시간 13분 (실측)** |
+| ② | **도커 이미지** | 로컬 unpacked 15.5GB + 빌드 캐시 24.0GB. `image inspect` 크기 4,699,381,677 B | 위 소스의 `docker/Dockerfile` 로 빌드 | 첫 빌드 34분 (2026-08-21 실측) |
+| ③ | **가중치 약관 확인** | | Google에서 직접 받은 파일만 사용 | 사용자 확인 |
+| ④ | **모델 가중치 `af3.bin.zst`** | 1,020,545,840 B | 공식 Google Storage URL | 회선에 따라 |
+| ⑤ | **`ccd.pickle`** | 수백 MB. 2026-08-20 native 재검증에서는 568,392,544 B | 받는 것이 아니라 현재 환경의 `build_data` 로 굽는다 | 23.5초 (이번 native 실측). 설치 시 1회 |
+| ⑥-A | **reduced-MSA overlay** | 약 2GB 추가 | full DB의 7개 MSA FASTA를 완전 레코드 경계에서 자른다 | 10~20분 |
+| ⑥-B | **전체 DB** | 압축 238.8GB(223GiB), 해제본 약 **627GiB** | `fetch_databases.sh` (승인 불필요) | 회선 의존. 과거 빠른 회선 3시간 13분 |
 | ⑦ | 첫 실행 컴파일 | | | **최대 406~497초 (실측)**, 이후 웜 6.55~8.5초 |
 | | **이 저장소** | 수 MB | https://github.com/kangk1204/Kang_AF3 | 스크립트와 문서만 |
 
@@ -148,33 +186,111 @@ rdkit 2025.9.4, dm-haiku 0.0.17, tokamax 0.0.12, HMMER 3.4 + AF3 의 `--seq_limi
 저장소에 커밋하면 안 된다 ([11절](#11-라이선스와-인용),
 [docs/license_notes.md](docs/license_notes.md)).
 
-### 3-2. AF3 소스와 도커 이미지
+### 3-2. Ubuntu 단일 설치기
+
+지원 범위는 Ubuntu 22.04/24.04/26.04 amd64와 이미 동작하는 NVIDIA 드라이버다.
+드라이버 설치·업그레이드는 재부팅과 장비별 판단이 필요하므로 이 스크립트가 건드리지
+않는다. 먼저 `nvidia-smi`가 성공하는지 확인한다. 설치기는 이 저장소 안의 진단·DB 검증
+도구를 함께 쓰므로 스크립트 파일 하나만 따로 받지 말고 저장소 전체를 clone한다.
+
+full 설치는 약 1TB의 빈 공간과 수 시간의 다운로드가 필요하다. Google의
+[현재 가중치 약관](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)을
+직접 읽고 수락한 경우에만 다음 명령을 실행한다.
 
 ```bash
-mkdir -p ~/af3_work && cd ~/af3_work            # 작업 폴더를 하나 정한다
+cd ~/af3_work/Kang_AF3
+bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
+```
+
+`--accept-weights-terms`는 사용자가 원문을 직접 확인했다는 명시적 표시일 뿐, 스크립트가
+법적 판단을 대신한다는 뜻이 아니다. 이 플래그가 없으면 full 설치는 `sudo`, 네트워크,
+파일 쓰기 전에 중단한다.
+
+가중치와 DB를 나중에 받을 경우 core 설치만 한다.
+
+```bash
+bash scripts/install_af3_ubuntu.sh
+```
+
+core는 Docker CE, NVIDIA Container Toolkit, 고정 AF3 이미지와 `~/af3_plot_env`를
+설치한다. full은 여기에 검증된 가중치와 full DB를 추가한다. 기존 항목이 정확하면
+재사용하고, 잘못된 가중치·불완전한 최종 DB·출처 label 없는 이미지·설치기가 만들지 않은
+plot venv·충돌하는 소스는 덮어쓰거나 지우지 않고 이유를 표시한 뒤 멈춘다. DB는
+`<DB경로>.partial`에서 받은 뒤 검증을 통과해야 최종 경로로 옮긴다. 검증은 파일 존재뿐
+아니라 고정 v3.0 FASTA 8개의 정확한 byte 크기와 SHA-256을 확인한다. mmCIF는 보존된 공식
+압축본의 SHA-256을 우선 확인하고, 압축본이 없으면 195,858개 파일의 정렬된 content-tree
+SHA-256을 계산한다. 이 deep 검증은 약 480~650GB를 읽으므로 저장장치에 따라 수십 분에서
+수 시간이 걸릴 수 있다.
+
+실행 전에 계획과 경로만 보려면 다음처럼 한다. `--dry-run`은 `sudo`, 네트워크, 파일 쓰기를
+하지 않는다.
+
+```bash
+bash scripts/install_af3_ubuntu.sh --dry-run --full --accept-weights-terms
+```
+
+기본 경로는 `~/af3_work`, `~/af3_models`, `~/public_databases_full`,
+`~/af3_plot_env`다. 다른 디스크를 쓸 때는 절대경로 환경변수로 바꾼다.
+
+```bash
+AF3_DB_DIR=/data/af3/public_databases_full \
+  bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
+```
+
+설치 중에는 현재 로그인 세션에 새 그룹이 아직 반영되지 않아도 임시 docker-group shell로
+검증을 끝낸다. 설치가 끝난 뒤 로그아웃·로그인해야 일반 배치 명령이 `sudo` 없이 동작한다.
+docker 그룹은 호스트 root 권한에 준하므로 신뢰하는 사용자만 넣는다.
+
+#### 수동 설치 fallback
+
+자동 설치기가 기존 APT 설정과 충돌해 멈췄다면 그 파일을 임의로 덮어쓰지 않는다. 배포판과
+기존 설정에 맞춰 [Docker Engine 공식 Ubuntu 절차](https://docs.docker.com/engine/install/ubuntu/)와
+[NVIDIA Container Toolkit 공식 절차](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)를
+적용한 뒤 아래 두 명령으로 확인한다. 서명 키와 저장소 형식은 바뀔 수 있으므로 오래된
+복사 명령을 README에 중복해 두지 않는다.
+
+```bash
+docker run --rm \
+  hello-world@sha256:5dd0d3e6e255913fc30f90b9f2b1d359cc2cbdb48090cc4b65f1676e203243cc
+docker run --rm --runtime=nvidia --gpus all \
+  ubuntu@sha256:2260313b31c8c011cd2eebe728008efac1b3982be73eb71348ea2648d2c0e09b \
+  nvidia-smi
+```
+
+두 번째 명령에 자신의 GPU 이름과 드라이버 버전이 나오면 Docker GPU 경로가 준비된 것이다.
+2026-08-21 검증 호스트에서는 Docker Engine 29.7.2, NVIDIA Container Toolkit 1.20.0,
+driver 595.84, RTX 3080 Ti가 확인됐다.
+
+AF3 소스를 고정한 커밋으로 받은 뒤 공식 Dockerfile을 빌드한다.
+
+```bash
+mkdir -p ~/af3_work && cd ~/af3_work
+git clone https://github.com/kangk1204/Kang_AF3.git
 git clone https://github.com/google-deepmind/alphafold3.git
-cd alphafold3
+cd ~/af3_work/alphafold3
 git checkout 97d20234c6eb89e8d05376e9eecc9321e60a559b   # 확인된 커밋 (권장)
-sudo docker build -t alphafold3 -f docker/Dockerfile .  # 20~40분
-sudo docker image ls | grep alphafold3                  # 빌드 확인
+docker build -t alphafold3 -f docker/Dockerfile .       # 첫 빌드 실측 34분
+docker image ls | grep alphafold3                       # 빌드 확인
+cd ~/af3_work/Kang_AF3                                  # 이후 명령은 항상 여기서
 ```
 
 이미지 이름을 `alphafold3` 로 두면 이 저장소의 스크립트가 기본값으로 찾는다. 다른 이름은
-`--image` 또는 환경변수 `AF3_IMAGE` 로 알려준다. 빌드 중 화면이 몇 분씩 멈춘 것처럼
-보이는 구간이 있다(HMMER 컴파일 등). 정상이다.
+`--image` 또는 환경변수 `AF3_IMAGE` 로 알려준다. 첫 빌드에서는 HMMER와 CUDA Python
+패키지를 내려받고 컴파일하므로 로그가 한동안 뜸할 수 있다.
 
 ### 3-3. 모델 가중치 확보
 
-**이 단계는 우리가 대신 해줄 수 없다.**
-
-AF3 공식 저장소의 가중치 요청 안내를 따라 접근 요청 양식을 제출하고(소속, 용도는
-비영리 연구, 이름을 정확히 쓴다), 승인 메일을 기다린 뒤(수일, 추정) 안내받은 방법으로
-`af3.bin`(또는 `af3.bin.zst`)을 받아 `~/af3_models` 에 두고 크기와 해시를 확인한다.
+가중치는 반드시 Google에서 직접 받고
+[현재 이용약관](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)을
+준수한다. 동료에게 복사하거나 이 저장소에 커밋하지 않는다.
 
 ```bash
 mkdir -p ~/af3_models
-mv ~/Downloads/af3.bin ~/af3_models/
-# .zst 로 받았으면 풀어야 한다: zstd -d ~/af3_models/af3.bin.zst
+curl -L --fail --continue-at - \
+  https://storage.googleapis.com/alphafold3/af3.bin.zst \
+  -o ~/af3_models/af3.bin.zst
+zstd -t ~/af3_models/af3.bin.zst
+zstd -d -f ~/af3_models/af3.bin.zst -o ~/af3_models/af3.bin
 
 ls -l ~/af3_models/af3.bin
 sha256sum ~/af3_models/af3.bin
@@ -184,27 +300,19 @@ sha256sum ~/af3_models/af3.bin
 ```
 
 `af3.bin.zst` 는 1,020,545,840 B 이고 가중치 안에는 파라미터가 368,384,602개 있다.
-해시가 다르면 최신 버전일 수 있다. 먼저 **크기가 절반 이하인지** 확인한다.
-절반 이하라면 다운로드가 잘린 것이다.
+이 저장소는 pinned AF3 commit과 함께 위 크기를 엄격히 검사한다. 다른 모델 release를
+의도했다면 코드·가중치·출력 계약을 함께 다시 검증해야 한다.
 
-### 3-4. build_data: 화학 성분 사전 굽기
+### 3-4. build_data
 
-AF3 는 화학 성분 사전을 pickle 로 미리 구워 둔다. **설치 시 1회만** 하면 되고,
-도커 이미지 빌드 과정에 포함돼 있으면 건너뛴다.
-
-```bash
-sudo docker run --rm alphafold3 build_data      # 이미 있으면 아무것도 안 한다
-```
-
-생성물은 `ccd.pickle` 542,994,372 B (화학 성분 50,942종)와
-`chemical_component_sets.pickle` 8,424 B 다 (실측). 수 분 걸린다 (미측정).
-**이 파일도 저장소에 커밋하면 안 된다.**
+공식 Dockerfile이 이미지 빌드 중 `uv run build_data`를 이미 실행한다. Docker 설치에서는
+별도의 임시 `docker run ... build_data`가 필요 없다. native 설치에서만 직접 실행한다.
 
 ### 3-5. 데이터베이스 선택
 
 두 선택지의 실측 차이:
 
-| 항목 | 축소 DB (약 2GB) | 전체 DB (850GB) | 배수 |
+| 항목 | 축소 DB (약 2GB) | 전체 DB | 배수 |
 |------|------------------|-----------------|------|
 | MSA unpaired / paired 깊이 | 9~13 / 158~225 | 10,640~10,745 / 24,250~27,353 | **818~1,186배 / 120~150배** |
 | 건당 시간 (end-to-end) | 43.3초 | 1,830초 | **42.2배** |
@@ -230,130 +338,66 @@ VHH 프레임워크는 그 신호 없이도 템플릿만으로 잡힌다.
 
 - 단량체 VHH 를 수백에서 수천 건 전수 스크리닝한다: **축소 DB.** 전체 DB 로 2000건은
   42일이라 애초에 선택지가 아니다.
-- 항원-나노바디 복합체의 결합을 보고 싶다(ipTM 이 필요하다): **전체 DB.** paired MSA 가
-  120~150배 차이나므로 계면 예측에는 사실상 필수로 보인다. 단 이건 추론이고, 비교한
-  6종이 모두 단량체여서 ipTM 이 산출되지 않았다 ([12절](#12-측정-조건과-한계)).
+- 항원-나노바디 복합체의 결합을 보고 싶다(ipTM 이 필요하다): **full DB를 기본으로 권한다.**
+  paired MSA 차이가 계면에 영향을 줄 가능성은 있지만, 비교 6종이 모두 단량체여서
+  이 저장소는 ipTM 개선을 직접 측정하지 않았다 ([12절](#12-측정-조건과-한계)).
 - 실용적인 조합은 축소 DB 로 전수 스크리닝하고 상위 후보 수십 건만 전체 DB 로 재계산하는 것이다.
 
-**이미 축소 DB 로 돌려 놓은 결과는 버릴 필요가 없다.** 단량체 신뢰도 기준으로는
-전체 DB 결과와 실질적으로 같다.
+**이미 축소 DB로 돌린 결과는 6개 단량체 panel의 탐색 자료로는 남길 수 있다.** 다만
+외부 정답 구조, CDR geometry, 복합체 계면, 대규모 순위 보존을 검증한 결과는 아니다.
 
-#### ⑥-B 전체 DB 다운로드와 해제 (3시간 13분, 실측)
+#### ⑥-B full DB 다운로드와 검증
 
-축소 DB 도 전체 DB 파일을 잘라 만들기 때문에 전체 DB 를 먼저 적었다.
-축소 DB 만 볼 것이면 ⑥-A 로 건너뛰면 된다.
-
-AF3 소스에 다운로드 스크립트가 들어 있다. 인자로 받을 폴더를 준다.
+공식 스크립트는 `wget`, `tar`, `zstd`를 요구하며 9개 다운로드를 동시에 실행한다.
+중간 파일·resume·checksum 기능은 없으므로 `tmux`에서 실행하고 완료 뒤 반드시 검증한다.
 
 ```bash
-sudo apt install -y wget tar zstd        # 스크립트가 이 셋을 요구한다
+sudo apt install -y wget tar zstd
 cd ~/af3_work/alphafold3
-bash fetch_databases.sh ~/public_databases
+bash fetch_databases.sh ~/public_databases_full
+cd ~/af3_work/Kang_AF3
+python3 scripts/af3_db.py verify --db-dir ~/public_databases_full
 ```
 
-스크립트는 아래 9개를 `https://storage.googleapis.com/alphafold-databases/v3.0` 에서
-받아 압축을 풀며, 9개를 동시에 내려받는다. 승인이나 계정이 필요하지 않다.
+`af3_db.py verify`는 8개 비어 있지 않은 FASTA와 실제 `.cif`가 든 `mmcif_files`를 확인하는
+빠른 구조·경로 사전점검이다. 수백 GB의 byte 단위 checksum 검증은 단일 설치기를
+`--full`로 실행할 때 수행한다.
+2026-08-21 재검증에서 해제본은 약 627GiB였고, 압축본 223GiB를 함께 보존했을 때
+디렉터리 peak가 약 850GiB였다. 회선과 파일시스템에 따라 시간은 크게 달라지므로 자신의
+환경 기록을 우선한다. 다운로드가 끊겼다면 반쪽 파일을 정상으로
+간주하지 말고 공식 스크립트를 다시 실행한 뒤 압축 해제 성공, 예상 규모, `verify`를 함께
+확인한다.
 
-| 파일 | 무엇 |
-|------|------|
-| `pdb_2022_09_28_mmcif_files.tar` | 템플릿 검색용 PDB 구조. 해제하면 195,859개 파일 |
-| `uniref90_2022_05.fa` | 단백질 MSA 주력 |
-| `mgy_clusters_2022_05.fa` | MGnify. 환경 시료 유래 |
-| `bfd-first_non_consensus_sequences.fasta` | BFD |
-| `uniprot_all_2021_04.fa` | paired MSA 용. 복합체에서 중요하다 |
-| `pdb_seqres_2022_09_28.fasta` | PDB 서열 |
-| `rnacentral_...linclust.fasta` | RNA |
-| `nt_rna_2023_02_23_...rep_seq.fasta` | RNA |
-| `rfam_14_9_...rep_seq.fasta` | RNA |
+#### ⑥-A reduced-MSA overlay 생성
 
-받는 도중에 끊기면 그 파일만 반쪽으로 남고, 스크립트를 다시 돌리면 처음부터
-다시 받는다. 끝난 뒤 크기를 확인해 두면 나중에 원인을 찾기 쉽다.
+공식 standalone 축소 DB는 없다. 이 저장소가 지원하는 경량 구성은 full DB 앞에 두는
+7개 FASTA overlay다. 템플릿 `pdb_seqres`와 `mmcif_files`는 full fallback에서 읽는다.
+따라서 full DB를 삭제할 수 없고 디스크 절약용 기능이 아니라 MSA 검색량 실험용이다.
 
 ```bash
-du -sh ~/public_databases                       # 850GB 정도여야 한다
-ls -la ~/public_databases/*.fa ~/public_databases/*.fasta
-ls ~/public_databases/mmcif_files | wc -l       # 195859
+cd ~/af3_work/Kang_AF3
+python3 scripts/af3_db.py reduce \
+  --source ~/public_databases_full \
+  --output ~/public_databases_reduced
+python3 scripts/af3_db.py verify \
+  --db-dir ~/public_databases_reduced \
+  --db-dir ~/public_databases_full
+
+python3 scripts/run_af3_batch_improved.py \
+  --db-dir ~/public_databases_reduced \
+  --db-dir ~/public_databases_full \
+  --yes
 ```
 
-#### ⑥-A 축소 DB 준비 (전체 DB 를 이미 받았으면 10~20분)
+도구는 모든 source를 먼저 검사하고, 완전한 FASTA 레코드까지만 쓰며, output/prefix SHA-256·레코드수·
+바이트수가 든 `af3_db_manifest.json`을 만든 뒤 디렉터리를 원자적으로 publish한다.
+`verify`는 manifest schema와 파일 byte 수를 자동 대조한다. 매 실행 때 multi-GB 전체 hash를
+다시 읽지는 않으므로 같은 크기 변조를 의심하면 manifest의 `output_sha256`과 직접 대조한다.
+외부 `mmcif_files` symlink는 Docker 안에서 깨지므로 만들지도 허용하지도 않는다.
 
-**공식 저장소에는 축소 세트가 없다.** 우리가 측정에 쓴 축소 DB 는 전체 DB 파일의
-앞부분을 서열 경계에서 잘라 만든 대리 세트다. 연구자분이 쓰시는 약 2GB 파일과
-구성이 같지 않을 수 있으므로, MSA 깊이 절대값은 다를 수 있다.
-
-FASTA 를 목표 크기까지 읽되 서열 중간에서 끊기지 않게 자른다.
-
-```bash
-mkdir -p ~/public_databases_reduced
-
-# 단백질 DB 4종을 목표 크기로 자른다 (서열 경계에서 끊는다)
-python3 - <<'EOF'
-import pathlib
-SRC = pathlib.Path.home() / "public_databases"
-DST = pathlib.Path.home() / "public_databases_reduced"
-DST.mkdir(exist_ok=True)
-TARGET = {                                  # 우리가 쓴 크기 (바이트)
-    "uniref90_2022_05.fa": 520_000_000,
-    "bfd-first_non_consensus_sequences.fasta": 420_000_000,
-    "mgy_clusters_2022_05.fa": 420_000_000,
-    "uniprot_all_2021_04.fa": 320_000_000,
-    "rnacentral_active_seq_id_90_cov_80_linclust.fasta": 60_000_000,
-    "nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta": 60_000_000,
-}
-for name, limit in TARGET.items():
-    src = SRC / name
-    if not src.exists():
-        print("없음, 건너뜀:", name); continue
-    written = 0
-    with open(src, "rb") as fi, open(DST / name, "wb") as fo:
-        for line in fi:
-            if written >= limit and line.startswith(b">"):
-                break                       # 다음 서열이 시작되는 지점에서 끊는다
-            fo.write(line); written += len(line)
-    print("%12d  %s" % (written, name))
-EOF
-
-# 아래 셋은 자르지 않고 그대로 쓴다 (원래 작다)
-cp ~/public_databases/pdb_seqres_2022_09_28.fasta ~/public_databases_reduced/
-cp ~/public_databases/rfam_14_9_*.fasta           ~/public_databases_reduced/
-
-# 템플릿용 PDB 구조는 링크로 공유한다 (복사하면 용량이 두 배가 된다)
-ln -s ~/public_databases/mmcif_files ~/public_databases_reduced/mmcif_files
-```
-
-우리가 쓴 축소본의 실제 크기다.
-
-| 파일 | 크기 | 서열 수 |
-|------|------|---------|
-| `uniref90_2022_05.fa` | 519,998,727 B | 71,974 |
-| `bfd-first_non_consensus_sequences.fasta` | 419,999,948 B | 3,242,672 |
-| `mgy_clusters_2022_05.fa` | 419,999,469 B | 1,886,706 |
-| `uniprot_all_2021_04.fa` | 319,999,311 B | 633,249 |
-| `rfam_14_9_...rep_seq.fasta` | 228,433,680 B | 자르지 않음 |
-| `nt_rna_...rep_seq.fasta` | 59,999,964 B | |
-| `rnacentral_...linclust.fasta` | 59,911,226 B | |
-| `pdb_seqres_2022_09_28.fasta` | 916,475 B | 자르지 않음 |
-
-**템플릿 검색용 구조 파일은 자르지 않는다.** 축소 DB 로도 VHH 신뢰도가 거의 떨어지지 않은 이유가
-템플릿이 그대로 있었기 때문이다. `mmcif_files` 를 잘라내면 그 이점이 사라진다.
-
-`--db_dir` 로 어느 쪽을 쓸지 고른다.
-
-```bash
-python3 scripts/run_af3_batch_improved.py --db-dir ~/public_databases_reduced --yes
-```
-
-실측 (4병렬 다운로드, 평균 약 41MB/s 회선): 압축 파일 238.8GB 다운로드 **1시간 37분**,
-그중 mmCIF tar 해제가 **1시간 36분**(195,859개 파일, 최장 단계), 다운로드 시작부터 전량
-해제 완료까지 **3시간 13분**, 해제 후 점유 **850GB**. 무결성은 9개 항목 전부 원격
-`Content-Length` 와 바이트 단위로 일치했다.
-
-mmCIF 해제 중에 진행이 멈춘 것처럼 보일 것이다. 파일이 20만 개라 그렇다.
-`du -sh ~/public_databases` 로 조금씩 늘어나는지만 확인하면 된다.
-
-공식 문서의 약 252GB / 630GB 와 우리 실측(238.8GB / 850GB)이 다른 것은 단위 해석
-(GB 대 GiB)과 파일시스템 블록 반올림 때문이다. **디스크는 실측값 850GB 를 기준으로
-준비하라.** 상세 기록은 [docs/db_notes.md](docs/db_notes.md).
+과거 벤치마크는 RCSB에서 선택한 1,239개 template와 대응하는 3,531개 chain의 `pdb_seqres`를
+사용했다. 그 ID/query manifest가 이 저장소에 없어 **정확히 재현할 수 없는 역사적 측정**이다.
+현재 overlay+full fallback 결과를 그 benchmark와 동일 조건이라고 부르지 않는다.
 
 ### 3-6. 폴더 관례
 
@@ -361,43 +405,58 @@ mmCIF 해제 중에 진행이 멈춘 것처럼 보일 것이다. 파일이 20만
 `<이름>` 은 작업 하나를 가리키는 이름이다 (예: `vhh_001`).
 
 ```
-~/public_databases/          서열 DB
+~/public_databases_full/     공식 full DB
+~/public_databases_reduced/  선택: reduced-MSA overlay (standalone 아님)
 ~/af3_models/                가중치 (af3.bin)
 ~/af3_work/                  작업 폴더. 여기서 명령을 실행한다
-    <이름>_in/               입력 JSON
-    <이름>_out/              결과
-    <이름>_work/             로그, MSA 보관, 요약 CSV (스크립트가 만든다)
+    alphafold3/              공식 AF3 source
+    Kang_AF3/                이 저장소. 아래 작업 폴더도 여기 둔다
+        <이름>_in/           입력 JSON
+        <이름>_out/          결과
+        <이름>_work/         로그, MSA 보관, 요약 CSV (스크립트가 만든다)
 ```
 
-### 3-7. conda 네이티브 설치 (Docker 를 못 쓰는 경우)
+### 3-7. native 설치 (러너와 별도)
 
-sudo 권한이 없거나 Docker 가 없는 서버에서는 conda 로 직접 설치할 수 있다. 검증 호스트가
-그 경우였다.
+공식 AF3는 native 경로도 제공하지만 HMMER 3.4의 AF3 `--seq_limit` patch, Python 3.12,
+JAX/CUDA 조합을 정확히 맞춰야 한다. 최신 명령은
+[공식 설치 문서](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md)를 따른다.
+이 저장소의 두 batch runner는 Docker 명령을 조립하므로 native AF3를 대신 실행하지 않는다.
+native에서는 공식 `uv run run_alphafold.py ...`를 직접 사용한다.
 
-```bash
-conda create -y -n af3 python=3.12
-conda activate af3
-conda install -y -c conda-forge cmake zlib hmmer
-export CMAKE_PREFIX_PATH=$CONDA_PREFIX   # 시스템 zlib-dev 가 없을 때 필요
-cd ~/af3_work/alphafold3
-pip install "jax[cuda12]==0.10.2"
-pip install .
-build_data
-```
-
-전체 명령과 그때 만난 문제와 해결은 [docs/install_log.md](docs/install_log.md) 에 있다.
-우리 수치는 conda 네이티브 측정이므로 컨테이너 기동 비용이 빠져 있고,
-**우리 값은 Docker 환경의 하한이다.** Docker 에서는 건당 시간이 같거나 조금 더 나온다.
+[docs/install_log.md](docs/install_log.md)는 2026-08-18 검증 호스트의 **역사적 설치 기록**이다.
+현재 범용 설치 명령이나 Docker 대비 성능 보증으로 읽지 않는다.
 
 ### 3-8. 첫 실행 지연
 
-처음 한 번은 XLA 가 GPU 커널을 컴파일한다. 관측한 프로세스 고정 오버헤드는 콜드/고부하
-상태에서 **406~497초**까지 올라갔고 웜 상태에서는 6.55~8.5초다.
-**첫 실행이 5~8분 걸려도 고장이 아니다.**
+처음 한 번은 XLA가 GPU 커널을 컴파일한다. 이전 native 측정에서는 콜드·고부하 상태의
+고정 오버헤드가 406~497초, 웜 상태가 6.55~8.5초였다. 현재 Docker 검증에서는 준비된
+116-token `_data.json`의 첫 실행이 전체 39.3초, 모델 추론 23.64초였다. GPU와 캐시,
+입력 설정이 다르므로 어느 한 값을 다른 장비의 보장으로 쓰지 않는다.
+
+raw JSON을 full DB로 실행하면 이 컴파일보다 MSA 검색이 훨씬 오래 걸린다. 그동안 GPU
+사용률이 0%여도 정상이다. `_data.json`이 생성된 뒤 추론 단계에서 GPU가 동작한다.
 
 컴파일 캐시 디렉터리를 지정하면 첫 컴파일을 재사용할 수 있다(스크립트가 기본으로 한다).
 다만 캐시의 이득은 배치가 커지면 0으로 수렴한다. 첫 2건의 컴파일만 없애기 때문이고,
 96건 순회에서 정상상태 4.20초는 캐시 유무와 무관했다 (실측).
+
+### 3-9. 결과 그림용 Python 환경
+
+단일 설치기를 사용했다면 이 환경은 이미 만들어져 있다. 수동 설치에서는 AF3 추론 환경과
+분리해 matplotlib만 설치한다. 추론 환경에 설치하면 JAX가 요구하는 numpy 버전이 바뀔 수
+있으므로 섞지 않는다.
+
+```bash
+sudo apt install -y python3-matplotlib python3-venv
+cd ~/af3_work/Kang_AF3
+python3 -m venv --without-pip --system-site-packages ~/af3_plot_env
+~/af3_plot_env/bin/python -c 'import matplotlib; print(matplotlib.__version__)'
+```
+
+그림은 `~/af3_plot_env/bin/python`, 배치·집계·3D HTML은 시스템 `python3`로 실행한다.
+matplotlib이 없어도 CSV와 뷰어 스크립트는 만들어지지만 PNG/PAE 그림은 생기지 않으므로,
+정적 그림이 필요하면 위 마지막 명령이 성공하는지 먼저 확인한다.
 
 ---
 
@@ -407,8 +466,10 @@ build_data
 알게 된다.
 
 ```bash
-cd ~/af3_work
-bash scripts/af3_check.sh 2>&1 | tee af3_check.txt
+cd ~/af3_work/Kang_AF3
+AF3_DB_DIR=~/public_databases_full \
+AF3_PYTHON=~/af3_plot_env/bin/python \
+  bash scripts/af3_check.sh 2>&1 | tee af3_check.txt
 ```
 
 아래 6개는 반드시 통과해야 한다.
@@ -417,9 +478,9 @@ bash scripts/af3_check.sh 2>&1 | tee af3_check.txt
 |-----------|-----------|
 | GPU 인식 | `nvidia-smi` 가 GPU 이름과 VRAM 을 출력한다 |
 | 도커 이미지 | `alphafold3` 이미지가 목록에 있다 |
-| 가중치 | `~/af3_models/af3.bin` 이 있고 크기가 약 1.15GB |
-| DB 경로 | `~/public_databases` 가 있고 비어 있지 않다 |
-| HMMER | `jackhmmer -h` 가 동작하고 `--seq_limit` 항목이 보인다 |
+| 가중치 | `~/af3_models/af3.bin` 크기와 pinned SHA-256이 모두 일치한다 |
+| DB 경로 | `af3_db.py verify`가 ordered root의 필수 9항목을 모두 찾는다 |
+| HMMER | 선택한 Docker 이미지 안 `jackhmmer -h`에 `--seq_limit`가 보인다 |
 | 디스크 | 작업 폴더에 여유가 있다 |
 
 출력 형식은 스크립트 버전에 따라 다르다. 항목별 판정 표시(OK/실패)를 기준으로 읽는다.
@@ -429,16 +490,20 @@ bash scripts/af3_check.sh 2>&1 | tee af3_check.txt
 ### 스모크 테스트: 1건 실제로 돌려 보기
 
 ```bash
-mkdir -p ~/af3_work/smoke_in
-cp examples/vhh_monomer.json ~/af3_work/smoke_in/
-cd ~/af3_work
-python3 scripts/af3_batch.py --name smoke --stage oneshot
+cd ~/af3_work/Kang_AF3
+mkdir -p smoke_in
+cp examples/vhh_monomer.json smoke_in/
+python3 scripts/run_af3_batch_improved.py \
+  --input-dir smoke_in --output-dir smoke_out \
+  --db-dir ~/public_databases_full --yes
 ls smoke_out/*/
 ```
 
-첫 실행이라 5~8분 걸릴 수 있다 ([3-8](#3-8-첫-실행-지연)). 끝나면
-`smoke_out/vhh_7mfv_1/` 안에 `*_summary_confidences.json` 과 `*_model.cif` 가 생긴다.
-여기까지 되면 설치는 끝이다.
+raw JSON과 full DB를 쓴 현재 Docker 실측은 35.5분이었다. 그중 MSA가 34.8분이고 GPU
+추론은 15.23초였다. MSA 중에는 GPU 사용률이 0%여도 중단하지 않는다
+([3-8](#3-8-첫-실행-지연)). 끝나면 `smoke_out/vhh_7mfv_1/` 안에
+`*_ranking_scores.csv`, `*_summary_confidences.json`, `*_model.cif`가 생긴다. 세 파일이
+모두 0바이트보다 크고 마지막에 `이번 대상 1/1건 완료`가 나오면 설치가 끝난 것이다.
 
 ---
 
@@ -578,10 +643,13 @@ find vhh_001_in -name '._*' -delete    # macOS 유래 사이드카를 지운다
 ### 6-1. 권장 방법: `run_af3_batch_improved.py`
 
 ```bash
-cd ~/af3_work
-python3 scripts/run_af3_batch_improved.py --audit    # 1. 계산 없이 상태만 점검
-python3 scripts/run_af3_batch_improved.py --input-dir test_in --output-dir test_out  # 2. 소규모 시험
-nohup python3 scripts/run_af3_batch_improved.py --yes > af3.log 2>&1 &              # 3. 전수 실행
+cd ~/af3_work/Kang_AF3
+python3 scripts/run_af3_batch_improved.py --input-dir vhh_001_in --output-dir vhh_001_out --audit
+python3 scripts/run_af3_batch_improved.py \
+  --input-dir test_in --output-dir test_out --db-dir ~/public_databases_full
+nohup python3 scripts/run_af3_batch_improved.py \
+  --input-dir vhh_001_in --output-dir vhh_001_out \
+  --db-dir ~/public_databases_full --yes > af3.log 2>&1 &
 tail -f af3.log
 ```
 
@@ -600,6 +668,8 @@ tail -f af3.log
 | `--per-file` | 파일마다 컨테이너를 따로 띄운다 (느리다. 문제 격리용) |
 | `--cleanup` | 격리 결과와 잔여 staging 을 미리 보여준 뒤 정리 |
 | `--yes` | 확인 질문에 자동 응답. 백그라운드 실행에 필요 |
+| `--docker COMMAND` | 자동 탐지 대신 Docker 명령을 명시. 자동 경로는 암호를 묻는 sudo를 선택하지 않는다 |
+| `--db-dir PATH` | DB root. reduced overlay와 full fallback을 우선순서대로 반복 가능 |
 
 이 러너가 다른 점 세 가지. **완료 판정을 폴더 존재가 아니라 최종 산출물로 한다**
 (AF3 는 추론 *전에* `<name>_data.json` 을 쓰므로 폴더만 보면 추론 중 끊긴 것을 완료로
@@ -609,9 +679,10 @@ tail -f af3.log
 **같은 출력 폴더에 두 번 실행되지 않는다**(파일 잠금으로 막고 어느 프로세스가 쓰고
 있는지 알려준다).
 
-### 6-2. 래퍼: `af3run.sh`
+### 6-2. 보조 legacy 래퍼: `af3run.sh`
 
-작업 이름 하나로 진단부터 집계까지 묶는다 (`af3_batch.py` 를 호출한다). 두 번째 인자가
+작업 이름 하나로 진단부터 집계까지 묶는다 (`af3_batch.py` 를 호출한다). 새 배포는 6-1의
+권장 러너를 우선한다. 이 래퍼는 기존 2단계 작업과의 호환 경로다. 두 번째 인자가
 모드다: `check`(환경 진단), `dry`(실행 없이 명령만 확인), `screen`(경량 스크리닝
 sample 1 / recycle 3, 전수용), `full`(정밀 sample 5 / recycle 10, 상위 후보용),
 `msa`, `infer`, `oneshot`(MSA + 추론을 한 프로세스에서), `retry`(실패한 것만),
@@ -634,13 +705,13 @@ bash scripts/af3run.sh vhh_001 collect    # 5. 집계
 
 ```bash
 # 무엇을 실행할지 눈으로 확인 (실제로 돌리지 않는다)
-python3 scripts/af3_batch.py --name vhh_001 --dry-run
+python3 scripts/af3_batch.py --name vhh_001 --db-dir ~/public_databases_full --dry-run
 
 # 컨테이너 1회, MSA + 추론을 한 프로세스가 전수 순회
-python3 scripts/af3_batch.py --name vhh_001 --stage oneshot
+python3 scripts/af3_batch.py --name vhh_001 --db-dir ~/public_databases_full --stage oneshot
 
 # 2단계 분리 (기본값이고 권장). MSA 먼저, 그 다음 추론
-python3 scripts/af3_batch.py --name vhh_001 --stage both
+python3 scripts/af3_batch.py --name vhh_001 --db-dir ~/public_databases_full --stage both
 
 # 경량 스크리닝 설정으로 전수
 python3 scripts/af3_batch.py --name vhh_001 --stage both --diffusion-samples 1 --recycles 3
@@ -772,16 +843,16 @@ GPU 단계를 고치면 다음에 무엇이 남는지는 **1단계에 어떤 DB 
 
 | 구성 | 데이터 파이프라인(MSA) 건당 | GPU 추론 건당 | 2000건 합계 | MSA 비중 | 근거 |
 |---|---|---|---|---|---|
-| 축소 DB 약 2GB (연구자 현재 구성, 권장) | 1.98초 | 5.39초 | **4.1시간** | 27% | 각 항목 직접측정, 합계는 합산 추정 |
+| 역사적 축소 sequence DB | 1.98초 | 5.39초 | **4.1시간** | 27% | 서로 다른 실험의 건당 값을 합친 cross-experiment 투영 |
 | 전체 DB 급 4GB 슬라이스 4종 | 67.0초 (스레드 스윕 포화점) | 5.39초 | **40.2시간 (1.7일)** | 93% | MSA 인용, 추론 직접측정, 합계는 합산 추정 |
 
 **축소 DB 구성에서는 MSA 가 병목이 아니다.** 데이터 파이프라인 1.98초가 GPU 추론
 5.39초보다 짧다. **MSA 가 93%를 차지하는 것은 전체 DB 급 구성에서만 성립하고**, 조건을
 빼고 "코드를 고치면 MSA 가 93%" 라고 쓰면 틀린 말이 된다.
 
-연구자의 현재 방식은 건당 341초, 2000건 189시간(7.9일)이다. 개선 배수를 정직하게 쓰면
-GPU 추론 단계만 **5.93배**(직접 측정), 전체 파이프라인은 **4.7~46배**(189시간에서
-4~40시간, DB 구성에 따라 갈린다. 모두 합산 추정)다.
+연구자의 현재 방식은 건당 341초, 2000건 189시간(7.9일)이었다. 직접 측정된 개선은
+GPU 추론 단계의 **5.93배**다. 189시간과 서로 다른 조건의 4~40시간 투영을 나눈
+**4.7~46배는 산술 시나리오 범위이며 end-to-end로 검증한 개선 배수가 아니다.**
 
 > `341 / 5.39 = 63배` 같은 계산은 성립하지 않는다. 341초에는 MSA 가 포함돼 있고
 > 5.39초에는 포함돼 있지 않다. 이 식은 쓰지 마라.
@@ -837,11 +908,19 @@ vhh_001_out/vhh_4qgy_1/
 | 지표 | 범위 | 무엇 | 어디 |
 |------|------|------|------|
 | **pLDDT** | 0~100 | **잔기/원자 단위 국소 정확도** | `*_confidences.json`, `*_model.cif` 의 B-factor |
-| **pTM** | 0~1 | **전체 폴드가 맞을 확률의 대리 지표** | `*_summary_confidences.json` |
+| **pTM** | 0~1 | **예측된 TM-score.** 정답일 확률이 아니다 | `*_summary_confidences.json` |
 | **ipTM** | 0~1 | **계면 정확도.** 복합체에서만 산출 | 같음 |
 | **PAE** | Å | **토큰 쌍별 위치 오차 기댓값** | `*_confidences.json` |
 | **ranking_score** | 해당 없음 | AF3 가 모델을 줄 세울 때 쓰는 종합 점수 | `*_summary_confidences.json` |
 | **fraction_disordered**, **has_clash** | 0~1, 0/1 | 무질서 비율, 원자 충돌 발생 | 같음 |
+
+pLDDT 평균은 집계 단위를 확인해야 한다. `af3_collect.py`의 `pLDDT평균`과 등급 판정은
+`atom_plddts` 전체의 원자 가중 평균이다. `af3_visualize.py`의 표에는
+`mean_atom_plddt`와 `mean_residue_plddt`가 따로 있고, 요약 비교 그림은 집계 CSV와 같은
+원자 평균을 쓴다. 잔기별 꺾은선과 3D 뷰어는 각 잔기에 같은 가중치를 준 잔기 평균을 쓴다.
+현재 Docker 스모크에서는 두 값이 각각 92.67과 93.31이었다. 계산 오류가 아니라 가중치
+차이다. 시각화 표의 기존 `mean_plddt`와 `min_plddt` 열은 호환성을 위해 잔기 지표 별칭으로
+남아 있다.
 
 ### 8-3. 판정 기준선
 
@@ -854,7 +933,7 @@ vhh_001_out/vhh_4qgy_1/
 | | 70~90 | 신뢰. 주사슬(백본) 신뢰 |
 | | 50~70 | 낮음. 접힘 방향 정도만 |
 | | 50 미만 | 매우 낮음. 구조가 없거나 무질서 영역 |
-| pTM | 0.5 초과 | 전체 폴드가 대체로 맞다고 볼 수 있는 하한선 |
+| pTM | 0.5 초과 | 탐색용 경험적 구간. 정답 구조 보증선이 아니다 |
 | ipTM (복합체만) | 0.8 이상 | 계면 신뢰 |
 | | 0.6~0.8 | 회색지대. 판단 보류 |
 | | 0.6 미만 | 계면 실패 가능성 높음 |
@@ -914,7 +993,7 @@ python3 scripts/af3_collect.py vhh_001_out --grade-doc                # 등급 �
 ```
 
 CSV 는 35열이다. `조건, 타깃, 등급, 경고`, 신뢰도(`ranking_score, pTM, ipTM,
-pLDDT평균/중앙값/최소/p10/70이상비율/90이상비율, fraction_disordered, has_clash`),
+원자 가중 pLDDT평균/중앙값/최소/p10/70이상비율/90이상비율, fraction_disordered, has_clash`),
 MSA(`MSA_unpaired깊이, MSA_paired깊이`), 규모(`토큰수, 원자수, 체인수, 체인ID,
 패딩버킷`), 샘플 산포(`샘플수, ranking최고/최저/산포`), 체인별
 (`chain_pTM, chain_ipTM, min_chain_pair_ipTM`), 검산(`ranking검산차`), 그리고 출처
@@ -932,6 +1011,15 @@ MSA(`MSA_unpaired깊이, MSA_paired깊이`), 규모(`토큰수, 원자수, 체�
   경고: MSA얕음 6건, 버킷256 4건, 무질서 1건
   ranking_score 검산: 전건 일치 (파일 짝이 맞다)
 ```
+
+2026-08-21 Docker 스모크 결과는 다음처럼 읽었다.
+
+| 등급 | ranking score | pTM | pLDDT 평균 | MSA unpaired / paired | tokens / bucket | ranking 범위(최고-최저) |
+|------|---------------|-----|------------|-----------------------|-----------------|-----------|
+| A_높음 | 0.90 | 0.90 | 92.67 | 10,640 / 24,469 | 116 / 128 | 0.0023 |
+
+단량체 접힘에 대한 모델 신뢰도가 높고 다섯 샘플도 안정적이라는 뜻이다. 단량체라 ipTM은
+없으며 0으로 해석하지 않는다. 이 값만으로 결합, 활성, 실험 구조 일치를 주장할 수는 없다.
 
 **`ranking_score 검산` 줄을 반드시 보라.** 전건 일치가 아니면 다른 실행의 파일이 섞였다.
 실제 출력 예시는 [results_example/af3_summary.csv](results_example/af3_summary.csv)
@@ -957,11 +1045,13 @@ MSA(`MSA_unpaired깊이, MSA_paired깊이`), 규모(`토큰수, 원자수, 체�
 
 ### 9-1. `af3_visualize.py`: 그림 만들기
 
-세부 옵션은 `python3 scripts/af3_visualize.py --help` 로 확인하라.
+먼저 [3-9절](#3-9-결과-그림용-python-환경)의 분리 환경이 준비됐는지 확인한다. 단일
+설치기를 사용했다면 이미 설치돼 있다. 세부 옵션은
+`~/af3_plot_env/bin/python scripts/af3_visualize.py --help`로 확인한다.
 
 ```bash
-python3 scripts/af3_visualize.py vhh_001_out/vhh_A01 --out-dir figs   # 타깃 하나
-python3 scripts/af3_visualize.py vhh_001_out --out-dir figs           # 폴더 전체
+~/af3_plot_env/bin/python scripts/af3_visualize.py vhh_001_out/vhh_A01 -o figs  # 타깃 하나
+~/af3_plot_env/bin/python scripts/af3_visualize.py vhh_001_out -o figs          # 폴더 전체
 ```
 
 **pLDDT 프로파일**(잔기별 꺾은선)은 낮게 파인 구간이 못 맞춘 부위다. VHH 라면 CDR3
@@ -973,7 +1063,7 @@ python3 scripts/af3_visualize.py vhh_001_out --out-dir figs           # 폴더 �
 이 스크립트는 뷰어용 색칠·정렬 명령을 타깃 이름에 맞춰 생성해 주기도 한다
 (`examples/viewer_pymol_plddt.pml`, `examples/viewer_chimerax_plddt.cxc` 가 그 예시다).
 
-### 9-2. `af3_view3d.py`: 복사해 붙이는 명령
+### 9-2. `af3_view3d.py`: 브라우저 3D 뷰어
 
 AF3 출력 폴더를 HTML 로 만든다. 그 파일을 더블클릭하면 브라우저에서 구조가 뜨고
 마우스로 돌린다. 파이썬 표준 라이브러리만 쓰므로 설치할 것이 없다.
@@ -1005,6 +1095,11 @@ python3 scripts/af3_view3d.py vhh_001_out --out-dir 뷰어 --lib embed --engine 
 `--lib embed` 면 3D 라이브러리가 파일 안에 들어가서 인터넷 없이 열리고,
 한 개가 약 5MB (`--engine 3dmol` 이면 약 0.6MB)가 된다.
 인터넷 없이 열어야 하는데 건수가 많으면 `--engine 3dmol --lib embed` 를 써라.
+
+CDN URL은 version과 SRI가 고정돼 있고 embed 다운로드/cache는 SHA-256을 검사한다.
+`--lib-file`은 일반 data가 아니라 사용자가 신뢰한 **실행 JavaScript**를 직접 제공하는
+옵션이다. 생성기는 script-context escape, CSP, artifact symlink 거부, index 경로 제한과
+출력 파일명 충돌 검사를 적용한다.
 
 ### 9-4. 화면 조작
 
@@ -1213,8 +1308,8 @@ AF3 를 써서 결과를 발표하면 다음을 인용해야 한다. 이 저장�
 > ### 경고. 이 저장소는 공개다
 >
 > 커밋하면 안 되는 것: 가중치 `af3.bin` / `af3.bin.zst`(**재배포 금지. 약관 위반이다**),
-> `ccd.pickle` 543MB(용량. `build_data` 로 각자 만든다), `public_databases/` 내용
-> (최대 850GB), `*_out/` 결과(용량, 그리고 서열이 역추적될 수 있다), 그리고 **실제 연구
+> `ccd.pickle`(수백 MB. `build_data` 로 각자 만든다), `public_databases*/` 내용
+> (압축본 포함 peak 약 850GiB), `*_out/` 결과(용량, 그리고 서열이 역추적될 수 있다), 그리고 **실제 연구
 > 서열 (FASTA/CSV/JSON)**(미공개 연구 데이터이고 지우기도 어렵다).
 >
 >
@@ -1234,10 +1329,55 @@ AF3 를 써서 결과를 발표하면 다음을 인용해야 한다. 이 저장�
 126GB, AF3 commit `97d20234c6eb89e8d05376e9eecc9321e60a559b`, 그리고 설치 방식은
 **conda 네이티브였다. 이 호스트에 Docker 가 없었다.**
 
-**연구자 환경과 다른 점.** 연구자는 RTX 5090 32GB 에 Docker 로 돌린다. GPU 가 더 크지만
-실제 VRAM 피크가 3GB 수준이므로 속도 차이는 연산 성능 차이만큼이다. 우리는 Docker 기동
-비용이 빠져 있으므로 **우리 값은 Docker 환경의 하한**이고, 개선 배수는 보고한 것보다
-크게 나올 가능성이 있다 (작아지지는 않는다).
+**과거 계획 환경과 다른 점.** RTX 5090 32GB Docker 실행은 계획값이었고 실제 측정하지
+않았다. 따라서 5090 절대 시간이나 Docker 개선 배수는 보증하지 않는다.
+
+### 2026-08-20 현재 PC native 재검증
+
+현재 PC는 RTX 3080 Ti 12GB, driver 595.84, Python 3.12.14, JAX/jaxlib 0.10.2,
+AF3 commit `97d20234c6eb89e8d05376e9eecc9321e60a559b`의 native 환경이다.
+
+- JAX가 `CudaDevice(id=0)`, backend `gpu`로 인식했다.
+- 공식 `run_alphafold_data_test.py`: 7/7 통과.
+- 공식 `run_alphafold_test.py`: 기본 설정에서 17개 중 16개 통과. 유일한 실패는
+  1024-token stress의 3.06GiB 추가 할당 OOM이었다.
+- 같은 1024-token test를 공식 저메모리 설정
+  (`TF_FORCE_UNIFIED_MEMORY=true`, `XLA_CLIENT_MEM_FRACTION=3.2`)으로 재실행해 통과했다
+  (inference 176.12초, 전체 188.36초).
+- 116-token VHH, MSA 없음, sample 1, recycle 1, Triton smoke는 inference 16.12초,
+  전체 32.91초에 완료됐고 정식 산출물 3종과 집계·그림·Mol*/3Dmol HTML을 모두 만들었다.
+- 같은 VHH를 공식 full DB, sample 1, recycle 1로 end-to-end 실행해 36분 41.8초에
+  완료했다. 최종 MSA 깊이는 unpaired 10,640 / paired 24,469였고 ranking score 0.91,
+  pTM 0.91, 원자 pLDDT 평균 93.15였다. 이 시간은 sample 5 / recycle 10 조건과 직접
+  비교하지 않는다.
+- 설치된 full DB는 압축본을 보존한 상태로 850GiB이며, 압축 223GiB, 해제본 약
+  627GiB, mmCIF 234GiB,
+  mmCIF 파일 195,858개다. `af3_db.py verify`의 필수 9항목을 모두 통과했다.
+
+### 2026-08-21 현재 PC Docker 재검증
+
+같은 PC에 Docker Engine 29.7.2와 NVIDIA Container Toolkit 1.20.0을 공식 APT 저장소로
+설치했다.
+
+- `hello-world`와 NVIDIA 공식 GPU 확인 컨테이너가 통과했다.
+- 공식 AF3 이미지는 첫 빌드에 약 34분이 걸렸다. 로컬 unpacked 이미지는 15.5GB,
+  빌드 캐시는 24.0GB였고 `docker image inspect` 크기는 4,699,381,677 B였다.
+- 이미지 안의 AF3 3.0.4, JAX GPU, HMMER 3.4 `--seq_limit` 패치를 확인했다.
+- 이미지 안 공식 테스트는 data 7/7, input 110/110, inference 17/17을 통과했다.
+  inference는 12GB 카드용 unified-memory 설정을 썼고 1024-token 케이스는 177.16초였다.
+- `af3_check.sh`는 Docker, GPU, 이미지, full DB 9항목, 가중치 크기와 SHA-256을 모두
+  통과했다.
+- full-DB에서 만든 116-token `_data.json`을 `run_af3_batch_improved.py --mode inference`로
+  실행했다. bucket 128, diffusion sample 5 조건에서 전체 39.3초, 모델 추론 23.64초였다.
+- 같은 raw JSON을 `--mode full`로 다시 실행해 full DB MSA부터 추론까지 확인했다.
+  데이터 파이프라인 2,087.77초, 모델 추론 15.23초, 러너 전체 2,127.4초(35.5분)였다.
+- 결과는 ranking score 0.90, pTM 0.90, 원자 pLDDT 평균 92.67, 샘플 간 ranking
+  최고-최저 범위 0.0023으로 `A_높음`이었다. 재실행 감사는 완료 1건, 미완료 0건으로
+  판정했다.
+
+이 결과는 12GB 카드에서도 짧은 입력이 동작한다는 실행 증거이지, 긴 복합체가 항상
+들어간다는 보장이 아니다. 1024-token 이상은 unified memory 또는 더 큰 VRAM을 기본으로
+계획한다.
 
 각 수치의 측정 조건:
 
@@ -1249,6 +1389,8 @@ AF3 를 써서 결과를 발표하면 다음을 인용해야 한다. 이 저장�
 | 데이터 파이프라인 1.98초 대 30.41초 | 같은 VHH 4건으로 축소 DB 2GB 와 전체 DB 급 4GB 슬라이스 4종 대조. 직접측정 |
 | MSA 0.895 타깃/분 (건당 67.0초) | 14조합 스레드 스윕. **전체 DB 급 4종 각 4GB 슬라이스.** 인용 |
 | 축소 대 전체 DB 43.3초 대 1,830초 | 6건 곱하기 1회 end-to-end (MSA + 추론 sample 5 / recycle 10) |
+| Docker 39.3초, 추론 23.64초 | RTX 3080 Ti, 116 tokens, bucket 128, 준비된 full-DB `_data.json`, sample 5, 첫 Docker 실행 |
+| Docker full 2,127.4초 | 같은 입력의 raw JSON, full DB MSA 2,087.77초 + GPU 추론 15.23초, sample 5 |
 | DB 다운로드 1시간 37분 | 4병렬, 평균 약 41MB/s. **회선 속도에 전적으로 의존한다** |
 | 신뢰도 비교 6종 | 전부 **단량체** VHH. PDB 유래 (7djx, 7a50, 8v8k, 4qgy, 4s11, 7mfv) |
 | 연구자 현재 341초/건 | **연구자 보고값** (3일에 760건). 우리 측정이 아니다 |
@@ -1262,19 +1404,17 @@ AF3 를 써서 결과를 발표하면 다음을 인용해야 한다. 이 저장�
    잔기 수가 많은 프레임워크가 지배한다. CDR 루프만 떼어 보면 축소 DB 와 전체 DB 의 차이가
    더 클 수 있다. 분해하지 않았다.
 3. **복합체 계면에 대한 DB 크기 영향 (ipTM).** 비교 6종이 모두 단량체여서 ipTM 이
-   산출되지 않았다. paired MSA 가 120~150배 차이나므로 복합체에는 전체 DB 가 사실상
-   필수로 보이지만 **이것은 추론이다.**
+   산출되지 않았다. paired MSA가 120~150배 달랐지만 복합체 정확도 영향은 **미측정**이다.
 4. **데이터 파이프라인 30.41초와 MSA 스윕 67.0초의 불일치.** 둘 다 전체 DB 급 4GB
    슬라이스 4종 조건인데 2배 넘게 차이난다. 30.41초는 VHH 4건 직접측정(첫 건 91.70초 포함
    평균, 2~4번째는 9.09~9.60초), 67.0초는 14조합 스윕의 포화점 인용값이다.
    **이 불일치는 해소되지 않았다** ([docs/msa_correction_notes.md](docs/msa_correction_notes.md)).
 5. 그 밖에: **MSA 처리율 포화의 원인**(CPU 경합인지 디스크 I/O 인지 구분하지 못했다),
-   **Docker 오버헤드의 실제 크기**(검증 호스트에 Docker 가 없었고 이미지 빌드 시간
-   20~40분도 추정값이다. 그래서 우리 값은 Docker 환경의 하한이다), **긴 서열과 큰
-   복합체**(VHH 116~144 aa, 버킷 128과 256 범위만 측정했다), **축소 DB 의 정체**(연구자의
-   실제 파일이 아니라 공식 전체 DB 에서 균등 추출한 대리 세트이므로 MSA 깊이 절대값은
-   다를 수 있다), **RAM 하한과 build_data 소요 시간**(126GB 호스트에서만 측정했고
-   ccd.pickle 생성 시간은 기록하지 않았다).
+   **동일 조건의 Docker 대 native 오버헤드**(Docker 절대 시간은 측정했지만 같은
+   sample/recycle/cache 조건으로 대조하지 않았다), **긴 서열과 큰 복합체**(VHH
+   116~144 aa, 버킷 128과 256 범위만 측정했다), **역사적 축소 DB의 재현**
+   (front-sliced FASTA와 1,239개 selected template의 정확한 ID/query manifest가 저장소에 없다),
+   **RAM 하한**(120~126GB 호스트에서만 측정했다).
 
 **우리 수치를 그대로 믿지 말고 `bash scripts/af3run.sh vhh_001 bench` 로 20건을 직접
 재라.** 건당 시간에 2000 을 곱하면 된다. 그 값이 우리 표(GPU 추론 5.39초 + 데이터
@@ -1285,7 +1425,9 @@ AF3 를 써서 결과를 발표하면 다음을 인용해야 한다. 이 저장�
 
 ## 문서 목록
 
-README 는 따라 하는 문서이고 `docs/` 는 근거 문서다. 수치의 원자료와 측정 절차는 여기 있다.
+README와 `docs/operations_guide.md`, `docs/commands.md`, `docs/reduced_db.md`는 현재 사용 문서다.
+이름이 `*_notes.md`, `*_log.md`인 파일은 당시 판단과 원자료를 보존한 역사 기록이며 현재
+설치 명령보다 우선하지 않는다.
 
 | 문서 | 내용 |
 |------|------|
@@ -1307,10 +1449,11 @@ README 는 따라 하는 문서이고 `docs/` 는 근거 문서다. 수치의 �
 [examples/](examples/) 에 예제 FASTA/CSV, 입력 JSON(단량체와 복합체), 뷰어 색칠
 스크립트가 있고, [results_example/](results_example/) 에 실측 결과 CSV(신뢰도 요약,
 A/B 벤치마크, 2000건 환산, MSA 스윕), [figures/](figures/) 에 README 의 그림이 있다.
-스크립트를 수정했다면 `python3 tests/run_tests.py` 한 줄로 옛 버그가 되살아나지
-않았는지 확인한다(Docker 도, `pip install` 도 필요 없다). 각 테스트에는 그 테스트가 막는
-실제 버그가 한 줄로 붙어 있으므로(`python3 tests/run_tests.py --list`) 실패하면 그
-문장을 먼저 읽어라.
+스크립트를 수정했다면 `python3 tests/run_all.py`로 release 검증을 실행한다(Docker도
+`pip install`도 필요 없다). 빠른 등록 회귀만 보려면 `python3 tests/run_tests.py --strict`,
+목록은 `python3 tests/run_tests.py --list`를 사용한다. GitHub Actions도 Python
+3.9/3.12/3.14에서 같은 release entry point를 실행하며 3.12 lane은 matplotlib 그림
+생성 경로까지 검사한다.
 
 ---
 

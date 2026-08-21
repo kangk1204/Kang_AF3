@@ -5,6 +5,11 @@
 
 # AlphaFold 3 설치 기록 — ssh:gpu-5070ti (검증 호스트)
 
+> **역사적 기록 (2026-08-18).** 현재 설치 절차는 저장소 루트 `README.md`가 정본이다.
+> 이 문서가 언급하는 `bench_inputs/`, 1,239-template ID/query manifest,
+> `reduced_db_stats.json`은 이 저장소에 추적되어 있지 않으므로 해당 DB를 재현할 수 없다.
+> 아래 수치는 당시 호스트 관측이며 Docker나 다른 GPU의 하한/보증으로 사용하지 않는다.
+
 작성 목적: 이 호스트에서 AF3 추론이 확실히 돈다는 상태를 만들고, 그 절차를 그대로
 재현할 수 있게 남긴다. Phase 1 A/B 실측이 이 기준점 위에서 돌아간다.
 
@@ -60,8 +65,7 @@ Docker 실행과 네이티브 실행의 차이를 벤치마크에 반영해야 �
 
 1. **컨테이너 기동 비용이 빠진다.** 연구자의 건당 5.7분에는 `docker run` 컨테이너
    생성·이미지 레이어 마운트·컨테이너 정리 비용이 포함되는데, 네이티브 측정에는 없다.
-   즉 **네이티브로 측정한 고정 오버헤드는 연구자가 실제로 지불하는 값의 하한**이다.
-   개선 배수를 논할 때 이 방향(연구자 쪽이 더 나쁨)을 명시해야 한다.
+   따라서 Docker 환경의 절대 시간과 개선 배수는 별도 pilot 없이는 알 수 없다.
 2. **CUDA 스택이 다르다.** 공식 Dockerfile은 `nvidia/cuda:12.6.3-base-ubuntu24.04`
    기반이고 호스트에 CUDA 12.6을 요구한다. 우리는 pip wheel로 번들된 **CUDA 12.9**를 쓴다.
    두 경우 모두 JAX는 자기 wheel의 CUDA 런타임을 쓰므로 커널 컴파일 경로는 유사하지만,
@@ -227,7 +231,8 @@ af3.bin     : 1,146,811,260 B
 
 mmCIF 템플릿은 RCSB에서 **실제 1,239건**을 받아 배치했고(나노바디/VHH/단일도메인항체/
 Camelidae/면역글로불린 가변도메인 검색식의 합집합), pdb_seqres 는 그 엔트리에 대응하는
-체인 3,531건만 남겨 정합을 맞췄다. 자세한 내용과 z_value 사용법은 `bench_inputs/docs/reduced_db.md`.
+체인 3,531건만 남겨 정합을 맞췄다. 현재 재현 가능 범위와 z-value 설명은
+저장소의 `docs/reduced_db.md`를 본다.
 
 **축소 DB는 z_value 를 반드시 넘겨야 한다.** AF3의 jackhmmer/nhmmer e-value 계산은
 DB 크기에 의존하므로, 잘린 DB에 기본 z_value를 쓰면 e-value가 왜곡된다.
@@ -435,8 +440,9 @@ $ENVP/bin/python run_alphafold.py \
   --flash_attention_implementation=triton
 ```
 
-축소 DB로 데이터 파이프라인까지 돌릴 때는 `bench_inputs/docs/reduced_db.md` 의
-z_value 플래그를 반드시 함께 넘길 것.
+이 역사적 축소 DB로 데이터 파이프라인까지 돌릴 때 사용한 값은 당시 기록이었다.
+현재 unsharded overlay에서는 `docs/reduced_db.md`의 계약을 따르며 명시 z-value가 필요 없다.
+`@N` sharded DB에서만 검증된 z-value가 필수다.
 
 경로 요약:
 

@@ -70,14 +70,24 @@ import json
 import math
 import os
 import re
+import string
 import sys
 import time
 from pathlib import Path
 
+
+def csv_safe_cell(value):
+    """Prevent spreadsheet programs from evaluating untrusted text as a formula."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
 # ---------------------------------------------------------------------------
 # AF3 기본 패딩 버킷 사다리.
 # run_alphafold.py 의 _BUCKETS 기본값과 동일하며 128 에서 시작한다 (실측 확인).
-# VHH 130 aa 는 128 버킷에 들어가고, 256 버킷으로 밀리면 추론이 2.25배 느려진다.
+# 단백질만 있는 130 aa 입력은 128을 넘으므로 256 버킷을 쓴다. 버킷별 속도 차이는
+# GPU와 실행 설정마다 달라지므로 이 스크립트는 크기 경고만 낸다.
 # ---------------------------------------------------------------------------
 DEFAULT_BUCKETS = [128, 256, 384, 512, 768, 1024, 1280, 1536, 2048, 2560,
                    3072, 3584, 4096, 4608, 5120]
@@ -335,6 +345,22 @@ def r4(x):
     return None if x is None else round(x, 4)
 
 
+def finite_number(value):
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
+def safe_target_name(value):
+    return (
+        isinstance(value, str)
+        and bool(value)
+        and value[0] not in ".=+-@"
+        and all(ch in (string.ascii_letters + string.digits + "_-.") for ch in value)
+    )
+
+
 # ---------------------------------------------------------------------------
 # MSA 깊이 — *_data.json 을 전부 파싱하지 않고 문자열 스캔으로 센다.
 # 전체 DB 로 만든 _data.json 은 10 MB 급이라 json.load 하면 2000건에서 매우 느리다.
@@ -428,7 +454,9 @@ def read_ranking_csv(path):
         with open(path, "r", encoding="utf-8-sig", newline="") as fh:
             for rec in csv.DictReader(fh):
                 try:
-                    rows.append(float(rec["ranking_score"]))
+                    value = float(rec["ranking_score"])
+                    if math.isfinite(value):
+                        rows.append(value)
                 except (KeyError, TypeError, ValueError):
                     continue
     except OSError:
@@ -453,18 +481,18 @@ def collect_target(tdir, want_msa=True, info=None):
     data_p = tdir / ("%s_data.json" % stem)
 
     summ = load_json(summ_p)
-    if summ is None:
+    if not isinstance(summ, dict):
         return None
 
     row = {
         "타깃": info["target"],
         "폴더명": tdir.name,
         "실행시각": info["run_ts"] or "",
-        "ranking_score": summ.get("ranking_score"),
-        "pTM": summ.get("ptm"),
-        "ipTM": summ.get("iptm"),
-        "fraction_disordered": summ.get("fraction_disordered"),
-        "has_clash": summ.get("has_clash"),
+        "ranking_score": finite_number(summ.get("ranking_score")),
+        "pTM": finite_number(summ.get("ptm")),
+        "ipTM": finite_number(summ.get("iptm")),
+        "fraction_disordered": finite_number(summ.get("fraction_disordered")),
+        "has_clash": finite_number(summ.get("has_clash")),
     }
 
     # 체인별 지표 (복합체에서 어느 체인이 문제인지 보려면 필요)
@@ -473,11 +501,22 @@ def collect_target(tdir, want_msa=True, info=None):
     row["chain_pTM"] = ";".join("" if v is None else str(v) for v in cp) if isinstance(cp, list) else ""
     row["chain_ipTM"] = ";".join("" if v is None else str(v) for v in ci) if isinstance(ci, list) else ""
     cpi = summ.get("chain_pair_iptm")
-    if isinstance(cpi, list) and len(cpi) > 1:
-        off = [cpi[i][j] for i in range(len(cpi)) for j in range(len(cpi))
-               if i != j and isinstance(cpi[i][j], (int, float))]
+    cpi_is_square = (
+        isinstance(cpi, list)
+        and all(isinstance(values, list) and len(values) == len(cpi) for values in cpi)
+    )
+    if cpi_is_square:
+        off = [
+            finite_number(cpi[i][j])
+            for i in range(len(cpi))
+            for j in range(len(cpi))
+            if i != j
+        ]
+        off = [value for value in off if value is not None]
         row["min_chain_pair_ipTM"] = min(off) if off else None
     else:
+        if cpi not in (None, []) and isinstance(cpi, list):
+            log("  경고: %s 의 chain_pair_iptm 행렬이 정사각형이 아니다" % summ_p.name)
         row["min_chain_pair_ipTM"] = None
 
     # ---- 원자 pLDDT 분포와 토큰 수 -------------------------------------
@@ -485,8 +524,8 @@ def collect_target(tdir, want_msa=True, info=None):
     if conf_p.exists():
         conf = load_json(conf_p)
         if conf:
-            plddts = [float(v) for v in (conf.get("atom_plddts") or [])
-                      if isinstance(v, (int, float))]
+            plddts = [finite_number(v) for v in (conf.get("atom_plddts") or [])]
+            plddts = [value for value in plddts if value is not None]
             tok = conf.get("token_chain_ids") or []
             row["토큰수"] = len(tok) or None
             row["원자수"] = len(conf.get("atom_chain_ids") or []) or None
@@ -553,10 +592,10 @@ GRADE_DOC = """등급 기준 (AlphaFold 계열의 통상적 해석 구간을 이
       70~90     신뢰      - 주사슬(백본) 신뢰
       50~70     낮음      - 접힘 방향 정도만
       50 미만   매우 낮음 - 구조가 없거나 무질서 영역
-  pTM (전체 폴드가 맞을 확률의 대리 지표, 0~1)
-      0.5 초과  전체 폴드가 대체로 맞다고 볼 수 있는 하한선
-  ipTM (계면 정확도, 복합체에서만 산출)
-      0.8 이상  계면 신뢰
+  pTM (예측된 TM-score, 0~1. 정답일 확률이 아님)
+      0.5 초과  탐색용 경험적 구간. 정답 구조 보증선이 아님
+  ipTM (예측 계면 신뢰도, 복합체에서만 산출)
+      0.8 이상  높은 예측 신뢰 구간 (실제 계면 정확도 보증선이 아님)
       0.6~0.8   회색지대 - 판단 보류
       0.6 미만  계면 실패 가능성 높음
 
@@ -575,7 +614,7 @@ GRADE_DOC = """등급 기준 (AlphaFold 계열의 통상적 해석 구간을 이
       무질서    fraction_disordered >= 0.1
       MSA얕음   unpaired 깊이 < 100
       샘플불안  ranking 산포 >= 0.05
-      버킷256   패딩 버킷이 256 이상 (추론 시간 2.25배)
+      버킷256   패딩 버킷이 256 이상 (128보다 큰 연산·메모리 구간; 배수는 장비별 측정)
 
 주의: 이 구간은 예측 신뢰도(모델이 자기 예측을 얼마나 확신하는가)이지
 정답과의 일치도가 아니다. 실험 검증 대상 선정용 순위 지표로만 쓸 것.
@@ -715,6 +754,10 @@ def walk_output_dir(root, label, want_msa=True, all_runs=False):
     for tdir in sorted(p for p in root.iterdir()
                        if p.is_dir() and not is_sidecar(p.name)):
         info = resolve_result_dir(tdir, mode="full")
+        if not safe_target_name(info["target"]):
+            log("  경고: 안전하지 않은 타깃 이름을 건너뜀: %r (%s)" % (info["target"], tdir))
+            incomplete.append((info["target"], tdir.name))
+            continue
         if info["note"]:
             log("  주의: %s - %s" % (tdir.name, info["note"]))
         resolved.append((tdir, info))
@@ -809,6 +852,20 @@ def main(argv=None):
         print(GRADE_DOC)
         return 0
 
+    if args.top is not None and args.top <= 0:
+        log("오류: --top 은 1 이상이어야 한다.")
+        return 2
+
+    missing_roots = []
+    for spec in args.outputs:
+        _label, path = parse_spec(spec)
+        if not Path(path).expanduser().is_dir():
+            missing_roots.append(path)
+    if missing_roots:
+        for path in missing_roots:
+            log("오류: 출력 폴더가 없다: %s" % path)
+        return 2
+
     all_rows, all_incomplete = [], []
     for spec in args.outputs:
         label, path = parse_spec(spec)
@@ -831,7 +888,7 @@ def main(argv=None):
         w = csv.DictWriter(fh, fieldnames=COLUMNS, extrasaction="ignore")
         w.writeheader()
         for r in all_rows:
-            w.writerow(r)
+            w.writerow({key: csv_safe_cell(value) for key, value in r.items()})
 
     # ---- 화면 요약 -------------------------------------------------------
     from collections import Counter
@@ -904,7 +961,9 @@ def main(argv=None):
         if top:
             print("  컷오프 값: %s = %s" % (key, top[-1][key]))
         if args.top_list:
-            with open(args.top_list, "w", encoding="utf-8") as fh:
+            top_list = Path(args.top_list)
+            top_list.parent.mkdir(parents=True, exist_ok=True)
+            with open(top_list, "w", encoding="utf-8") as fh:
                 for r in top:
                     fh.write(r["타깃"] + "\n")
             print("  목록 저장: %s" % args.top_list)

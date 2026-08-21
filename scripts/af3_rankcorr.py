@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import statistics
 import sys
 from pathlib import Path
 
@@ -64,6 +65,17 @@ COL_TARGET = "타깃"
 COL_COND = "조건"
 
 METRICS = ("ranking_score", "pLDDT평균", "pTM", "ipTM", "pLDDT_90이상비율")
+
+
+def csv_safe_cell(value):
+    """Prevent spreadsheet programs from evaluating untrusted text as a formula."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+def csv_safe_row(row):
+    return {key: csv_safe_cell(value) for key, value in row.items()}
 
 
 def log(msg: str) -> None:
@@ -263,9 +275,10 @@ def as_float(v):
     if s == "":
         return None
     try:
-        return float(s)
+        value = float(s)
     except ValueError:
         return None
+    return value if math.isfinite(value) else None
 
 
 def strip_suffix(name, suffix):
@@ -370,6 +383,11 @@ def build_parser():
         default="",
         help="타깃 이름을 맞추기 전에 떼어낼 접미어 (af3_stage2.py --name-suffix 를 썼다면 그 값)",
     )
+    g.add_argument(
+        "--allow-intersection",
+        action="store_true",
+        help="양쪽 타깃 집합이 달라도 공통 교집합만 분석한다 (기본은 불일치 거부)",
+    )
     g.add_argument("-o", "--out", default=None, help="결과를 이 CSV 로 저장")
     g.add_argument("--pairs-out", default=None, help="타깃별 순위/값 대응표를 이 CSV 로 저장")
     g.add_argument("--selftest", action="store_true", help="알려진 값으로 구현을 검산하고 종료")
@@ -406,17 +424,27 @@ def main(argv=None):
         top_ns = [int(x) for x in str(args.top_n).replace(" ", "").split(",") if x]
     except ValueError:
         die("--top-n 을 해석할 수 없다: %s" % args.top_n)
+    if not top_ns or any(value <= 0 for value in top_ns):
+        die("--top-n 은 1 이상의 정수 목록이어야 한다.")
+    top_ns = list(dict.fromkeys(top_ns))
 
     # ---- 타깃 맞추기 -----------------------------------------------------
-    def index(rows_):
+    def index(rows_, label):
         out = {}
-        for r in rows_:
+        locations = {}
+        for row_number, r in enumerate(rows_, 2):
             t = strip_suffix(str(r.get(COL_TARGET, "")).strip(), args.strip_suffix)
             if t:
+                if t in out:
+                    die(
+                        "%s CSV 에 정규화 후 중복 타깃 '%s' 가 있다 (행 %d, %d)."
+                        % (label, t, locations[t], row_number)
+                    )
                 out[t] = r
+                locations[t] = row_number
         return out
 
-    ref_idx, test_idx = index(ref_rows), index(test_rows)
+    ref_idx, test_idx = index(ref_rows, "ref"), index(test_rows, "test")
     common = sorted(set(ref_idx) & set(test_idx))
     only_ref = sorted(set(ref_idx) - set(test_idx))
     only_test = sorted(set(test_idx) - set(ref_idx))
@@ -427,6 +455,11 @@ def main(argv=None):
         print("  기준에만 %d건: %s" % (len(only_ref), ", ".join(only_ref[:6])))
     if only_test:
         print("  비교에만 %d건: %s" % (len(only_test), ", ".join(only_test[:6])))
+    if (only_ref or only_test) and not args.allow_intersection:
+        die(
+            "기준과 비교의 타깃 집합이 다르다. 누락을 해결하거나 의도한 교집합 분석이면 "
+            "--allow-intersection 을 명시하라."
+        )
     if len(common) < 3:
         die(
             "공통 타깃이 %d건뿐이다. 순위 상관을 재려면 최소 3건, 실용적으로는 30건 이상이 필요하다.\n"
@@ -488,7 +521,7 @@ def main(argv=None):
         print(
             "  값 차이 (비교 - 기준): 중앙값 %+.4f, 절대차 중앙값 %.4f, p90 %.4f, 최대 %.4f"
             % (
-                sorted(diffs)[len(diffs) // 2],
+                statistics.median(diffs),
                 q.get(0.5, float("nan")),
                 q.get(0.9, float("nan")),
                 q.get(1.0, float("nan")),
@@ -500,6 +533,17 @@ def main(argv=None):
         row_tops = {}
         for nn in top_ns:
             if nn > n:
+                continue
+            tied_boundary = any(
+                nn < len(values) and values[nn - 1][1] == values[nn][1]
+                for values in (ref_sorted, test_sorted)
+            )
+            if tied_boundary:
+                print(
+                    "    %-6d %-14s %-10s %s"
+                    % (nn, "판정불가(동점)", "-", "경계 동점으로 순위 집합이 유일하지 않음")
+                )
+                row_tops[nn] = (None, None, None, None)
                 continue
             rec, hit, tot = topn_overlap(ref_sorted, test_sorted, nn)
             need, fac = safety_factor(ref_sorted, test_sorted, nn)
@@ -527,12 +571,13 @@ def main(argv=None):
                 "Kendall_tau_b": None if tau is None else round(tau, 4),
                 "Spearman_p_t근사": None if pval is None else float("%.4g" % pval),
                 "Pearson_r": None if r_lin is None else round(r_lin, 4),
-                "값차_중앙값": round(sorted(diffs)[len(diffs) // 2], 4),
+                "값차_중앙값": round(statistics.median(diffs), 4),
                 "절대값차_중앙값": round(q.get(0.5, 0.0), 4),
                 "절대값차_p90": round(q.get(0.9, 0.0), 4),
                 "절대값차_최대": round(q.get(1.0, 0.0), 4),
                 **{
-                    "top%d_겹침률" % nn: round(v[0], 4) for nn, v in row_tops.items()
+                    "top%d_겹침률" % nn: (None if v[0] is None else round(v[0], 4))
+                    for nn, v in row_tops.items()
                 },
                 **{"top%d_안전배수" % nn: (None if v[3] is None else round(v[3], 3)) for nn, v in row_tops.items()},
             }
@@ -583,7 +628,7 @@ def main(argv=None):
             w = csv.DictWriter(fh, fieldnames=keys, extrasaction="ignore")
             w.writeheader()
             for r in results:
-                w.writerow(r)
+                w.writerow(csv_safe_row(r))
         print("요약 저장: %s" % out)
 
     if args.pairs_out and pairs_dump:
@@ -593,7 +638,7 @@ def main(argv=None):
         with open(out, "w", encoding="utf-8-sig", newline="") as fh:
             w = csv.DictWriter(fh, fieldnames=list(pairs_dump[0].keys()))
             w.writeheader()
-            w.writerows(pairs_dump)
+            w.writerows(csv_safe_row(row) for row in pairs_dump)
         print("타깃별 대응표 저장: %s" % out)
 
     return 0

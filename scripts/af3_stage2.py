@@ -67,10 +67,59 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import os
+import shlex
 import string
 import sys
+import tempfile
 from pathlib import Path
+
+
+def csv_safe_cell(value):
+    """Prevent spreadsheet programs from evaluating untrusted text as a formula."""
+    if isinstance(value, str) and value.lstrip().startswith(("=", "+", "-", "@")):
+        return "'" + value
+    return value
+
+
+def atomic_write_json(path, obj, overwrite=False):
+    """Publish JSON without fixed temp names or destination-symlink traversal."""
+    destination = Path(path)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".%s." % destination.name,
+        suffix=".tmp",
+        dir=str(destination.parent),
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(obj, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        if overwrite:
+            os.replace(temporary, destination)
+            return True
+        try:
+            os.link(temporary, destination)
+        except FileExistsError:
+            return False
+        temporary.unlink()
+        return True
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+
+def suggested_output_dir(input_dir):
+    path = Path(input_dir)
+    name = path.name or "af3"
+    output_name = name[:-3] + "_out" if name.endswith("_in") and len(name) > 3 else name + "_out"
+    return path.parent / output_name
+
 
 # af3_collect.py 가 쓰는 열 이름
 COL_TARGET = "타깃"
@@ -142,9 +191,10 @@ def as_float(value):
     if text == "":
         return None
     try:
-        return float(text)
+        value = float(text)
     except ValueError:
         return None
+    return value if math.isfinite(value) else None
 
 
 # ---------------------------------------------------------------------------
@@ -393,6 +443,8 @@ def parse_seeds(spec: str) -> list[int]:
                 die("--seeds 를 해석할 수 없다: %s" % spec)
     if not seeds:
         die("--seeds 가 비어 있다. AF3 는 modelSeeds 가 비면 입력을 거부한다.")
+    if any(seed < 0 or seed > 2**32 - 1 for seed in seeds):
+        die("--seeds 는 32-bit unsigned integer 범위(0~4294967295)여야 한다.")
     # 중복 제거, 순서 유지
     out, seen = [], set()
     for s in seeds:
@@ -415,6 +467,8 @@ def build_one(src_json: Path, *, seeds, name_suffix, do_strip, json_version):
         return None, "읽을 수 없다 (%s)" % exc
     if not isinstance(obj, dict):
         return None, "최상위가 객체(dict)가 아니다"
+    if not isinstance(obj.get("name"), str) or not obj["name"].strip():
+        return None, "name 이 비어 있지 않은 문자열이 아니다"
     if not obj.get("sequences"):
         return None, "sequences 가 비어 있다 (AF3 가 거부한다)"
 
@@ -427,6 +481,13 @@ def build_one(src_json: Path, *, seeds, name_suffix, do_strip, json_version):
         )
 
     removed = strip_msa(obj) if do_strip else 0
+    remaining_sidecars = has_sidecar(obj)
+    if remaining_sidecars:
+        return None, (
+            "MSA 처리 뒤에도 외부 파일 참조가 남는다 (%s). 새 출력 폴더에서 경로가 "
+            "깨지므로 sidecar를 인라인하거나 원본 입력을 직접 사용하라."
+            % ", ".join(remaining_sidecars[:3])
+        )
     msa_chars = msa_size(obj)
 
     obj["modelSeeds"] = list(seeds)
@@ -434,7 +495,15 @@ def build_one(src_json: Path, *, seeds, name_suffix, do_strip, json_version):
     if json_version is not None:
         obj["version"] = json_version
     if name_suffix:
-        obj["name"] = "%s%s" % (obj.get("name", src_json.stem), name_suffix)
+        obj["name"] = "%s%s" % (obj["name"], name_suffix)
+
+    output_name = sanitised_name(str(obj["name"]))
+    if (
+        not output_name
+        or output_name.startswith(".")
+        or output_name[0] in "=+-@"
+    ):
+        return None, "name 을 AF3 출력 이름으로 정규화하면 비어 있거나 위험한 이름이 된다"
 
     # AF3 가 모르는 최상위 키는 거부되므로 떨어낸다. (다른 도구가 붙인 메모 등)
     dropped = sorted(set(obj) - TOP_LEVEL_KEYS)
@@ -448,11 +517,24 @@ def build_one(src_json: Path, *, seeds, name_suffix, do_strip, json_version):
     return {
         "obj": obj,
         "name": obj["name"],
-        "output_name": sanitised_name(str(obj["name"])),
+        "output_name": output_name,
         "msa_chars": msa_chars,
         "removed": removed,
         "dropped": dropped,
     }, None
+
+
+def choose_run_mode(n_data: int, n_input: int, strip_msa_requested: bool) -> str:
+    """Return one AF3 mode that is valid for every planned stage-2 input."""
+
+    if strip_msa_requested:
+        return "full"
+    if n_data and n_input:
+        raise ValueError(
+            "_data.json 과 원본 input JSON 이 한 실행 계획에 섞였다. "
+            "--source data 또는 --source input 으로 한 종류만 선택하라"
+        )
+    return "inference" if n_data else "full"
 
 
 # ---------------------------------------------------------------------------
@@ -505,13 +587,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="_data.json 에서 MSA/템플릿을 지워 2단계에서 MSA 를 다시 검색하게 한다 "
         "(축소DB 로 1단계, 전체DB 로 2단계를 돌릴 때)",
     )
-    g.add_argument("--json-version", type=int, default=None, help="JSON version 값을 이 값으로 (기본: 원본 유지)")
+    g.add_argument(
+        "--json-version",
+        type=int,
+        choices=(1, 2, 3, 4),
+        default=None,
+        help="JSON version 값을 이 값으로 (기본: 원본 유지)",
+    )
 
     g = p.add_argument_group("동작")
     g.add_argument("--overwrite", action="store_true", help="출력 폴더에 이미 있는 JSON 을 덮어쓴다")
     g.add_argument("--manifest", default=None, help="선정 내역을 이 CSV 로 저장 (기본: 출력폴더/2단계_선정내역.csv)")
     g.add_argument("--dry-run", action="store_true", help="쓰지 않고 무엇이 만들어질지만 보여준다")
     g.add_argument("--quiet", action="store_true", help="진행 메시지를 줄인다")
+    g.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="누락/충돌 후보가 있어도 생성 가능한 파일을 쓰고 종료코드 0을 허용한다",
+    )
     return p
 
 
@@ -534,6 +627,8 @@ def main(argv=None) -> int:
         )
     if args.top is not None and args.top <= 0:
         die("--top 은 1 이상이어야 한다.")
+    if args.minimum is not None and not math.isfinite(args.minimum):
+        die("--min 은 유한한 숫자여야 한다.")
 
     seeds = parse_seeds(args.seeds)
     out_root = Path(args.from_out) if args.from_out else None
@@ -644,7 +739,10 @@ def main(argv=None) -> int:
     # ---- 보고 ------------------------------------------------------------
     n_data = sum(1 for i in plan if i["kind"] == "data")
     n_input = len(plan) - n_data
-    mode_hint = "inference" if (n_data and not args.strip_msa) else "full"
+    try:
+        mode_hint = choose_run_mode(n_data, n_input, args.strip_msa)
+    except ValueError as exc:
+        die(str(exc))
 
     print()
     print("2단계 재실행 입력 %d건" % len(plan))
@@ -711,14 +809,12 @@ def main(argv=None) -> int:
     for idx, item in enumerate(plan, 1):
         fname = "%0*d_%s.json" % (width, idx, item["output_name"])
         path = outdir / fname
-        if path.exists() and not args.overwrite:
+        if os.path.lexists(path) and not args.overwrite:
             collisions.append(fname)
             continue
-        tmp = path.with_suffix(".json.tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(item["obj"], fh, ensure_ascii=False, indent=2)
-            fh.write("\n")
-        os.replace(tmp, path)
+        if not atomic_write_json(path, item["obj"], overwrite=args.overwrite):
+            collisions.append(fname)
+            continue
         item["written"] = path
         written.append(path)
 
@@ -751,7 +847,7 @@ def main(argv=None) -> int:
             if "written" not in item:
                 continue
             w.writerow(
-                [
+                [csv_safe_cell(value) for value in [
                     rank,
                     item["target"],
                     "" if item["value"] is None else item["value"],
@@ -761,7 +857,7 @@ def main(argv=None) -> int:
                     item["output_name"],
                     item["msa_chars"],
                     ",".join(str(s) for s in seeds),
-                ]
+                ]]
             )
 
     print()
@@ -769,14 +865,16 @@ def main(argv=None) -> int:
     print("선정 내역 -> %s" % manifest)
     print()
     print("다음 단계 - 이 명령을 그대로 복사해 붙여라")
-    print("  python3 run_af3_batch_improved.py --mode %s \\" % mode_hint)
-    print("      --input-dir %s \\" % outdir)
-    print("      --output-dir %s_out" % str(outdir).rstrip("/"))
+    runner = shlex.quote(str(Path(__file__).resolve().with_name("run_af3_batch_improved.py")))
+    output_dir = suggested_output_dir(outdir)
+    print("  python3 %s --mode %s \\" % (runner, mode_hint))
+    print("      --input-dir %s \\" % shlex.quote(str(outdir)))
+    print("      --output-dir %s" % shlex.quote(str(output_dir)))
     if mode_hint == "inference":
         print("  (--mode inference 가 AF3 에 --norun_data_pipeline 을 붙인다. MSA 를 건너뛴다.)")
         print("  Docker 없이 conda 네이티브로 돌린다면:")
-        print("      python3 run_alphafold.py --input_dir %s \\" % outdir)
-        print("          --output_dir %s_out --model_dir ~/af3_models \\" % str(outdir).rstrip("/"))
+        print("      python3 run_alphafold.py --input_dir %s \\" % shlex.quote(str(outdir)))
+        print("          --output_dir %s --model_dir ~/af3_models \\" % shlex.quote(str(output_dir)))
         print("          --norun_data_pipeline")
     else:
         print("  (MSA 를 다시 검색하므로 --mode full 이다. DB 폴더가 필요하다.)")
@@ -784,6 +882,13 @@ def main(argv=None) -> int:
     print("주의: 이 선별의 컷오프가 옳은지는 이 스크립트가 판단하지 않는다.")
     print("      경량 설정과 기본값 설정 사이의 순위 보존은 측정되지 않았다.")
     print("      af3_rankcorr.py 로 자기 데이터에서 순위 상관을 먼저 재라.")
+    incomplete = bool(skipped or collisions or len(written) != len(plan))
+    if incomplete and not args.allow_partial:
+        log(
+            "오류: 일부 후보를 쓰지 못했다. 위 진단을 해결하고 다시 실행하거나 "
+            "의도한 부분 출력이면 --allow-partial 을 명시하라."
+        )
+        return 1
     return 0
 
 
