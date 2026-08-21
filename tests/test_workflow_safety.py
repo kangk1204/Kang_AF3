@@ -73,6 +73,10 @@ def test_markdown_local_links_resolve():
     ):
         check_in(snippet, readme, "README의 자립형 설치/시각화 흐름이 끊겼다")
 
+    check_in("비공개 연구 협업 저장소", readme, "현재 저장소 공개 범위를 설명하지 않았다")
+    for stale_tone in ("이 저장소는 공개다", "읽어라", " 보라", "마라", "함정", "급히"):
+        check(stale_tone not in readme, "README에 과도한 지시체가 남았다", stale_tone)
+
 
 @regression(
     item="install",
