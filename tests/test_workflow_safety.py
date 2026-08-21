@@ -100,6 +100,16 @@ def test_installer_help_dry_run_and_safety_gates():
             shutil.copy2(SCRIPTS_DIR / support_name, isolated_scripts / support_name)
         return isolated_installer, lock_path
 
+    def add_fake_nvidia_smi(fake_bin: Path) -> None:
+        fake_nvidia = fake_bin / "nvidia-smi"
+        fake_nvidia.write_text(
+            "#!/usr/bin/env bash\n"
+            "if [[ ${1:-} == -L ]]; then echo 'GPU 0: test GPU'; fi\n"
+            "exit 0\n",
+            encoding="utf-8",
+        )
+        fake_nvidia.chmod(0o755)
+
     help_proc = subprocess.run(
         ["bash", str(installer), "--help"],
         capture_output=True,
@@ -154,6 +164,7 @@ def test_installer_help_dry_run_and_safety_gates():
         root = Path(td)
         fake_bin = root / "bin"
         fake_bin.mkdir()
+        add_fake_nvidia_smi(fake_bin)
         marker = root / "sudo_called"
         fake_sudo = fake_bin / "sudo"
         fake_sudo.write_text(
@@ -239,6 +250,7 @@ def test_installer_help_dry_run_and_safety_gates():
         (bad_db / "partial.fasta").write_text("partial\n", encoding="utf-8")
         fake_bin = root / "bin"
         fake_bin.mkdir()
+        add_fake_nvidia_smi(fake_bin)
         marker = root / "sudo_called"
         fake_sudo = fake_bin / "sudo"
         fake_sudo.write_text(
@@ -282,6 +294,7 @@ def test_installer_help_dry_run_and_safety_gates():
         (foreign_partial / "unowned.txt").write_text("foreign\n", encoding="utf-8")
         fake_bin = root / "bin"
         fake_bin.mkdir()
+        add_fake_nvidia_smi(fake_bin)
         marker = root / "sudo_called"
         fake_sudo = fake_bin / "sudo"
         fake_sudo.write_text(
@@ -323,6 +336,7 @@ def test_installer_help_dry_run_and_safety_gates():
         fake_python.chmod(0o755)
         fake_bin = root / "bin"
         fake_bin.mkdir()
+        add_fake_nvidia_smi(fake_bin)
         marker = root / "sudo_called"
         fake_sudo = fake_bin / "sudo"
         fake_sudo.write_text(
@@ -362,6 +376,7 @@ def test_installer_help_dry_run_and_safety_gates():
             fcntl.flock(lock_handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
             fake_bin = root / "bin"
             fake_bin.mkdir()
+            add_fake_nvidia_smi(fake_bin)
             marker = root / "sudo_called"
             fake_sudo = fake_bin / "sudo"
             fake_sudo.write_text(
