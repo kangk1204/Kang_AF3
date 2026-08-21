@@ -78,6 +78,20 @@ def test_markdown_local_links_resolve():
     for stale_tone in ("이 저장소는 공개다", "읽어라", " 보라", "마라", "함정", "급히"):
         check(stale_tone not in readme, "README에 과도한 지시체가 남았다", stale_tone)
 
+    quick_summary = readme.partition("## Quick Start")[2].partition("\n---\n")[0]
+    check(quick_summary, "README 상단 Quick Start가 없다")
+    for quick_heading in ("### 1. 설치", "### 2. 예제로 배치 실행", "### 3. 본인 입력 준비"):
+        check_in(quick_heading, quick_summary, "Quick Start의 설치·실행 순서가 불완전하다")
+    for input_step in (
+        "cp examples/vhh_monomer.json quick_in/",
+        "--fasta my_sequences.fasta",
+        ">sample_01",
+        "--dry-run",
+    ):
+        check_in(input_step, quick_summary, "Quick Start의 입력 준비 절차가 불완전하다")
+    for benchmark_only in ("31.95초", "5.39초", "5.93배", "189시간"):
+        check(benchmark_only not in quick_summary, "Quick Start가 목적 대신 성능 비교를 앞세운다", benchmark_only)
+
 
 @regression(
     item="install",

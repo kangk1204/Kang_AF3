@@ -8,14 +8,15 @@ VHH/나노바디처럼 짧은 단백질 수백에서 수천 건을 AlphaFold 3�
 
 ---
 
-## 5분 요약
+## Quick Start
 
-Kang_AF3는 JSON마다 `docker run`을 시작하는 대신 한 컨테이너에서 입력을 연속 처리한다.
-GPU 추론 단계는 건당 31.95초에서 5.39초로 5.93배 단축됐다
-(32건 × 3회 중앙값). 서로 다른 소규모 실험의 건당 시간을 단순 합산하면 2000건은
-약 4.1시간이며, 기존 방식의 보고값은 189시간이다. AF3 소스, Google 이용약관이 적용되는
-모델 가중치, 공식 DB root는 별도로 준비한다
-([3-1 다운로드 목록](#3-1-다운로드-목록)).
+Kang_AF3는 여러 AlphaFold 3 입력을 한 컨테이너에서 연속 실행하는 연구용 작업 흐름이다.
+입력 JSON 생성, 중단 작업 재개, 결과 CSV 집계, 2D 그림과 3D 뷰어 생성을 함께 제공한다.
+AF3 소스, Google 이용약관이 적용되는 모델 가중치, 공식 DB root는 별도로 준비한다
+([3-1 다운로드 목록](#3-1-다운로드-목록)). 성능 측정값은 [7절](#7-속도-개선의-근거)에
+정리했다.
+
+### 1. 설치
 
 Ubuntu에서 처음 설치할 때는 저장소를 먼저 내려받는다.
 
@@ -51,26 +52,61 @@ full DB를 아직 받지 않을 때는 `bash scripts/install_af3_ubuntu.sh`만 �
 모드는 Docker/GPU, AF3 이미지와 그림 환경까지만 설치한다. 새로 docker 그룹에 들어간
 경우 설치가 끝난 뒤 한 번 로그아웃·로그인한다.
 
-설치 후 기본 흐름:
+### 2. 예제로 배치 실행
+
+설치가 끝나면 저장소의 단량체 JSON으로 1건을 실행한다.
 
 ```bash
-# 0. 필수 환경 점검. 누락 항목이 있으면 종료코드 1
+# 예제 입력 폴더 준비
+mkdir -p quick_in
+cp examples/vhh_monomer.json quick_in/
+
+# 필수 환경 점검. 누락 항목이 있으면 종료코드 1
 AF3_DB_DIR=~/public_databases_full bash scripts/af3_check.sh
 
-# 1. FASTA/CSV 에서 입력 JSON 을 타깃당 하나씩 만든다 -> vhh_001_in/
-python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta -o vhh_001_in
-
-# 2. 전수 실행. 컨테이너 1회 기동으로 vhh_001_in/ 전체를 순회한다 -> vhh_001_out/
-python3 scripts/run_af3_batch_improved.py --input-dir vhh_001_in --output-dir vhh_001_out \
+# 제공 예제 1건 실행
+python3 scripts/run_af3_batch_improved.py --input-dir quick_in --output-dir quick_out \
     --db-dir ~/public_databases_full --yes
 
-# 3. 결과를 CSV로 집계한다
-python3 scripts/af3_collect.py vhh_001_out -o vhh_001_결과요약.csv
+# 결과 집계
+python3 scripts/af3_collect.py quick_out -o quick_summary.csv
 
-# 4. pLDDT/PAE 그림과 브라우저 3D 뷰어를 만든다
-~/af3_plot_env/bin/python scripts/af3_visualize.py vhh_001_out -o figs
-python3 scripts/af3_view3d.py vhh_001_out --out-dir viewer
+# pLDDT/PAE 그림과 브라우저 3D 뷰어 생성
+~/af3_plot_env/bin/python scripts/af3_visualize.py quick_out -o quick_figures
+python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 ```
+
+배치 실행이 끝나면 `quick_out/vhh_7mfv_1/`에 구조와 신뢰도 파일이 생긴다.
+`quick_summary.csv`, `quick_figures/`, `quick_viewer/index.html`에서 결과를 확인한다.
+
+### 3. 본인 입력 준비
+
+AlphaFold 3는 JSON을 입력으로 받는다. `af3_prepare.py`는 FASTA 또는 CSV/TSV 서열표를
+읽어 레코드마다 AF3 JSON 하나를 만든다. 이미 AF3 형식의 JSON이 있다면 변환하지 않고
+입력 폴더에 바로 둔다.
+
+FASTA는 `>` 뒤에 타깃 이름을 쓰고 다음 줄에 아미노산 서열을 적는다.
+
+```text
+>sample_01
+QVQLVESGGGLVQAGGSLRLSCAASGFPVAYKTMWWYRQAPGKEREWVAAIESYGIKWTRYADSVKGRFTISRDNAKNTVYLQMNSLKPEDTAVYYCIVWVGAQYHGQGTQVTVSA
+```
+
+파일 생성 전 `--dry-run`으로 이름, 서열, 토큰 수와 버킷을 확인한다.
+
+```bash
+python3 scripts/af3_prepare.py --fasta my_sequences.fasta -o my_project_in --dry-run
+python3 scripts/af3_prepare.py --fasta my_sequences.fasta -o my_project_in
+
+# 본인 입력 폴더로 배치 실행
+python3 scripts/run_af3_batch_improved.py \
+    --input-dir my_project_in --output-dir my_project_out \
+    --db-dir ~/public_databases_full --yes
+```
+
+CSV/TSV도 사용할 수 있다. 첫 줄에는 열 이름이 있어야 하며 이름·서열 열은 자동 인식한다.
+열 이름이 특수한 경우 `--name-col`과 `--seq-col`로 지정한다. 공통 항원, 리간드, homomer,
+여러 seed 입력은 [5-3절](#5-3-af3_preparepy-fastacsv-에서-json-만들기)에 정리했다.
 
 CSV의 `등급` 열로 1차 선별하고, 단량체는 pTM과 pLDDT평균, 복합체는 ipTM을 본다.
 신뢰도는 정답 일치도가 아니라 후보를 줄이기 위한 순위 지표로 사용한다
