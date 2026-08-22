@@ -126,6 +126,20 @@ multi-FASTA의 각 레코드는 서로 독립된 예측 작업이며, 여러 레
 
 아래 예제는 모두 `--dry-run` 확인 후 JSON을 만들고 같은 배치 러너로 실행한다.
 
+실제 입력 데이터는 다음 파일에서 확인할 수 있다. 파일 이름을 누르면 GitHub에서 전체
+내용을 볼 수 있으며 그대로 내려받아 실행할 수 있다.
+
+| 작업 | 입력 데이터 예제 | 파일 안의 구성 |
+|---|---|---|
+| 여러 단백질을 각각 예측 | [multi-FASTA 6종](examples/vhh_panel.fasta) | `>이름`과 VHH 서열 6개 |
+| homomer | [단일 VHH FASTA](examples/vhh_single.fasta) | VHH 서열 1개 |
+| 모든 대상에 같은 항원 추가 | [multi-FASTA 6종](examples/vhh_panel.fasta) + [공통 항원 FASTA](examples/antigen.fasta) | 대상 6개 + lysozyme 1개 |
+| 공통 파트너 N부 추가 | [단일 VHH FASTA](examples/vhh_single.fasta) + [공통 항원 FASTA](examples/antigen.fasta) | 대상 1개 + 반복할 파트너 1개 |
+| 서로 다른 단백질 3종 | [서로 다른 단백질 3사슬 JSON](examples/three_protein_complex.json) | `sequences` 배열의 A, B, C protein |
+
+FASTA 예제는 공개 PDB 유래 서열이고, 3사슬 JSON은 입력 형식 확인용 조합이다. 실제 연구
+서열은 같은 형식으로 별도 파일에 준비하며 Git에는 추가하지 않는다.
+
 #### A. multi-FASTA의 단백질을 각각 예측
 
 `examples/vhh_panel.fasta`의 레코드 6개가 독립 JSON 6개와 독립 작업 6개가 된다.
