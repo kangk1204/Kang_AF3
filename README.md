@@ -108,6 +108,20 @@ CSV/TSV도 사용할 수 있다. 첫 줄에는 열 이름이 있어야 하며 �
 열 이름이 특수한 경우 `--name-col`과 `--seq-col`로 지정한다. 공통 항원, 리간드, homomer,
 여러 seed 입력은 [5-3절](#5-3-af3_preparepy-fastacsv-에서-json-만들기)에 정리했다.
 
+입력 파일과 복합체 구성의 관계는 다음과 같다.
+
+| 준비하려는 작업 | 입력 방법 | 생성 결과 |
+|---|---|---|
+| 여러 단백질을 각각 예측 | multi-FASTA 또는 CSV/TSV | 레코드마다 독립 JSON 1개 |
+| 같은 단백질 N부로 homomer 예측 | `--copies N` | 한 JSON 안에 동일 서열 사슬 N개 |
+| 모든 대상에 같은 항원 추가 | `--partner-fasta antigen.fasta` | 대상마다 대상+공통 파트너 JSON 1개 |
+| 공통 파트너 N부 추가 | `--partner-copies N` | 한 JSON 안에 공통 파트너 사슬 N개 |
+| 서로 다른 단백질 사슬이 3종 이상 | AF3 JSON을 직접 작성 | `sequences` 배열에 A, B, C 사슬을 각각 추가 |
+
+multi-FASTA의 각 레코드는 서로 독립된 예측 작업이며, 여러 레코드를 한 복합체로 합치지
+않는다. `--partner-fasta` 파일에 레코드가 여러 개 있으면 현재 구현은 첫 번째 레코드만
+공통 파트너로 사용하고 경고를 출력한다.
+
 CSV의 `등급` 열로 1차 선별하고, 단량체는 pTM과 pLDDT평균, 복합체는 ipTM을 본다.
 신뢰도는 정답 일치도가 아니라 후보를 줄이기 위한 순위 지표로 사용한다
 (판정 기준은 [8절](#8-결과-해석)). 처음 사용하는 경우에는 2절 요구 사양부터
@@ -592,9 +606,9 @@ PDB 7MFV(합성 나노바디 Sb16, 116 aa)의 실제 서열이다.
 
 ### 5-2. 복합체: 항원 파트너 붙이기
 
-`sequences` 배열에 항목을 하나 더 넣으면 그 둘이 함께 예측된다. 아래는 PDB 1MEL 의 실제
-조합으로, 낙타 단일도메인 항체(148 aa)와 그 항원 lysozyme(129 aa)이다. 서열은 자리를
-실행 가능한 전체 서열은 `examples/vhh_antigen_complex.json`에 있다.
+`sequences` 배열에 항목을 추가하면 여러 사슬을 한 구조로 예측할 수 있다. 아래는 PDB
+1MEL의 낙타 단일도메인 항체(148 aa)와 lysozyme 항원(129 aa) 예시다. JSON 구조를 보여주기
+위해 서열을 줄여 표시했으며, 실행 가능한 전체 서열은 `examples/vhh_antigen_complex.json`에 있다.
 
 ```json
 {
@@ -608,6 +622,11 @@ PDB 7MFV(합성 나노바디 Sb16, 116 aa)의 실제 서열이다.
   "version": 1
 }
 ```
+
+서로 다른 단백질 사슬이 세 개라면 같은 `sequences` 배열에 `id`가 `"C"`인 protein 항목을
+추가한다. AlphaFold 3 자체는 이와 같은 다중 사슬 JSON을 지원한다. 현재 `af3_prepare.py`는
+대상 서열 1종과 공통 파트너 1종, 각 사슬의 복제 수, 선택적 리간드까지 자동 생성한다.
+서로 다른 파트너가 두 종 이상인 임의 복합체는 JSON을 직접 작성한다.
 
 복합체에서는 출력에 **ipTM(계면 신뢰도)** 이 함께 나온다. 단량체에서는 나오지 않는다.
 복합체 예측에서는 두 가지를 고려한다. 첫째, **토큰 수가 늘어나 패딩 버킷이 커진다.**
@@ -624,7 +643,7 @@ DB 는 24,250~27,353 이다. 복합체에는 전체 DB 를 써야 할 것으로 
 스크립트가 정확하다.
 
 ```bash
-# FASTA 의 각 레코드마다 JSON 1개
+# multi-FASTA의 각 레코드를 독립된 JSON 1개로 변환
 python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta -o vhh_001_in
 
 # 실행 전 --dry-run으로 생성 개수, 토큰 수, 패딩 버킷 분포를 확인한다
@@ -640,7 +659,7 @@ python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta -o vhh_in --seed
 python3 scripts/af3_prepare.py --fasta target.fasta -o with_atp_in --ligand-ccd ATP
 ```
 
-2000건을 잘못된 이름으로 만들어 놓고 나중에 아는 것보다 `--dry-run` 이 훨씬 싸다.
+대량 변환 전에는 `--dry-run`으로 이름 충돌과 입력 오류를 확인한다.
 `--dry-run` 이 실제로 출력하는 버킷 분포는 이런 모양이다 (예제 6종).
 
 ```

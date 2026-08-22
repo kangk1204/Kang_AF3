@@ -87,6 +87,9 @@ def test_markdown_local_links_resolve():
         "--fasta my_sequences.fasta",
         ">sample_01",
         "--dry-run",
+        "multi-FASTA의 각 레코드는 서로 독립된 예측 작업",
+        "서로 다른 단백질 사슬이 3종 이상",
+        "AF3 JSON을 직접 작성",
     ):
         check_in(input_step, quick_summary, "Quick Start의 입력 준비 절차가 불완전하다")
     for benchmark_only in ("31.95초", "5.39초", "5.93배", "189시간"):
