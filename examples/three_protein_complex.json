@@ -1,0 +1,28 @@
+{
+  "name": "three_protein_format_example",
+  "modelSeeds": [
+    1
+  ],
+  "sequences": [
+    {
+      "protein": {
+        "id": "A",
+        "sequence": "QVQLVESGGGLVQAGGSLRLSCAASGFPVAYKTMWWYRQAPGKEREWVAAIESYGIKWTRYADSVKGRFTISRDNAKNTVYLQMNSLKPEDTAVYYCIVWVGAQYHGQGTQVTVSA"
+      }
+    },
+    {
+      "protein": {
+        "id": "B",
+        "sequence": "KVFGRCELAAAMKRHGLDNYRGYSLGNWVCAAKFESNFNTQATNRNTDGSTDYGILQINSRWWCNDGRTPGSRNLCNIPCSALLSSDITASVNCAKKIVSDGNGMNAWVAWRNRCKGTDVQAWIRGCRL"
+      }
+    },
+    {
+      "protein": {
+        "id": "C",
+        "sequence": "QVQLQESGGGLVQAGDSLRLSCAASGRTFSTYPMGWFRQAPGKEREFVAASSSRAYYADSVKGRFTISRNNAKNTVYLQMNSLKPEDTAVYYCVADSSPYYRRYDAAQDYDYWGQGTQVTVSSGRYPYDVPDYGSGRA"
+      }
+    }
+  ],
+  "dialect": "alphafold3",
+  "version": 1
+}

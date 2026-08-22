@@ -122,6 +122,81 @@ multi-FASTA의 각 레코드는 서로 독립된 예측 작업이며, 여러 레
 않는다. `--partner-fasta` 파일에 레코드가 여러 개 있으면 현재 구현은 첫 번째 레코드만
 공통 파트너로 사용하고 경고를 출력한다.
 
+### 4. 입력 유형별 실행 예제
+
+아래 예제는 모두 `--dry-run` 확인 후 JSON을 만들고 같은 배치 러너로 실행한다.
+
+#### A. multi-FASTA의 단백질을 각각 예측
+
+`examples/vhh_panel.fasta`의 레코드 6개가 독립 JSON 6개와 독립 작업 6개가 된다.
+
+```bash
+python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta -o panel_in --dry-run
+python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta -o panel_in
+python3 scripts/run_af3_batch_improved.py \
+    --input-dir panel_in --output-dir panel_out \
+    --db-dir ~/public_databases_full --yes
+```
+
+#### B. 같은 단백질 2부로 homodimer 예측
+
+`--copies 2`는 한 JSON 안에 같은 서열의 A, B 사슬을 만든다.
+
+```bash
+python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
+    --copies 2 -o homodimer_in --dry-run
+python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
+    --copies 2 -o homodimer_in
+python3 scripts/run_af3_batch_improved.py \
+    --input-dir homodimer_in --output-dir homodimer_out \
+    --db-dir ~/public_databases_full --yes
+```
+
+#### C. 여러 대상에 같은 항원 추가
+
+VHH 6개마다 같은 lysozyme 항원을 붙여 대상+항원 복합체 JSON 6개를 만든다.
+
+```bash
+python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta \
+    --partner-fasta examples/antigen.fasta -o antigen_panel_in --dry-run
+python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta \
+    --partner-fasta examples/antigen.fasta -o antigen_panel_in
+python3 scripts/run_af3_batch_improved.py \
+    --input-dir antigen_panel_in --output-dir antigen_panel_out \
+    --db-dir ~/public_databases_full --yes
+```
+
+#### D. 공통 파트너를 2부 추가
+
+`--partner-copies 2`는 한 JSON 안에 대상 A와 같은 파트너 B, C 사슬을 만든다.
+
+```bash
+python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
+    --partner-fasta examples/antigen.fasta --partner-copies 2 \
+    -o partner_dimer_in --dry-run
+python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
+    --partner-fasta examples/antigen.fasta --partner-copies 2 \
+    -o partner_dimer_in
+python3 scripts/run_af3_batch_improved.py \
+    --input-dir partner_dimer_in --output-dir partner_dimer_out \
+    --db-dir ~/public_databases_full --yes
+```
+
+#### E. 서로 다른 단백질 사슬 3종 예측
+
+현재 `af3_prepare.py`는 서로 다른 protein 3종을 자동 조합하지 않는다. 이 경우 A, B, C
+사슬이 들어 있는 AF3 JSON을 입력 폴더에 직접 둔다. 제공 파일은 JSON 형식과 실행 경로를
+확인하기 위한 예제이며 생물학적 benchmark가 아니다.
+
+```bash
+python3 -m json.tool examples/three_protein_complex.json >/dev/null
+mkdir -p three_chain_in
+cp examples/three_protein_complex.json three_chain_in/
+python3 scripts/run_af3_batch_improved.py \
+    --input-dir three_chain_in --output-dir three_chain_out \
+    --db-dir ~/public_databases_full --yes
+```
+
 CSV의 `등급` 열로 1차 선별하고, 단량체는 pTM과 pLDDT평균, 복합체는 ipTM을 본다.
 신뢰도는 정답 일치도가 아니라 후보를 줄이기 위한 순위 지표로 사용한다
 (판정 기준은 [8절](#8-결과-해석)). 처음 사용하는 경우에는 2절 요구 사양부터

@@ -95,6 +95,51 @@ def test_markdown_local_links_resolve():
     for benchmark_only in ("31.95초", "5.39초", "5.93배", "189시간"):
         check(benchmark_only not in quick_summary, "Quick Start가 목적 대신 성능 비교를 앞세운다", benchmark_only)
 
+    three_chain = json.loads(
+        (REPO_ROOT / "examples" / "three_protein_complex.json").read_text(encoding="utf-8")
+    )
+    proteins = [entry["protein"] for entry in three_chain["sequences"]]
+    check_equal([protein["id"] for protein in proteins], ["A", "B", "C"], "3사슬 JSON 예제의 chain ID가 틀렸다")
+    check(all(protein["sequence"] for protein in proteins), "3사슬 JSON 예제에 빈 서열이 있다")
+
+    with tempfile.TemporaryDirectory(prefix="af3_quick_input_") as td:
+        root = Path(td)
+        homomer_out = root / "homomer"
+        partner_out = root / "partner"
+        for outdir, extra in (
+            (homomer_out, ["--copies", "2"]),
+            (
+                partner_out,
+                [
+                    "--partner-fasta",
+                    str(REPO_ROOT / "examples" / "antigen.fasta"),
+                    "--partner-copies",
+                    "2",
+                ],
+            ),
+        ):
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS_DIR / "af3_prepare.py"),
+                    "--fasta",
+                    str(REPO_ROOT / "examples" / "vhh_single.fasta"),
+                    "-o",
+                    str(outdir),
+                    *extra,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=120,
+            )
+            check_equal(proc.returncode, 0, "Quick Start 복합체 예제 생성이 실패했다", proc.stdout + proc.stderr)
+
+        homomer_job = json.loads(next(homomer_out.glob("*.json")).read_text(encoding="utf-8"))
+        check_equal(homomer_job["sequences"][0]["protein"]["id"], ["A", "B"], "homomer 예제가 2사슬을 만들지 않았다")
+        partner_job = json.loads(next(partner_out.glob("*.json")).read_text(encoding="utf-8"))
+        check_equal(partner_job["sequences"][0]["protein"]["id"], "A", "partner 예제의 대상 chain ID가 틀렸다")
+        check_equal(partner_job["sequences"][1]["protein"]["id"], ["B", "C"], "partner-copies 예제가 2사슬을 만들지 않았다")
+
 
 @regression(
     item="install",
