@@ -587,55 +587,57 @@ def decompress_zst(path):
     exe = shutil.which("zstd")
     if exe:
         try:
-            p = subprocess.Popen(
+            # with 문으로 감싸 파이프 fd 를 확실히 닫는다. 수천 건을 한 번에 만들 때
+            # 열린 fd 가 쌓이면 EMFILE 로 죽는다.
+            with subprocess.Popen(
                 [exe, "-dc", str(path)],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
-            )
-            selector = selectors.DefaultSelector()
-            assert p.stdout is not None and p.stderr is not None
-            selector.register(p.stdout, selectors.EVENT_READ, "stdout")
-            selector.register(p.stderr, selectors.EVENT_READ, "stderr")
-            out_chunks, err_chunks = [], []
-            out_size = 0
-            deadline = time.monotonic() + 120
-            failed_reason = None
-            while selector.get_map():
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    failed_reason = "zstd 명령이 120초 제한을 넘었다"
-                    break
-                events = selector.select(min(1.0, remaining))
-                for key, _mask in events:
-                    chunk = key.fileobj.read1(1024 * 1024)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        continue
-                    if key.data == "stdout":
-                        out_size += len(chunk)
-                        if out_size > MAX_CIF_BYTES:
-                            failed_reason = "압축 해제 결과가 안전 한도 256MB를 넘는다"
-                            break
-                        out_chunks.append(chunk)
-                    elif sum(map(len, err_chunks)) < 64 * 1024:
-                        err_chunks.append(chunk)
+            ) as process, selectors.DefaultSelector() as selector:
+                assert process.stdout is not None and process.stderr is not None
+                selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+                selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+                out_chunks, err_chunks = [], []
+                out_size = 0
+                deadline = time.monotonic() + 120
+                failed_reason = None
+                while selector.get_map():
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        failed_reason = "zstd 명령이 120초 제한을 넘었다"
+                        break
+                    events = selector.select(min(1.0, remaining))
+                    for key, _mask in events:
+                        chunk = key.fileobj.read1(1024 * 1024)
+                        if not chunk:
+                            selector.unregister(key.fileobj)
+                            continue
+                        if key.data == "stdout":
+                            out_size += len(chunk)
+                            if out_size > MAX_CIF_BYTES:
+                                failed_reason = "압축 해제 결과가 안전 한도 256MB를 넘는다"
+                                break
+                            out_chunks.append(chunk)
+                        elif sum(map(len, err_chunks)) < 64 * 1024:
+                            err_chunks.append(chunk)
+                    if failed_reason:
+                        break
                 if failed_reason:
-                    break
-            if failed_reason:
-                p.kill()
-            p.wait(timeout=5)
-            stdout = b"".join(out_chunks)
-            stderr = b"".join(err_chunks)
+                    process.kill()
+                process.wait(timeout=5)
+                returncode = process.returncode
+                stdout = b"".join(out_chunks)
+                stderr = b"".join(err_chunks)
             if failed_reason:
                 return None, failed_reason
         except (OSError, subprocess.SubprocessError) as exc:
             return None, "zstd 명령 실행이 실패했다 (%s)" % exc
         if len(stdout) > MAX_CIF_BYTES:
             return None, "압축 해제 결과가 안전 한도 256MB를 넘는다"
-        if p.returncode == 0 and stdout:
+        if returncode == 0 and stdout:
             return stdout.decode("utf-8", "replace"), ""
         return None, ("zstd 명령이 실패했다 (rc=%d) %s"
-                      % (p.returncode,
+                      % (returncode,
                          stderr.decode("utf-8", "replace").strip()[:200]))
     return None, ("zstd 를 풀 방법이 없다. 다음 중 하나를 하라: "
                   "python3 -m pip install zstandard  또는  "
@@ -1326,6 +1328,28 @@ def js_string_block(text):
     return base64.b64encode(text.encode("utf-8")).decode("ascii")
 
 
+PLACEHOLDER_RE = re.compile(r"__[A-Z0-9]+__")
+
+
+def fill_template(template, values):
+    """Substitute every ``__NAME__`` slot in one pass.
+
+    Sequential ``str.replace`` calls are not safe here: a target name is user
+    data that AF3 keeps verbatim (``sanitised_name`` allows ``_`` and capitals),
+    so a target literally called ``__ENGINEJS__`` used to be inserted first and
+    then hit again by a later replace, splicing the engine script into the
+    middle of the ``var AF3 = {...}`` JSON literal and into ``<title>``. One
+    pass means no substituted value is ever rescanned.
+    """
+
+    unknown = sorted(
+        set(PLACEHOLDER_RE.findall(template)) - set(values)
+    )
+    if unknown:
+        raise ValueError("채우지 않은 자리표시자가 있다: " + ", ".join(unknown))
+    return PLACEHOLDER_RE.sub(lambda match: values[match.group(0)], template)
+
+
 def html_metrics(rec):
     rows = metric_rows(rec)
     if not rows:
@@ -1457,29 +1481,33 @@ def build_page(rec, engine, lib_mode, lib_text, index_name):
         idxlink = ('<h2>목록</h2><div><a href="%s">전체 타깃 목록으로</a></div>'
                    % html.escape(index_name, quote=True))
 
-    page = PAGE_TMPL
-    page = page.replace("__CSS__", PAGE_CSS)
-    page = page.replace("__TITLE__", html.escape("%s - AF3 구조 보기" % rec["label"]))
-    page = page.replace("__TARGET__", html.escape(rec["label"]))
-    page = page.replace("__SUBTITLE__", html.escape(subtitle))
-    page = page.replace("__METRICS__", metrics)
-    page = page.replace("__LEGEND__", html_legend(rec))
-    page = page.replace("__LOWBOX__", html_lowbox(rec))
-    page = page.replace("__INDEXLINK__", idxlink)
-    page = page.replace("__LIBHEAD__", "\n".join(libhead))
-    page = page.replace("__LIBBODY__", "\n".join(libbody))
-    page = page.replace("__FAILHINT__", failhint.replace("'", "\\'"))
-    page = page.replace("__DATA__", script_safe_json(data))
-    # __CIF__ 와 __ENGINEJS__ 는 마지막에 넣는다 (안에 __XXX__ 가 있어도 안전하게).
-    page = page.replace("__ENGINEJS__", engine_js)
-    if rec["cif"]:
-        page = page.replace("__CIF__", js_string_block(rec["cif"]))
-    else:
-        page = page.replace("__CIF__", "")
-        page = page.replace('<div id="status">구조를 불러오는 중이다.</div>',
-                            '<div id="status"><div class="bad">%s</div></div>'
-                            % html.escape(rec["problem"] or "mmCIF 가 없다"))
-    return page
+    # 상태 표시는 자리표시자 치환 '전에' 고른다. 치환된 값 안을 다시 건드리지 않는다.
+    template = PAGE_TMPL
+    if not rec["cif"]:
+        template = template.replace(
+            '<div id="status">구조를 불러오는 중이다.</div>',
+            '<div id="status"><div class="bad">%s</div></div>'
+            % html.escape(rec["problem"] or "mmCIF 가 없다"),
+        )
+    return fill_template(
+        template,
+        {
+            "__CSS__": PAGE_CSS,
+            "__TITLE__": html.escape("%s - AF3 구조 보기" % rec["label"]),
+            "__TARGET__": html.escape(rec["label"]),
+            "__SUBTITLE__": html.escape(subtitle),
+            "__METRICS__": metrics,
+            "__LEGEND__": html_legend(rec),
+            "__LOWBOX__": html_lowbox(rec),
+            "__INDEXLINK__": idxlink,
+            "__LIBHEAD__": "\n".join(libhead),
+            "__LIBBODY__": "\n".join(libbody),
+            "__FAILHINT__": failhint.replace("'", "\\'"),
+            "__DATA__": script_safe_json(data),
+            "__ENGINEJS__": engine_js,
+            "__CIF__": js_string_block(rec["cif"]) if rec["cif"] else "",
+        },
+    )
 
 
 INDEX_TMPL = """<!DOCTYPE html>
@@ -1570,13 +1598,16 @@ def build_index(records, files, subtitle):
                   '지표는 표에 그대로 보인다. 구조만 빠졌다.</div>'
                   % (len(bad), items))
 
-    page = INDEX_TMPL.replace("__CSS__", PAGE_CSS)
-    page = page.replace("__SUBTITLE__", html.escape(subtitle))
-    page = page.replace("__BADBOX__", badbox)
-    page = page.replace("__ROWS__", "\n".join(rows))
-    page = page.replace("__BANDTXT__",
-                        html.escape(" / ".join(b[3] for b in PLDDT_BANDS)))
-    return page
+    return fill_template(
+        INDEX_TMPL,
+        {
+            "__CSS__": PAGE_CSS,
+            "__SUBTITLE__": html.escape(subtitle),
+            "__BADBOX__": badbox,
+            "__ROWS__": "\n".join(rows),
+            "__BANDTXT__": html.escape(" / ".join(b[3] for b in PLDDT_BANDS)),
+        },
+    )
 
 
 # ---------------------------------------------------------------------------

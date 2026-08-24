@@ -23,6 +23,7 @@ import argparse
 import fcntl
 import json
 import os
+import re
 import shutil
 import shlex
 import socket
@@ -103,9 +104,16 @@ KNOWN_FLAGS = frozenset(
     }
 )
 INFRASTRUCTURE_EXIT_CODES = frozenset({125, 126, 127})
+# 컨테이너 이름 규칙: <접두사><러너 PID>_<순번>.
+# `docker run` 으로 띄운 컨테이너는 러너가 죽어도 데몬이 계속 돌린다 (Ctrl-C, SIGTERM,
+# SSH 끊김 모두에서 확인). 이름에 PID 를 박아 두어야 나중에 "이 컨테이너를 띄운 실행이
+# 이미 끝났는가" 를 판정하고 --audit/--cleanup 이 안전하게 정리할 수 있다.
+CONTAINER_PREFIX = "af3run_"
+CONTAINER_NAME_RE = re.compile(
+    r"^" + CONTAINER_PREFIX + r"(?P<pid>[0-9]+)_[0-9]+$"
+)
 CONTAINER_INPUT = "/root/af3_in"
 CONTAINER_OUTPUT = "/root/af3_out"
-CONTAINER_DATABASES = "/root/public_databases"
 CONTAINER_MODELS = "/root/af3_models"
 CONTAINER_CACHE = "/root/af3_cache"
 
@@ -524,14 +532,13 @@ def stage_jobs(
                 if rel in planned and planned[rel] != sidecar.source:
                     raise OSError(f"staging sidecar 이름 충돌: {rel}")
                 planned[rel] = sidecar.source
-        file_targets = sorted(planned, key=lambda path: len(path.parts))
-        for index, path in enumerate(file_targets):
-            for other in file_targets[index + 1 :]:
-                try:
-                    other.relative_to(path)
-                except ValueError:
-                    continue
-                raise OSError(f"staging 파일/폴더 경로 충돌: {path} <-> {other}")
+        # 한 경로가 다른 경로의 상위 폴더이면 같은 이름을 파일이자 폴더로 만들어야 한다.
+        # 조상만 되짚으면 되므로 모든 쌍을 훑을 필요가 없다 (쌍 단위 검사는 건수의
+        # 제곱으로 늘어나서 대량 배치의 실행 전 대기를 그대로 키운다).
+        for path in planned:
+            for ancestor in path.parents:
+                if ancestor in planned:
+                    raise OSError(f"staging 파일/폴더 경로 충돌: {ancestor} <-> {path}")
 
         write_marker(
             stage_dir / STAGE_MARKER_NAME,
@@ -573,6 +580,99 @@ def process_is_alive(pid: int) -> bool:
     except PermissionError:
         return True
     return True
+
+
+def container_name(index: int) -> str:
+    """이 실행이 띄우는 컨테이너 이름. PID 를 넣어 소유를 표시한다."""
+    return f"{CONTAINER_PREFIX}{os.getpid()}_{index}"
+
+
+def list_managed_containers(docker_command: Sequence[str]) -> list[str]:
+    """이 도구가 띄운 것으로 보이는, 지금 살아 있는 컨테이너 이름 목록."""
+    try:
+        process = subprocess.run(
+            [
+                *docker_command,
+                "ps",
+                "--filter",
+                f"name=^{CONTAINER_PREFIX}",
+                "--format",
+                "{{.Names}}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if process.returncode != 0:
+        return []
+    return [
+        line.strip()
+        for line in (process.stdout or "").splitlines()
+        if CONTAINER_NAME_RE.match(line.strip())
+    ]
+
+
+def orphan_containers(docker_command: Sequence[str]) -> list[str]:
+    """띄운 실행이 이미 끝난 컨테이너만 고른다.
+
+    PID 가 살아 있으면 남의 실행일 수 있으므로 건드리지 않는다. 판정을 틀리는
+    방향은 '덜 지우는 쪽' 이어야 한다.
+    """
+    orphans = []
+    for name in list_managed_containers(docker_command):
+        match = CONTAINER_NAME_RE.match(name)
+        if match is None:
+            continue
+        pid = int(match.group("pid"))
+        if pid != os.getpid() and not process_is_alive(pid):
+            orphans.append(name)
+    return sorted(orphans)
+
+
+def remove_containers(docker_command: Sequence[str], names: Sequence[str]) -> int:
+    removed = 0
+    for name in names:
+        try:
+            process = subprocess.run(
+                [*docker_command, "rm", "-f", name],
+                capture_output=True,
+                text=True,
+                timeout=120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            print(f"[경고] 남아 있는 컨테이너를 정리하지 못했습니다: {name} ({exc})")
+            continue
+        if process.returncode == 0:
+            removed += 1
+            print(f"[정리] 종료된 실행의 컨테이너 삭제: {name}")
+        else:
+            print(f"[경고] 컨테이너를 정리하지 못했습니다: {name}")
+    return removed
+
+
+def print_container_report(
+    docker_command: Sequence[str] | None, *, suggest_cleanup: bool = True
+) -> list[str]:
+    if docker_command is None:
+        return []
+    orphans = orphan_containers(docker_command)
+    if not orphans:
+        return []
+    print(
+        f"[점검] 끝난 실행이 남긴 컨테이너 {len(orphans)}개가 아직 돌고 있습니다. "
+        "GPU와 CPU를 계속 씁니다."
+    )
+    for name in orphans[:10]:
+        print(f"   - 남아 있는 컨테이너: {name}")
+    if len(orphans) > 10:
+        print(f"   ... 그 외 {len(orphans) - 10}개")
+    if suggest_cleanup:
+        print("       정리하려면 --cleanup 을 실행하세요.")
+    return orphans
 
 
 def scan_stage_dirs(
@@ -798,8 +898,11 @@ def docker_base(
     model_dir: Path,
     cache_dir: Path,
     use_cache: bool,
+    container: str | None = None,
 ) -> list[str]:
     command = [*docker_command, "run", "--rm"]
+    if container:
+        command.extend(("--name", container))
     if mode != "data":
         command.extend(("--gpus", "all"))
 
@@ -831,12 +934,30 @@ def docker_base(
     return command
 
 
-def run_docker(command: Sequence[str]) -> int:
+def run_docker(
+    command: Sequence[str],
+    docker_command: Sequence[str] | None = None,
+    container: str | None = None,
+) -> int:
+    """컨테이너를 돌리고, 어떻게 끝나든 그 컨테이너를 남기지 않는다.
+
+    ``--rm`` 은 컨테이너가 스스로 끝났을 때만 지운다. 러너가 Ctrl-C 나 SIGTERM 으로
+    죽으면 데몬은 컨테이너를 계속 돌린다. 그래서 finally 에서 직접 지운다.
+    (러너가 SIGKILL 로 죽으면 여기까지 못 오므로, 그 경우는 --audit/--cleanup 이 맡는다.)
+    """
     try:
         return subprocess.run(command, check=False).returncode
     except OSError as exc:
         print(f"[오류] Docker 명령을 시작할 수 없습니다: {exc}")
         return 127
+    finally:
+        if docker_command and container:
+            subprocess.run(
+                [*docker_command, "rm", "-f", container],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
 
 
 def run_one_by_one(
@@ -867,6 +988,7 @@ def run_one_by_one(
             continue
 
         print(f"[{index}/{len(jobs)}] 연산 중: {job.json_file.name}")
+        name = container_name(index)
         command = docker_base(
             docker_command=docker_command,
             image=image,
@@ -877,9 +999,10 @@ def run_one_by_one(
             model_dir=model_dir,
             cache_dir=cache_dir,
             use_cache=use_cache,
+            container=name,
         )
         command.append(f"--json_path={CONTAINER_INPUT}/{job.json_file.name}")
-        returncode = run_docker(command)
+        returncode = run_docker(command, docker_command, name)
         complete = is_complete(output_dir / job.output_name, job.output_name, mode)
         if returncode != 0 or not complete:
             had_failure = True
@@ -905,9 +1028,18 @@ def run_batch_with_fallback(
     use_cache: bool,
     quarantine_keep: int = QUARANTINE_KEEP_PER_JOB,
 ) -> bool:
+    # 결과 폴더 하나가 이상하다고 나머지 전부를 세우지 않는다. 파일별 경로와 같은
+    # 규칙으로 건별 경고만 남기고, 종료코드에는 그 실패를 반드시 반영한다.
+    quarantine_failed = False
     for job in jobs:
-        quarantine_incomplete(output_dir, job, mode, quarantine_keep)
+        try:
+            quarantine_incomplete(output_dir, job, mode, quarantine_keep)
+        except OSError as exc:
+            print(f"[경고] {job.output_name}의 미완료 결과를 보존하지 못했습니다: {exc}")
+            print("       AF3가 이 건의 결과를 타임스탬프 폴더에 따로 쓸 수 있습니다.")
+            quarantine_failed = True
 
+    name = container_name(0)
     command = docker_base(
         docker_command=docker_command,
         image=image,
@@ -918,12 +1050,13 @@ def run_batch_with_fallback(
         model_dir=model_dir,
         cache_dir=cache_dir,
         use_cache=use_cache,
+        container=name,
     )
     command.append(f"--input_dir={CONTAINER_INPUT}")
     print(f"[실행] 컨테이너 1회 기동으로 {len(jobs)}건을 순회합니다.")
     if mode != "data":
         print("[안내] 첫 입력은 JAX 컴파일 때문에 느릴 수 있으며 이후 입력이 빨라집니다.\n")
-    returncode = run_docker(command)
+    returncode = run_docker(command, docker_command, name)
 
     remaining = [
         job
@@ -931,7 +1064,7 @@ def run_batch_with_fallback(
         if not is_complete(output_dir / job.output_name, job.output_name, mode)
     ]
     if not remaining:
-        return returncode != 0
+        return returncode != 0 or quarantine_failed
     if returncode in INFRASTRUCTURE_EXIT_CODES:
         print(f"[오류] Docker 실행 환경 오류(종료코드 {returncode})로 배치를 중단합니다.")
         return True
@@ -954,7 +1087,7 @@ def run_batch_with_fallback(
         use_cache=use_cache,
         quarantine_keep=quarantine_keep,
     )
-    return returncode != 0 or fallback_failed
+    return returncode != 0 or fallback_failed or quarantine_failed
 
 
 @contextmanager
@@ -1078,7 +1211,6 @@ def print_quick_guide(
     db_dirs: Sequence[Path],
     model_dir: Path,
     cache_dir: Path,
-    image: str,
     mode: str,
     quarantine_keep: int,
 ) -> None:
@@ -1202,7 +1334,9 @@ def remove_managed_quarantine(output_dir: Path) -> int:
     return removed
 
 
-def cleanup_managed_state(output_dir: Path, assume_yes: bool) -> int:
+def cleanup_managed_state(
+    output_dir: Path, assume_yes: bool, docker_command: Sequence[str] | None = None
+) -> int:
     """사용자가 명시적으로 승인한 정확한 관리 폴더만 정리한다."""
     quarantine_root = output_dir / QUARANTINE_DIR_NAME
     managed_snapshots = managed_quarantine_snapshots(output_dir)
@@ -1220,8 +1354,9 @@ def cleanup_managed_state(output_dir: Path, assume_yes: bool) -> int:
     print("\n[정리 미리보기]")
     print_quarantine_report(output_dir)
     print_stage_report(preview)
+    orphans = print_container_report(docker_command, suggest_cleanup=False)
     removable_stages = [status for status in preview if status.removable]
-    if not quarantine_deletable and not removable_stages:
+    if not quarantine_deletable and not removable_stages and not orphans:
         print("[완료] 자동으로 안전하게 정리할 대상이 없습니다.")
         return 0
 
@@ -1242,6 +1377,8 @@ def cleanup_managed_state(output_dir: Path, assume_yes: bool) -> int:
         print("[취소] 아무것도 삭제하지 않았습니다.")
         return 0
 
+    if orphans and docker_command is not None:
+        remove_containers(docker_command, orphans)
     try:
         output_dir.mkdir(parents=True, exist_ok=True)
         with output_lock(output_dir):
@@ -1292,7 +1429,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             db_dirs=db_dirs,
             model_dir=model_dir,
             cache_dir=cache_dir,
-            image=args.image,
             mode=args.mode,
             quarantine_keep=args.quarantine_keep,
         )
@@ -1308,7 +1444,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.cleanup:
         print(f"[정리 대상 출력 폴더] {output_dir}")
-        return cleanup_managed_state(output_dir, args.yes)
+        cleanup_docker, _ = detect_docker_command(args.docker)
+        return cleanup_managed_state(output_dir, args.yes, cleanup_docker)
 
     if not args.audit:
         print_quick_guide(
@@ -1317,7 +1454,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             db_dirs=db_dirs,
             model_dir=model_dir,
             cache_dir=cache_dir,
-            image=args.image,
             mode=args.mode,
             quarantine_keep=args.quarantine_keep,
         )
@@ -1373,7 +1509,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             stale_after_seconds=STALE_STAGE_HOURS * 3600,
         )
         print_stage_report(audit_stages)
-        print("[점검] --audit이므로 Docker를 실행하지 않습니다.")
+        audit_docker, _ = detect_docker_command(args.docker)
+        print_container_report(audit_docker)
+        print("[점검] --audit이므로 계산용 Docker 실행은 하지 않습니다.")
         return 1 if pending else 0
     if not pending:
         print("[완료] 모두 이미 끝나 있습니다.")
@@ -1393,6 +1531,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             for error in model_report["errors"]:
                 print(f"       - {error}")
             return 2
+        for warning in model_report["warnings"]:
+            print(f"[경고] {warning}")
 
     staged_preview = scan_stage_dirs(
         output_dir.parent,
@@ -1555,9 +1695,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
+def _terminate(signum, _frame):
+    """SIGTERM 을 예외로 바꿔 run_docker 의 finally 가 컨테이너를 지우게 한다.
+
+    기본 동작으로 죽으면 데몬이 컨테이너를 계속 돌린다.
+    """
+    raise KeyboardInterrupt(f"signal {signum}")
+
+
 if __name__ == "__main__":
+    import signal
+
+    signal.signal(signal.SIGTERM, _terminate)
     try:
         raise SystemExit(main())
     except KeyboardInterrupt:
         print("\n[중단] 사용자가 멈췄습니다. 다시 실행하면 미완료 작업만 이어서 합니다.")
+        print("       계산 중이던 컨테이너는 정리했습니다.")
+        print("       강제 종료(kill -9)로 컨테이너가 남았다면 --cleanup 으로 확인하세요.")
         raise SystemExit(130)

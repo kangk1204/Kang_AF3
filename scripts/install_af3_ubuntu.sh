@@ -242,7 +242,7 @@ esac
 [[ "$(dpkg --print-architecture)" == "amd64" ]] || die "only the tested amd64 path is supported"
 
 for command in sudo apt-get dpkg-query nvidia-smi sha256sum stat find grep awk sed systemctl \
-  flock cmp install mktemp mv du sort xargs sg; do
+  flock cmp install mktemp mv du df dirname sort xargs sg; do
   command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"
 done
 nvidia-smi -L >/dev/null 2>&1 || die "NVIDIA driver is not working; fix nvidia-smi before running this installer"
@@ -378,6 +378,22 @@ create_db_partial() {
   validate_db_partial
 }
 
+check_database_capacity() {
+  local parent available partial_bytes=0
+  parent="$(dirname "$DB_DIR")"
+  while [[ ! -d "$parent" ]]; do
+    parent="$(dirname "$parent")"
+  done
+  available="$(LC_ALL=C df -PB1 "$parent" | awk 'NR == 2 {print $4}')"
+  [[ "$available" =~ ^[0-9]+$ ]] || die "could not determine free disk space"
+  if [[ -d "$DB_PARTIAL" ]]; then
+    partial_bytes="$(du -s --block-size=1 "$DB_PARTIAL" | awk '{print $1}')"
+    [[ "$partial_bytes" =~ ^[0-9]+$ ]] || die "could not determine staged database size"
+  fi
+  ((available + partial_bytes >= MIN_DB_FREE_BYTES)) || \
+    die "full DB installation requires at least $MIN_DB_FREE_BYTES available-or-staged bytes; available: $available, staged: $partial_bytes"
+}
+
 if ((FULL)); then
   for artifact in \
     "$MODEL_DIR/af3.bin" \
@@ -400,6 +416,10 @@ if ((FULL)); then
   fi
   if [[ -e "$DB_PARTIAL" ]]; then
     validate_db_partial
+  fi
+  if [[ ! -e "$DB_DIR" ]]; then
+    log "checking full DB disk capacity before installation changes"
+    check_database_capacity
   fi
 fi
 
@@ -553,12 +573,13 @@ image_exists() {
 validate_image_capabilities() {
   "${DOCKER[@]}" run --rm --entrypoint python3 "$IMAGE" -c \
     "from alphafold3 import version; assert version.__version__ == '$AF3_VERSION'" \
-    >/dev/null
+    >/dev/null || die "AF3 image does not report the pinned version $AF3_VERSION: $IMAGE"
   "${DOCKER[@]}" run --rm --entrypoint jackhmmer "$IMAGE" -h 2>&1 | \
-    grep -Fq -- '--seq_limit'
+    grep -Fq -- '--seq_limit' || \
+    die "AF3 image lacks the patched HMMER --seq_limit flag: $IMAGE"
   "${DOCKER[@]}" run --rm --gpus all --entrypoint python3 "$IMAGE" -c \
     "import jax; assert jax.default_backend() == 'gpu'; assert jax.devices()" \
-    >/dev/null
+    >/dev/null || die "AF3 image cannot reach the GPU through JAX: $IMAGE"
 }
 
 ensure_source() {
@@ -611,7 +632,7 @@ if ((BUILD_IMAGE)); then
   [[ "$revision" == "$AF3_COMMIT" && "$image_source" == "$AF3_REPOSITORY" ]] || \
     die "built image provenance labels are wrong"
 fi
-validate_image_capabilities || die "AF3 image capability verification failed"
+validate_image_capabilities
 
 log "creating the isolated plotting environment"
 validate_path "AF3_PLOT_ENV" "$PLOT_ENV"
@@ -686,15 +707,7 @@ install_database() {
   validate_path "AF3_DB_DIR" "$DB_DIR"
   validate_path "AF3_DB_DIR.partial" "$DB_PARTIAL"
   mkdir -p -- "$(dirname "$DB_DIR")"
-  available="$(LC_ALL=C df -PB1 "$(dirname "$DB_DIR")" | awk 'NR == 2 {print $4}')"
-  [[ "$available" =~ ^[0-9]+$ ]] || die "could not determine free disk space"
-  partial_bytes=0
-  if [[ -d "$DB_PARTIAL" ]]; then
-    partial_bytes="$(du -s --block-size=1 "$DB_PARTIAL" | awk '{print $1}')"
-    [[ "$partial_bytes" =~ ^[0-9]+$ ]] || die "could not determine staged database size"
-  fi
-  ((available + partial_bytes >= MIN_DB_FREE_BYTES)) || \
-    die "full DB installation requires at least $MIN_DB_FREE_BYTES available-or-staged bytes; available: $available, staged: $partial_bytes"
+  check_database_capacity
 
   if [[ -e "$DB_PARTIAL" ]]; then
     validate_db_partial

@@ -14,6 +14,7 @@ import inspect
 import os
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -590,3 +591,190 @@ def test_relative_sidecar_files_are_staged():
         )
     finally:
         workspace.cleanup()
+
+
+@regression(
+    item="8",
+    prevents=(
+        "배치 경로에서 격리 실패가 무방비 OSError 로 올라와, 결과 폴더 하나가 이상하면 "
+        "나머지 전부가 시작조차 못 하는 버그. 파일별 경로(run_one_by_one)는 건별로 "
+        "경고만 하고 넘어가는데 배치 경로만 전체를 세웠다."
+    ),
+)
+def test_batch_run_survives_one_unquarantinable_result():
+    workspace = Workspace()
+    try:
+        workspace.write_json("a.json", workspace.monomer("vhh_a"))
+        workspace.write_json("b.json", workspace.monomer("vhh_b"))
+        # 두 건 모두 '미완료 결과' 를 남긴 상태로 다시 도는 상황.
+        for name in ("vhh_a", "vhh_b"):
+            workspace.make_result(name, stage="partial")
+        # vhh_a 만 격리가 불가능하다: 작업별 격리 경로가 폴더가 아니라 일반 파일이다.
+        quarantine_root = workspace.output_dir / ".af3_incomplete"
+        quarantine_root.mkdir(parents=True, exist_ok=True)
+        (quarantine_root / "vhh_a").write_text("not a directory", encoding="utf-8")
+
+        proc = run_script(
+            "run_af3_batch_improved.py",
+            default_args(workspace, "--yes"),
+            workspace,
+        )
+        report = proc.stdout + proc.stderr
+        check(
+            "Traceback" not in report,
+            "격리 실패가 트레이스백으로 새어 나왔다",
+            report[-1500:],
+        )
+        check_in("vhh_a", report, "격리하지 못한 건을 알리지 않았다")
+        # 'help' 는 플래그 탐지용 호출이라 격리 이전에 이미 일어난다. 실제 계산이
+        # 시작됐는지 보려면 run 호출을 봐야 한다.
+        runs = [call for call in workspace.stub_calls() if call.get("call") == "run"]
+        check(runs, "격리 실패 한 건 때문에 배치 전체가 시작도 못 했다")
+        check(
+            workspace.result_dir("vhh_b").joinpath("vhh_b_model.cif").is_file(),
+            "격리 가능한 다른 건이 실행되지 않았다",
+        )
+        check(proc.returncode != 0, "격리 실패를 성공으로 보고했다", report[-1500:])
+        check(
+            (quarantine_root / "vhh_a").is_file(),
+            "격리할 수 없다고 판단한 경로를 건드렸다",
+        )
+    finally:
+        workspace.cleanup()
+
+
+@regression(
+    item="9",
+    prevents=(
+        "러너가 죽어도 `docker run` 컨테이너는 데몬이 계속 돌려서 GPU/CPU 를 먹는데, "
+        "러너가 컨테이너에 이름을 붙이지 않아 --audit/--cleanup 이 그 고아를 찾지도 "
+        "정리하지도 못하는 버그. Ctrl-C, SIGTERM, SSH 끊김 모두에서 실측 확인했다."
+    ),
+)
+def test_runner_names_containers_and_reports_orphans():
+    runner = load_module(RUNNER)
+
+    # 1) 컨테이너에 이 실행을 식별할 이름이 붙어야 나중에 찾을 수 있다.
+    command = runner.docker_base(
+        docker_command=("docker",),
+        image="alphafold3",
+        mode="full",
+        input_mount=Path("/tmp/in"),
+        output_dir=Path("/tmp/out"),
+        db_dirs=[Path("/tmp/db")],
+        model_dir=Path("/tmp/model"),
+        cache_dir=Path("/tmp/cache"),
+        use_cache=False,
+        container="af3run_4242_1",
+    )
+    check_in("--name", command, "컨테이너에 이름을 붙이지 않는다")
+    check_in("af3run_4242_1", command, "컨테이너 이름이 명령에 들어가지 않았다")
+    check(
+        runner.container_name(1).startswith(runner.CONTAINER_PREFIX),
+        "컨테이너 이름이 약속된 접두사로 시작하지 않는다",
+    )
+    check_in(str(os.getpid()), runner.container_name(1), "컨테이너 이름에 소유 PID가 없다")
+
+    # 2) 죽은 PID 의 컨테이너만 고아로 판정해야 한다 (남의 것을 지우면 안 된다).
+    dead_pid = 999_999_999
+    check(not runner.process_is_alive(dead_pid), "테스트 전제: 이 PID는 죽어 있어야 한다")
+    with tempfile.TemporaryDirectory(prefix="af3_orphan_") as td:
+        registry = Path(td) / "containers"
+        registry.write_text(
+            f"{runner.CONTAINER_PREFIX}{dead_pid}_1\n"
+            f"{runner.CONTAINER_PREFIX}{os.getpid()}_1\n"
+            "someone_elses_container\n",
+            encoding="utf-8",
+        )
+        workspace = Workspace()
+        try:
+            bin_dir = make_stub_bin(workspace.root)
+            env = {
+                "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
+                "AF3_STUB_CONTAINERS": str(registry),
+            }
+            # 이 호출은 같은 프로세스 안에서 일어나므로 스텁 PATH 도 직접 걸어준다.
+            saved_path = os.environ.get("PATH", "")
+            os.environ["AF3_STUB_CONTAINERS"] = str(registry)
+            os.environ["PATH"] = env["PATH"]
+            try:
+                orphans = runner.orphan_containers(("docker",))
+            finally:
+                os.environ.pop("AF3_STUB_CONTAINERS", None)
+                os.environ["PATH"] = saved_path
+            check_equal(
+                orphans,
+                [f"{runner.CONTAINER_PREFIX}{dead_pid}_1"],
+                "고아 판정이 틀렸다 (살아 있는 실행이나 남의 컨테이너를 건드린다)",
+            )
+
+            # 3) --audit 이 고아를 사용자에게 알려야 한다.
+            workspace.write_json("a.json", workspace.monomer("vhh_a"))
+            audit = run_script(
+                RUNNER,
+                default_args(workspace, "--audit"),
+                workspace,
+                env_extra=env,
+            )
+            report = audit.stdout + audit.stderr
+            check_in("남아 있는 컨테이너", report, "--audit 이 고아 컨테이너를 보고하지 않는다")
+            check_in(
+                f"{runner.CONTAINER_PREFIX}{dead_pid}_1",
+                report,
+                "--audit 이 고아 컨테이너 이름을 알려주지 않는다",
+            )
+            check_equal(
+                registry.read_text(encoding="utf-8").count("\n"),
+                3,
+                "--audit 이 컨테이너를 건드렸다 (점검만 해야 한다)",
+            )
+
+            # 4) --cleanup 이 고아만 제거해야 한다.
+            cleanup = run_script(
+                RUNNER,
+                default_args(workspace, "--cleanup", "--yes"),
+                workspace,
+                env_extra=env,
+            )
+            left = registry.read_text(encoding="utf-8").splitlines()
+            check(
+                f"{runner.CONTAINER_PREFIX}{dead_pid}_1" not in left,
+                "--cleanup 이 고아 컨테이너를 정리하지 않았다",
+                cleanup.stdout[-1200:],
+            )
+            check_in(
+                "someone_elses_container",
+                "\n".join(left),
+                "--cleanup 이 관리 대상이 아닌 컨테이너를 지웠다",
+            )
+            check_in(
+                f"{runner.CONTAINER_PREFIX}{os.getpid()}_1",
+                "\n".join(left),
+                "--cleanup 이 살아 있는 실행의 컨테이너를 지웠다",
+            )
+
+            # 5) 정상 종료든 중단이든 run_docker 는 자기 컨테이너를 남기지 않는다.
+            #    (--rm 은 컨테이너가 스스로 끝났을 때만 지운다. 러너가 죽으면 남는다.)
+            saved_path = os.environ.get("PATH", "")
+            os.environ["PATH"] = env["PATH"]
+            os.environ["AF3_STUB_CONTAINERS"] = str(registry)
+            os.environ["AF3_STUB_LOG"] = str(workspace.stub_log)
+            try:
+                runner.run_docker(
+                    ["docker", "run", "--rm", "--name", "af3run_1_9", "alphafold3"],
+                    ("docker",),
+                    "af3run_1_9",
+                )
+            finally:
+                os.environ["PATH"] = saved_path
+                os.environ.pop("AF3_STUB_CONTAINERS", None)
+                os.environ.pop("AF3_STUB_LOG", None)
+            removals = [
+                call for call in workspace.stub_calls() if call.get("call") == "rm"
+            ]
+            check(
+                any("af3run_1_9" in call.get("targets", []) for call in removals),
+                "run_docker 가 끝난 뒤 자기 컨테이너를 지우지 않는다",
+            )
+        finally:
+            workspace.cleanup()

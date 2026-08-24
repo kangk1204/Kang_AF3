@@ -141,6 +141,7 @@ def parse_docker_args(argv: list[str]) -> dict:
         "af3_flags": {},
         "af3_flag_values": {},
         "af3_switches": [],
+        "name": None,
         "raw": list(argv),
     }
     index = 0
@@ -152,6 +153,9 @@ def parse_docker_args(argv: list[str]) -> dict:
             index += 1
         elif token == "--gpus":
             result["gpus"] = True
+            index += 2
+        elif token == "--name":
+            result["name"] = argv[index + 1]
             index += 2
         elif token == "-v":
             parts = argv[index + 1].split(":")
@@ -272,11 +276,47 @@ def write_finals(result_dir: Path, name: str, zero: bool) -> None:
     (result_dir / "TERMS_OF_USE.md").write_text("stub\n", encoding="utf-8")
 
 
+def container_registry() -> Path | None:
+    """실행 중인 stub 컨테이너 목록 파일. 고아 컨테이너 회귀 테스트용이다."""
+    path = os.environ.get("AF3_STUB_CONTAINERS")
+    return Path(path) if path else None
+
+
+def registry_names() -> list[str]:
+    registry = container_registry()
+    if registry is None or not registry.exists():
+        return []
+    return [line for line in registry.read_text(encoding="utf-8").splitlines() if line]
+
+
+def registry_write(names: list[str]) -> None:
+    registry = container_registry()
+    if registry is not None:
+        registry.write_text("".join(name + "\n" for name in names), encoding="utf-8")
+
+
 def main(argv: list[str]) -> int:
     if not argv:
         return 0
     if argv[0] == "info":
         return 0
+    if argv[0] == "ps":
+        # 지원 형태: docker ps --filter name=<접두사> --format {{.Names}}
+        prefix = ""
+        for token in argv:
+            if token.startswith("name="):
+                prefix = token[len("name="):].lstrip("^")
+        for name in registry_names():
+            if name.startswith(prefix):
+                print(name)
+        return 0
+    if argv[0] == "rm":
+        targets = [token for token in argv[1:] if not token.startswith("-")]
+        remaining = [name for name in registry_names() if name not in targets]
+        removed = len(registry_names()) - len(remaining)
+        registry_write(remaining)
+        log_event({"call": "rm", "targets": targets, "removed": removed})
+        return 0 if removed or not targets else 1
     if argv[0] == "--version":
         print("Docker version 99.0.0, build stub")
         return 0
@@ -338,10 +378,14 @@ def main(argv: list[str]) -> int:
         return 2
     output_host.mkdir(parents=True, exist_ok=True)
 
+    if parsed["name"]:
+        # 실제 docker 처럼 실행 중에는 목록에 있고, 끝나면(--rm) 사라진다.
+        registry_write(registry_names() + [parsed["name"]])
     log_event(
         {
             "call": "run",
             "image": image,
+            "name": parsed["name"],
             "mode": mode,
             "gpus": parsed["gpus"],
             "per_file": "json_path" in flags,
@@ -351,6 +395,10 @@ def main(argv: list[str]) -> int:
             "mounts": [[h, c, o] for h, c, o in parsed["mounts"]],
         }
     )
+
+    def deregister() -> None:
+        if parsed["name"]:
+            registry_write([n for n in registry_names() if n != parsed["name"]])
 
     fail_at = int(os.environ.get("AF3_STUB_FAIL_AT", "0") or 0)
     fail_names = {
@@ -408,9 +456,13 @@ def main(argv: list[str]) -> int:
     except (ValueError, UnicodeDecodeError) as exc:
         # 근거 (5)(6): 순회가 여기서 멈춘다. 뒤의 입력은 처리되지 않는다.
         sys.stderr.write(f"{type(exc).__name__}: {exc}\n")
+        deregister()
         return 1
+    finally:
+        pass
 
     print(f"Done running {index} fold jobs.")
+    deregister()
     exit_after_finals = int(os.environ.get("AF3_STUB_EXIT_AFTER_FINALS", "0") or 0)
     if exit_after_finals:
         return exit_after_finals

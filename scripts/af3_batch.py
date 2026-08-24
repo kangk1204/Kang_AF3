@@ -583,6 +583,21 @@ def stage_check_mode(stage):
     return "data" if stage == "msa" else "full"
 
 
+# 어느 단계가 무엇을 실제로 읽는가.
+#   msa     -> --norun_inference       : DB 만 읽는다. af3.bin 을 열지 않는다.
+#   infer   -> --norun_data_pipeline   : 모델만 읽는다. run_alphafold.py 는
+#                                        --run_data_pipeline 일 때만 db_dir 을 해석한다.
+#   oneshot -> 한 컨테이너에서 둘 다.
+#   both    -> msa 단계와 infer 단계를 차례로 돈다. 따라서 둘 다 필요하다.
+# 쓰지 않는 것을 요구하면 core 설치(가중치 미다운로드)에서 MSA 단계가 막힌다.
+def stage_uses_databases(stage):
+    return stage in ("msa", "oneshot", "both")
+
+
+def stage_uses_model(stage):
+    return stage in ("infer", "oneshot", "both")
+
+
 def outdir_is_complete(d, mode="full", lenient=False):
     """AF3 결과 폴더가 해당 단계까지 끝났는지 판정. 폴더 존재만으로 판정하지 않는다.
 
@@ -714,10 +729,40 @@ def validate_data_json(path):
 # =============================================================================
 # 컨테이너 실행
 # =============================================================================
+# `docker run` 으로 띄운 컨테이너는 이 프로세스가 죽어도 데몬이 계속 돌린다
+# (Ctrl-C, SIGTERM, SSH 끊김 모두에서 확인). 이름을 붙여 두고 끝날 때 직접 지운다.
+CONTAINER_PREFIX = "af3run_"
+_STARTED_CONTAINERS = []
+_TEARDOWN_DOCKER = []
+
+
+def container_name(tag):
+    name = "%s%d_%s" % (CONTAINER_PREFIX, os.getpid(), tag)
+    _STARTED_CONTAINERS.append(name)
+    return name
+
+
+def teardown_containers():
+    """이 실행이 띄운 컨테이너를 남기지 않는다. 이미 끝난 것은 조용히 넘어간다."""
+    if not _TEARDOWN_DOCKER:
+        return
+    docker = _TEARDOWN_DOCKER[0]
+    for name in list(_STARTED_CONTAINERS):
+        try:
+            subprocess.run([*docker, "rm", "-f", name],
+                           stdout=subprocess.DEVNULL,
+                           stderr=subprocess.DEVNULL,
+                           check=False, timeout=120)
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+
 def build_cmd(args, docker, stage, input_dir, output_dir, buckets,
-              extra_env=None, n_cpu=None, flags=None):
+              extra_env=None, n_cpu=None, flags=None, container=None):
     """docker run 명령을 조립한다. stage 에 따라 GPU 사용/파이프라인 on-off 가 다르다."""
     cmd = list(docker) + ["run", "--rm"]
+    if container:
+        cmd += ["--name", container]
 
     if stage != "msa" or args.msa_gpus:
         cmd += ["--gpus", "all"]          # MSA 단계는 GPU가 필요 없다
@@ -740,21 +785,27 @@ def build_cmd(args, docker, stage, input_dir, output_dir, buckets,
     def absp(p):
         return os.path.abspath(os.path.expanduser(str(p)))
 
+    wants_db = stage_uses_databases(stage)
+    wants_model = stage_uses_model(stage)
+
     db_mounts = []
-    for index, db_dir in enumerate(args.db_dirs):
-        container_db = "/root/af3_db_%d" % index
-        db_mounts.append(container_db)
-        cmd += ["-v", "%s:%s:ro" % (absp(db_dir), container_db)]
-    cmd += ["-v", "%s:%s:ro" % (absp(args.model_dir), C_MODEL),
-            "-v", "%s:%s:ro" % (absp(input_dir), C_IN),
+    if wants_db:
+        for index, db_dir in enumerate(args.db_dirs):
+            container_db = "/root/af3_db_%d" % index
+            db_mounts.append(container_db)
+            cmd += ["-v", "%s:%s:ro" % (absp(db_dir), container_db)]
+    if wants_model:
+        cmd += ["-v", "%s:%s:ro" % (absp(args.model_dir), C_MODEL)]
+    cmd += ["-v", "%s:%s:ro" % (absp(input_dir), C_IN),
             "-v", "%s:%s" % (absp(output_dir), C_OUT)]
     if args.cache_dir:
         cmd += ["-v", "%s:%s" % (absp(args.cache_dir), C_CACHE)]
 
     cmd += [args.image, "python", "run_alphafold.py",
             "--input_dir=%s" % C_IN,
-            "--model_dir=%s" % C_MODEL,
             "--output_dir=%s" % C_OUT]
+    if wants_model:
+        cmd.append("--model_dir=%s" % C_MODEL)
     cmd += ["--db_dir=%s" % path for path in db_mounts]
 
     def ok(flag):
@@ -901,7 +952,8 @@ def do_stage_msa(args, docker, flags, work, targets):
     for si, paths in enumerate(shards):
         sd = stage_files(paths, work / ("stage_msa_%d" % si), mode="link")
         cmd = build_cmd(args, docker, "msa", sd, msa_raw, None,
-                        n_cpu=per_worker_cpu, flags=flags)
+                        n_cpu=per_worker_cpu, flags=flags,
+                        container=container_name("msa%d" % si))
         lf = logs / ("msa_shard%d.log" % si)
         if args.dry_run:
             print("\n[드라이런] MSA 갈래 %d (%d건):\n  %s" % (si, len(paths), " ".join(cmd)))
@@ -974,7 +1026,8 @@ def do_stage_infer(args, docker, flags, work, output_dir, targets):
             ex = sorted(targets, key=lambda t: t["tokens"])
             bks = needed_buckets([t["tokens"] for t in ex]) if ex else [256]
             cmd = build_cmd(args, docker, "infer", work / "stage_infer",
-                            output_dir, bks, flags=flags)
+                            output_dir, bks, flags=flags,
+                            container=container_name("infer_retry"))
             print("\n[드라이런] 추론 단계 (MSA 산출물이 아직 없어 명령 형태만 표시, "
                   "대상 %d건, 컨테이너 1회):\n  %s" % (len(ex), " ".join(cmd)))
             print("  ※ 실제 실행 시에는 msa_store 의 *_data.json 을 stage_infer 로 복사한 뒤"
@@ -992,7 +1045,8 @@ def do_stage_infer(args, docker, flags, work, output_dir, targets):
     # (이슈 #488 이 출처로 제시되었으나 원문 대조는 하지 않았다), MSA 산출물은 재계산이
     # 비싼 자산이므로 전제가 틀려도 복사본을 쓰는 편이 안전하다. stage_files 독스트링 참고.
     sd = stage_files([t["data_json"] for t in ready], work / "stage_infer", mode="copy")
-    cmd = build_cmd(args, docker, "infer", sd, output_dir, bks, flags=flags)
+    cmd = build_cmd(args, docker, "infer", sd, output_dir, bks, flags=flags,
+                    container=container_name("infer"))
 
     if args.dry_run:
         print("\n[드라이런] 추론 단계 (%d건, 컨테이너 1회):\n  %s" % (len(ready), " ".join(cmd)))
@@ -1015,7 +1069,8 @@ def do_stage_oneshot(args, docker, flags, work, output_dir, targets):
         % (len(targets), targets[0]["tokens"], targets[-1]["tokens"], bks))
     sd = stage_files([t["path"] for t in targets], work / "stage_oneshot", mode="link")
     cmd = build_cmd(args, docker, "oneshot", sd, output_dir, bks,
-                    n_cpu=msa_n_cpu(args, 1), flags=flags)
+                    n_cpu=msa_n_cpu(args, 1), flags=flags,
+                    container=container_name("oneshot"))
     if args.dry_run:
         print("\n[드라이런] oneshot 단계 (%d건, 컨테이너 1회):\n  %s"
               % (len(targets), " ".join(cmd)))
@@ -1074,7 +1129,10 @@ def parse_args(argv=None):
                    help="VRAM 선점을 끈다 (실사용량 확인용)")
     p.add_argument("--unified-memory", action="store_true",
                    help="OOM 시 호스트 RAM으로 흘려보낸다 (느려지지만 안 죽는다)")
-    p.add_argument("--limit", type=int, default=None, help="앞에서 N건만 실행 (벤치마크용)")
+    p.add_argument("--limit", type=int, default=None,
+                   help="대상을 토큰 수로 정렬한 뒤 가장 짧은 N건만 실행 (스모크용). "
+                        "완료분을 건너뛴 다음에 적용되므로 재실행하면 대상이 달라진다 "
+                        "- 처리시간 계획용 측정에는 쓰지 마라")
     p.add_argument("--retry", action="store_true", help="지난 실행에서 실패한 것만 다시 한다")
     p.add_argument("--no-skip", action="store_true", help="이미 끝난 것도 다시 계산한다")
     p.add_argument("--keep-partial", action="store_true",
@@ -1153,12 +1211,16 @@ def main(argv=None):
     missing = []
     if not input_dir.is_dir():
         missing.append("입력 폴더 없음: %s" % input_dir)
-    db_report = verify_database_roots(args.db_dirs)
-    if not db_report["ok"]:
-        missing.extend("DB 오류: %s" % error for error in db_report["errors"])
-    model_report = verify_model_dir(args.model_dir)
-    if not model_report["ok"]:
-        missing.extend("가중치 오류: %s" % error for error in model_report["errors"])
+    if stage_uses_databases(args.stage):
+        db_report = verify_database_roots(args.db_dirs)
+        if not db_report["ok"]:
+            missing.extend("DB 오류: %s" % error for error in db_report["errors"])
+    if stage_uses_model(args.stage):
+        model_report = verify_model_dir(args.model_dir)
+        if not model_report["ok"]:
+            missing.extend("가중치 오류: %s" % error for error in model_report["errors"])
+        for warning in model_report["warnings"]:
+            log("경고: %s" % warning)
     if missing:
         for m in missing:
             print("오류: %s" % m)
@@ -1307,6 +1369,8 @@ def main(argv=None):
 
     # ---- 도커 / 플래그 준비 ----------------------------------------------
     docker = find_docker(args.docker)
+    if docker is not None:
+        _TEARDOWN_DOCKER.append(list(docker))
     if docker is None:
         if not args.dry_run:
             print("오류: docker 명령을 찾을 수 없다.")
@@ -1429,5 +1493,20 @@ def main(argv=None):
     return rc_all
 
 
+def _terminate(signum, _frame):
+    """SIGTERM 을 예외로 바꿔 teardown 이 컨테이너를 지우게 한다."""
+    raise KeyboardInterrupt("signal %d" % signum)
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    import signal
+
+    signal.signal(signal.SIGTERM, _terminate)
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        log("")
+        log("중단됐다. 이 실행이 띄운 컨테이너를 정리한다.")
+        sys.exit(130)
+    finally:
+        teardown_containers()

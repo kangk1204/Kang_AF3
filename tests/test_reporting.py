@@ -17,10 +17,12 @@ from pathlib import Path
 
 from harness import (
     SCRIPTS_DIR,
+    Failure,
     Workspace,
     check,
     check_equal,
     check_in,
+    load_module,
     regression,
 )
 
@@ -401,3 +403,66 @@ def test_top_selection_warns_on_mixed_conditions():
         check_equal(picked, ["vhh_a"], "한 조건에서만 골라야 하는데 중복 선정됐다")
     finally:
         workspace.cleanup()
+
+
+@regression(
+    item="view3d",
+    prevents=(
+        "build_page 가 자리표시자를 순차 치환해서, 타깃명에 __ENGINEJS__/__CIF__ 같은 "
+        "자리표시자 문자열이 들어 있으면 나중 치환이 이미 삽입된 라벨을 다시 때려 "
+        "데이터 JSON 리터럴과 <title> 을 갈라놓고 뷰어 JavaScript 가 통째로 죽는 버그."
+    ),
+)
+def test_viewer_page_placeholders_survive_target_names_that_look_like_placeholders():
+    view = load_module("af3_view3d.py")
+
+    # AF3 sanitised_name 은 밑줄과 대문자를 남기므로 이런 타깃명이 실제로 만들어질 수 있다.
+    hostile = ["__ENGINEJS__", "__CIF__", "__DATA__", "run__TITLE__v2", "__LIBBODY__"]
+    for label in hostile:
+        rec = {
+            "label": label,
+            "dir": "/tmp/%s" % label,
+            "stem": label,
+            "cif": "data_x\n_atom_site.group_PDB\n",
+            "problem": "",
+            "summary": {"ranking_score": 0.9, "ptm": 0.9, "iptm": None},
+            "residues": [{"c": "A", "i": 1, "n": "ALA", "p": 90.0, "a": 5}],
+            "chains": ["A"],
+            "mean_plddt": 90.0,
+            "min_plddt": 90.0,
+            "rank": 0.9,
+            "n_sample": 1,
+            "sample_sd": None,
+            "n_atom": 5,
+            "global_plddt_cif": None,
+        }
+        page = view.build_page(rec, "molstar", "cdn", None, "index.html")
+
+        # 라벨 자체가 __ENGINEJS__ 라면 그 문자열이 '데이터로서' 페이지에 남는 것은
+        # 맞다. 확인할 것은 엔진 스크립트가 제자리에 정확히 한 번만 들어갔는가다.
+        check_equal(
+            page.count("window.af3SetColor = "),
+            1,
+            "엔진 스크립트가 제자리에 한 번만 들어가지 않았다: %s" % label,
+        )
+        data_lines = [
+            line for line in page.splitlines() if line.startswith("var AF3 = ")
+        ]
+        check_equal(len(data_lines), 1, "데이터 할당 줄이 정확히 1개가 아니다: %s" % label)
+        payload = data_lines[0][len("var AF3 = "):].rstrip(";")
+        try:
+            parsed = json.loads(payload)
+        except ValueError as exc:
+            raise Failure(
+                "타깃명 %r 때문에 뷰어 데이터 JSON 이 깨졌다: %s\n      실제: %s"
+                % (label, exc, payload[:200])
+            )
+        check_equal(parsed["target"], label, "뷰어 데이터의 타깃명이 손상됐다")
+
+        title_lines = [line for line in page.splitlines() if "<title>" in line]
+        check_equal(len(title_lines), 1, "title 줄이 정확히 1개가 아니다: %s" % label)
+        check_in(
+            "AF3 구조 보기",
+            title_lines[0],
+            "타깃명이 <title> 을 갈라놓았다: %s" % label,
+        )

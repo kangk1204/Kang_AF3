@@ -33,6 +33,9 @@ FORMAT_VERSION = 1
 MANIFEST_NAME = "af3_db_manifest.json"
 OVERLAY_KIND = "af3_reduced_msa_overlay"
 EXPECTED_AF3_BIN_BYTES = 1_146_811_260
+# 고정 크기를 벗어난 릴리스를 쓰려면 이 환경변수로 명시한다. 조용히 넘어가지 않고
+# 경고를 남긴다 (af3_check.sh 의 AF3_MODEL_SHA256 과 같은 성격의 탈출구다).
+MODEL_BYTES_ENV = "AF3_MODEL_BYTES"
 MAX_MANIFEST_BYTES = 2 * 1024 * 1024
 
 MSA_FASTA_NAMES = (
@@ -355,12 +358,35 @@ def verify_database_roots(roots: Sequence[Path | str]) -> dict[str, object]:
     }
 
 
+def _expected_model_bytes() -> tuple[int | None, str | None]:
+    """Return (expected size, override note). ``None`` size means the env value is bad."""
+
+    raw = os.environ.get(MODEL_BYTES_ENV)
+    if raw is None:
+        return EXPECTED_AF3_BIN_BYTES, None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None, f"{MODEL_BYTES_ENV} is not an integer: {raw!r}"
+    if value <= 0:
+        return None, f"{MODEL_BYTES_ENV} must be a positive byte count: {raw!r}"
+    return value, (
+        f"af3.bin size pin overridden by {MODEL_BYTES_ENV}={value}; "
+        f"the verified release is {EXPECTED_AF3_BIN_BYTES} bytes"
+    )
+
+
 def verify_model_dir(model_dir: Path | str) -> dict[str, object]:
     root = Path(model_dir).expanduser().absolute()
     model = root / "af3.bin"
     errors: list[str] = []
     warnings: list[str] = []
     size = None
+    expected_bytes, override_note = _expected_model_bytes()
+    if expected_bytes is None:
+        errors.append(override_note or f"invalid {MODEL_BYTES_ENV}")
+    elif override_note is not None:
+        warnings.append(override_note)
     if not root.is_dir():
         errors.append(f"model root is not a regular directory: {root}")
     elif model.is_symlink() or not model.is_file():
@@ -373,10 +399,11 @@ def verify_model_dir(model_dir: Path | str) -> dict[str, object]:
         else:
             if size <= 0:
                 errors.append(f"empty model file: {model}")
-            elif size != EXPECTED_AF3_BIN_BYTES:
+            elif expected_bytes is not None and size != expected_bytes:
                 errors.append(
-                    f"unexpected af3.bin size {size}; expected {EXPECTED_AF3_BIN_BYTES} "
-                    "for the pinned AF3 release"
+                    f"unexpected af3.bin size {size}; expected {expected_bytes} "
+                    "for the pinned AF3 release. If you deliberately run a different "
+                    f"verified release, set {MODEL_BYTES_ENV} to its byte count"
                 )
     return {
         "ok": not errors,

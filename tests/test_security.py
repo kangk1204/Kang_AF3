@@ -9,6 +9,8 @@ import tempfile
 from pathlib import Path
 
 from harness import (
+    REPO_ROOT,
+    SCRIPTS_DIR,
     Workspace,
     check,
     check_equal,
@@ -18,6 +20,18 @@ from harness import (
     regression,
     run_script,
 )
+
+
+@regression(
+    item="security",
+    prevents="커밋된 3D 예시가 생성기보다 오래돼 CSP와 CDN SRI 없이 배포되는 버그.",
+)
+def test_committed_viewer_example_has_csp_and_sri():
+    html = (REPO_ROOT / "examples" / "view3d_example.html").read_text(encoding="utf-8")
+    check_in("Content-Security-Policy", html, "3D 예시에 CSP가 없다")
+    check_in("default-src 'none'", html, "3D 예시 CSP가 기본 외부 로드를 막지 않는다")
+    check_equal(html.count('integrity="sha384-'), 2, "3D 예시의 CDN CSS/JS에 SRI가 모두 없다")
+    check_equal(html.count('crossorigin="anonymous"'), 2, "3D 예시의 SRI CORS 설정이 불완전하다")
 
 
 @regression(
@@ -316,3 +330,86 @@ def test_stage2_temporary_file_cannot_follow_symlink():
         check(final.is_file() and not final.is_symlink(), "최종 stage2 JSON이 일반 파일이 아니다")
         mod = load_module("af3_stage2.py")
         check_equal(mod.suggested_output_dir(Path("pilot_in")), Path("pilot_out"), "_in을 _out으로 바꾸지 않았다")
+
+
+@regression(
+    item="security",
+    prevents=(
+        "af3_prepare 의 --report CSV 가 원자적으로 쓰이지 않고 목적지 symlink 를 "
+        "따라가, 요약표 저장이 출력 폴더 밖 파일을 덮어쓰는 버그. 입력 JSON 쓰기는 "
+        "atomic_write_json 으로 막혀 있는데 리포트만 열려 있었다."
+    ),
+)
+def test_prepare_report_does_not_follow_a_symlinked_destination():
+    with tempfile.TemporaryDirectory(prefix="af3_prepare_report_") as td:
+        root = Path(td)
+        fasta = root / "panel.fasta"
+        fasta.write_text(">x\nACDEFGHIKLMN\n", encoding="utf-8")
+        external = root / "outside.csv"
+        external.write_text("keep-me", encoding="utf-8")
+        report = root / "report.csv"
+        report.symlink_to(external)
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS_DIR / "af3_prepare.py"),
+                "--fasta", str(fasta),
+                "-o", str(root / "out"),
+                "--report", str(report),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        check_equal(proc.returncode, 0, "prepare report fixture가 실패했다", proc.stderr[-1200:])
+        check_equal(
+            external.read_text(encoding="utf-8"),
+            "keep-me",
+            "--report 가 symlink 외부 대상을 덮어썼다",
+        )
+        check(
+            report.is_file() and not report.is_symlink(),
+            "--report 가 symlink 를 일반 파일로 교체하지 않았다",
+        )
+        check_in("토큰수", report.read_text(encoding="utf-8-sig"), "리포트 내용이 비었다")
+
+
+@regression(
+    item="prepare",
+    prevents=(
+        "-o 가 이미 일반 파일이면 check_outdir 가 NotADirectoryError 트레이스백을 "
+        "그대로 토해내는 버그. 이 스크립트의 다른 모든 오류 경로는 사람이 읽는 "
+        "한 줄 안내로 끝난다."
+    ),
+)
+def test_prepare_rejects_a_non_directory_output_path_with_a_readable_error():
+    with tempfile.TemporaryDirectory(prefix="af3_prepare_outdir_") as td:
+        root = Path(td)
+        fasta = root / "panel.fasta"
+        fasta.write_text(">x\nACDEFGHIKLMN\n", encoding="utf-8")
+        occupied = root / "already_a_file"
+        occupied.write_text("not a directory", encoding="utf-8")
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS_DIR / "af3_prepare.py"),
+                "--fasta", str(fasta),
+                "-o", str(occupied),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        report = proc.stdout + proc.stderr
+        check(proc.returncode != 0, "출력 경로가 폴더가 아닌데 성공했다", report[-1200:])
+        check(
+            "Traceback" not in report,
+            "출력 경로 오류가 트레이스백으로 새어 나왔다",
+            report[-1200:],
+        )
+        check_in("폴더가 아니다", report, "출력 경로 문제의 원인을 설명하지 않았다")
+        check_equal(
+            occupied.read_text(encoding="utf-8"),
+            "not a directory",
+            "출력 경로에 있던 파일을 건드렸다",
+        )

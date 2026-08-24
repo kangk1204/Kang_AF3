@@ -11,11 +11,11 @@
 #     bash af3run.sh vhh_001 dry       실제 실행 없이 명령만 확인 (권장 첫 단계)
 #     bash af3run.sh vhh_001 screen    경량 스크리닝 (sample 1, recycle 3) - 전수용
 #     bash af3run.sh vhh_001 full      기본값 정밀 (sample 5, recycle 10) - 상위 후보용
-#     bash af3run.sh vhh_001 msa       MSA(CPU)만 미리 계산해서 보관
+#     bash af3run.sh vhh_001 msa       MSA(CPU)만 미리 계산해서 보관 (GPU·가중치 불필요)
 #     bash af3run.sh vhh_001 infer     보관된 MSA로 추론(GPU)만 실행
 #     bash af3run.sh vhh_001 oneshot   MSA+추론을 한 프로세스에서 (가장 단순)
 #     bash af3run.sh vhh_001 retry     실패한 것만 재시도
-#     bash af3run.sh vhh_001 bench     앞 20건만 돌려 건당 시간 측정
+#     bash af3run.sh vhh_001 bench     가장 짧은 20건을 경량 설정으로 돌리는 스모크
 #     bash af3run.sh vhh_001 collect   결과를 CSV 한 장으로 집계 (등급 열 포함)
 #
 # 폴더 관례 (기존 구조를 그대로 쓴다):

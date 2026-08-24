@@ -64,6 +64,7 @@ af3_prepare.py - FASTA 나 CSV 로 갖고 있는 서열을 AlphaFold 3 입력 JS
 
 import argparse
 import csv
+import io
 import json
 import os
 import re
@@ -103,6 +104,28 @@ def suggested_output_dir(input_dir):
     name = path.name or "af3"
     output_name = name[:-3] + "_out" if name.endswith("_in") and len(name) > 3 else name + "_out"
     return path.parent / output_name
+
+
+def atomic_write_text(path, text):
+    """Publish text without following a destination symlink or exposing a partial file."""
+    destination = Path(path)
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=".%s." % destination.name,
+        suffix=".tmp",
+        dir=str(destination.parent),
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8-sig", newline="") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        try:
+            temporary.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def atomic_write_json(path, obj, overwrite=False):
@@ -215,10 +238,8 @@ def read_fasta(path):
     header_line = 0
     chunks = []
     try:
+        # UnicodeDecodeError 는 open() 이 아니라 아래 읽기 루프에서 난다.
         fh = open(path, "r", encoding="utf-8")
-    except UnicodeDecodeError:
-        die("'%s' 를 UTF-8 로 읽을 수 없다. AppleDouble 사이드카(._로 시작하는 파일)이거나\n"
-            "      다른 인코딩일 수 있다. `file '%s'` 로 확인해 봐라." % (path, path))
     except OSError as e:
         die("'%s' 를 열 수 없다: %s" % (path, e))
 
@@ -586,6 +607,9 @@ def count_tokens(seq, copies, partner_seq, partner_copies,
 def check_outdir(outdir, overwrite, dry_run):
     """AppleDouble 사이드카와 기존 JSON 을 점검한다."""
     p = Path(outdir)
+    if p.is_symlink() or (p.exists() and not p.is_dir()):
+        die("출력 경로 '%s' 가 폴더가 아니다 (일반 파일이거나 symlink 다).\n"
+            "      -o 에는 JSON 을 담을 폴더 경로를 줘라." % outdir)
     if not p.exists():
         return []
     warnings = []
@@ -912,13 +936,17 @@ def main(argv=None):
 
     if args.report:
         fields = ["순번", "이름", "파일명", "잔기수", "토큰수", "버킷", "토큰불확실", "출처"]
-        with open(args.report, "w", encoding="utf-8-sig", newline="") as fh:
-            w = csv.DictWriter(fh, fieldnames=fields)
-            w.writeheader()
-            w.writerows(
-                {key: csv_safe_cell(value) for key, value in row.items()}
-                for row in rows
-            )
+        buffer = io.StringIO()
+        w = csv.DictWriter(buffer, fieldnames=fields, lineterminator="\r\n")
+        w.writeheader()
+        w.writerows(
+            {key: csv_safe_cell(value) for key, value in row.items()}
+            for row in rows
+        )
+        try:
+            atomic_write_text(args.report, buffer.getvalue())
+        except OSError as e:
+            die("표를 '%s' 에 저장하지 못했다: %s" % (args.report, e))
         log("표를 저장했다: %s" % args.report)
 
     if errors and args.force:

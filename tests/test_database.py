@@ -184,3 +184,120 @@ def test_preferred_runner_preserves_multiple_db_roots():
         check_equal(values, ["/root/af3_db_0", "/root/af3_db_1"], "--db_dir 순서가 보존되지 않았다", str(values))
     finally:
         workspace.cleanup()
+
+
+@regression(
+    item="database",
+    prevents=(
+        "af3.bin 크기 핀에 우회 수단이 없어, 구글이 새 가중치를 내면 두 배치 러너가 "
+        "손댈 수 없는 하드 실패로 멈추는 버그. af3_check.sh 는 AF3_MODEL_SHA256 으로 "
+        "바꿀 수 있는데 러너가 쓰는 검증만 막혀 있었다."
+    ),
+)
+def test_model_size_pin_is_overridable_and_says_so():
+    import os
+
+    mod = load_module(DB_TOOL)
+    with tempfile.TemporaryDirectory(prefix="af3_model_pin_") as td:
+        root = Path(td)
+        model_dir = root / "models"
+        model_dir.mkdir()
+        # 고정 크기와 다른, 그러나 정상적인 가중치 파일.
+        with (model_dir / "af3.bin").open("wb") as handle:
+            handle.truncate(4096)
+
+        saved = os.environ.pop("AF3_MODEL_BYTES", None)
+        try:
+            pinned = mod.verify_model_dir(model_dir)
+            check(not pinned["ok"], "고정 크기와 다른 af3.bin 을 그대로 통과시켰다")
+            check_in(
+                "AF3_MODEL_BYTES",
+                " ".join(pinned["errors"]),
+                "크기 불일치 오류가 우회 방법을 알려주지 않는다",
+            )
+
+            os.environ["AF3_MODEL_BYTES"] = "4096"
+            overridden = mod.verify_model_dir(model_dir)
+            check(overridden["ok"], "명시적 override 를 준 가중치를 거부했다")
+            check(
+                overridden["warnings"],
+                "고정 크기를 우회했는데 아무 경고도 남기지 않았다",
+            )
+            check_in(
+                "AF3_MODEL_BYTES",
+                " ".join(overridden["warnings"]),
+                "경고가 어떤 override 때문인지 밝히지 않는다",
+            )
+
+            for bad in ("0", "-1", "abc", ""):
+                os.environ["AF3_MODEL_BYTES"] = bad
+                rejected = mod.verify_model_dir(model_dir)
+                check(
+                    not rejected["ok"],
+                    "잘못된 AF3_MODEL_BYTES=%r 를 받아들였다" % bad,
+                )
+        finally:
+            os.environ.pop("AF3_MODEL_BYTES", None)
+            if saved is not None:
+                os.environ["AF3_MODEL_BYTES"] = saved
+
+
+@regression(
+    item="staging",
+    prevents=(
+        "sidecar staging 의 파일/폴더 경로 충돌 검사가 모든 쌍을 훑는 O(n^2) 라서 "
+        "대량 배치에서 실행 전 대기가 제곱으로 늘어나는 문제. 선형 검사로 바꾸면서 "
+        "충돌 자체를 못 잡게 되는 것이 더 큰 사고이므로 두 성질을 함께 고정한다."
+    ),
+)
+def test_staging_detects_file_directory_conflicts_without_pairwise_scan():
+    import time
+
+    mod = load_module(RUNNER)
+    with tempfile.TemporaryDirectory(prefix="af3_stage_conflict_") as td:
+        root = Path(td)
+        input_dir = root / "in"
+        input_dir.mkdir()
+        stage_parent = root / "parent"
+        stage_parent.mkdir()
+
+        def job(name: str, sidecar_rel: str | None):
+            json_file = input_dir / (name + ".json")
+            json_file.write_text("{}", encoding="utf-8")
+            sidecars = ()
+            if sidecar_rel is not None:
+                # 원본은 서로 다른 실제 파일이다. 충돌하는 것은 staging '목적지' 경로다
+                # (한 파일시스템에 msa 와 msa/deep.a3m 을 동시에 둘 수는 없다).
+                source = input_dir / ("src_" + name)
+                source.write_text("x", encoding="utf-8")
+                sidecars = (mod.Sidecar(source, Path(sidecar_rel)),)
+            return mod.Job(
+                json_file=json_file,
+                output_name=name,
+                raw_name=name,
+                sidecars=sidecars,
+            )
+
+        # 'msa' 가 한 작업에서는 파일, 다른 작업에서는 폴더다. 이건 반드시 거부해야 한다.
+        conflicting = [job("a", "msa"), job("b", "msa/deep.a3m")]
+        try:
+            mod.stage_jobs(conflicting, stage_parent, stage_parent)
+        except OSError as exc:
+            check_in("충돌", str(exc), "파일/폴더 경로 충돌 원인을 설명하지 않았다")
+        else:
+            check(False, "같은 이름을 파일이자 폴더로 staging 하는 것을 허용했다")
+
+        # 충돌이 없는 큰 배치는 제곱 시간이 아니어야 한다.
+        many = [job("t%05d" % index, None) for index in range(3000)]
+        started = time.monotonic()
+        stage_dir = mod.stage_jobs(many, stage_parent, stage_parent)
+        elapsed = time.monotonic() - started
+        check(
+            elapsed < 20.0,
+            "3000건 staging 준비가 너무 오래 걸린다 (쌍 단위 검사가 남아 있다)",
+            "%.1f초" % elapsed,
+        )
+        check(
+            (stage_dir / "t00000.json").is_file(),
+            "staging 이 입력을 복사하지 않았다",
+        )
