@@ -30,7 +30,8 @@ from harness import (
 
 @regression(
     item="docs",
-    prevents="README/docs 정리 중 상대 링크 대상이 삭제·이동돼 초보 사용자가 설치 근거 문서를 열 수 없는 버그.",
+    prevents="README/docs 정리 중 상대 링크 대상이 삭제·이동되거나 헤딩 제목이 바뀌어,\n"
+             "초보 사용자가 설치 근거 문서를 열 수 없거나 목차 링크가 아무 데도 가지 않는 버그.",
 )
 def test_markdown_local_links_resolve():
     import re
@@ -53,6 +54,40 @@ def test_markdown_local_links_resolve():
                 line = text.count("\n", 0, match.start()) + 1
                 missing.append("%s:%d -> %s" % (document.relative_to(REPO_ROOT), line, raw))
     check(not missing, "깨진 Markdown 상대 링크가 있다", "\n".join(missing[:30]))
+
+    # 같은 문서 안을 가리키는 #앵커도 확인한다. 상대 링크만 보면 헤딩 제목이 바뀐 뒤에도
+    # 파일은 그대로 있으므로 통과해 버리고, 목차 링크가 조용히 아무 데도 안 가게 된다.
+    heading_pattern = re.compile(r"^#{1,6}[ \t]+(.+?)[ \t]*$", re.MULTILINE)
+    fence_pattern = re.compile(r"^(?:```|~~~).*?^(?:```|~~~)[ \t]*$", re.MULTILINE | re.DOTALL)
+
+    def github_slug(heading):
+        text = heading.strip().lower()
+        text = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE)
+        return re.sub(r"[\s]+", "-", text)
+
+    dangling = []
+    for document in sorted(REPO_ROOT.rglob("*.md")):
+        text = document.read_text(encoding="utf-8")
+        body = fence_pattern.sub("", text)
+        anchors = set()
+        for heading in heading_pattern.findall(body):
+            base = github_slug(heading)
+            if not base:
+                continue
+            candidate, suffix = base, 0
+            while candidate in anchors:
+                suffix += 1
+                candidate = "%s-%d" % (base, suffix)
+            anchors.add(candidate)
+        for match in link_pattern.finditer(body):
+            raw = match.group(1).strip()
+            if not raw.startswith("#"):
+                continue
+            anchor = urllib.parse.unquote(raw[1:]).lower()
+            if anchor and anchor not in anchors:
+                line = body.count("\n", 0, match.start()) + 1
+                dangling.append("%s:%d -> %s" % (document.relative_to(REPO_ROOT), line, raw))
+    check(not dangling, "가리키는 헤딩이 없는 Markdown 앵커가 있다", "\n".join(dangling[:30]))
 
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     invalid_visualize_commands = [
@@ -96,6 +131,28 @@ def test_markdown_local_links_resolve():
         "[서로 다른 단백질 3사슬 JSON](examples/three_protein_complex.json)",
     ):
         check_in(input_step, quick_summary, "Quick Start의 입력 준비 절차가 불완전하다")
+    for output_stem in (
+        "panel",
+        "homodimer",
+        "antigen_panel",
+        "partner_dimer",
+        "three_chain",
+    ):
+        check_in(
+            f"scripts/af3_collect.py {output_stem}_out",
+            quick_summary,
+            "입력 유형별 CSV 집계 절차가 빠졌다",
+        )
+        check_in(
+            f"scripts/af3_visualize.py {output_stem}_out",
+            quick_summary,
+            "입력 유형별 2D 시각화 절차가 빠졌다",
+        )
+        check_in(
+            f"scripts/af3_view3d.py {output_stem}_out",
+            quick_summary,
+            "입력 유형별 3D 시각화 절차가 빠졌다",
+        )
     for benchmark_only in ("31.95초", "5.39초", "5.93배", "189시간"):
         check(benchmark_only not in quick_summary, "Quick Start가 목적 대신 성능 비교를 앞세운다", benchmark_only)
 
@@ -105,6 +162,31 @@ def test_markdown_local_links_resolve():
     proteins = [entry["protein"] for entry in three_chain["sequences"]]
     check_equal([protein["id"] for protein in proteins], ["A", "B", "C"], "3사슬 JSON 예제의 chain ID가 틀렸다")
     check(all(protein["sequence"] for protein in proteins), "3사슬 JSON 예제에 빈 서열이 있다")
+
+    summary_rows = list(csv.reader(
+        (REPO_ROOT / "results_example" / "af3_summary.csv").read_text(
+            encoding="utf-8-sig"
+        ).splitlines()
+    ))
+    check_equal(len(summary_rows[0]), 35, "README가 연결한 실측 CSV가 현재 35열 형식이 아니다")
+    check(
+        all(len(row) == 35 for row in summary_rows),
+        "실측 CSV의 행별 열 수가 서로 다르다",
+    )
+    for stale_claim in (
+        "열 이름을 영어로 뽑으려면",
+        "추론이 2.25배 느려진 건이다",
+        "계면이 파랑/하늘색이면\n상대 배치 신뢰도가 높고",
+        "`color bfactor palette alphafold` 가 AlphaFold 공식",
+        "측정한 대표 입력 20건",
+    ):
+        check(stale_claim not in readme, "README에 검토에서 폐기한 설명이 남았다", stale_claim)
+    for corrected_claim in (
+        "이 옵션은 파일명만 바꾸며 CSV 열 이름은",
+        "상대 배치는 사슬 간 PAE",
+        "가장 짧은 20건을",
+    ):
+        check_in(corrected_claim, readme, "README의 결과 해석 또는 성능 조건 설명이 불완전하다")
 
     with tempfile.TemporaryDirectory(prefix="af3_quick_input_") as td:
         root = Path(td)
@@ -475,6 +557,52 @@ def test_installer_help_dry_run_and_safety_gates():
             check(lock_proc.returncode != 0, "동시 설치 실행을 허용했다")
             check(not marker.exists(), "동시 실행 잠금 실패 뒤 sudo를 호출했다")
             check_in("already running", lock_proc.stdout + lock_proc.stderr, "동시 실행 원인이 없다")
+
+    with tempfile.TemporaryDirectory(prefix="af3_installer_disk_") as td:
+        root = Path(td)
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        add_fake_nvidia_smi(fake_bin)
+        fake_df = fake_bin / "df"
+        fake_df.write_text(
+            "#!/usr/bin/env bash\n"
+            "printf 'Filesystem 1-blocks Used Available Use%% Mounted on\\n'\n"
+            "printf 'testfs 100 90 10 90%% /\\n'\n",
+            encoding="utf-8",
+        )
+        fake_df.chmod(0o755)
+        marker = root / "sudo_called"
+        fake_sudo = fake_bin / "sudo"
+        fake_sudo.write_text(
+            "#!/usr/bin/env bash\n"
+            "touch \"$AF3_TEST_SUDO_MARKER\"\n"
+            "exit 99\n",
+            encoding="utf-8",
+        )
+        fake_sudo.chmod(0o755)
+        env = dict(os.environ)
+        env.update(
+            {
+                "PATH": str(fake_bin) + os.pathsep + env.get("PATH", ""),
+                "AF3_TEST_SUDO_MARKER": str(marker),
+                "AF3_WORK_DIR": str(root / "work"),
+                "AF3_MODEL_DIR": str(root / "models"),
+                "AF3_DB_DIR": str(root / "nested" / "db"),
+                "AF3_PLOT_ENV": str(root / "plot"),
+            }
+        )
+        test_installer, _ = make_isolated_installer(root, "disk-repo")
+        disk_proc = subprocess.run(
+            ["bash", str(test_installer), "--full", "--accept-weights-terms"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        disk_report = disk_proc.stdout + disk_proc.stderr
+        check(disk_proc.returncode != 0, "용량이 부족한 full 설치를 시작했다")
+        check(not marker.exists(), "디스크 용량을 확인하기 전에 sudo를 호출했다")
+        check_in("full DB installation requires", disk_report, "용량 부족 원인을 설명하지 않았다")
 
     source = installer.read_text(encoding="utf-8")
     check('DB_PARTIAL="${DB_DIR}.partial"' in source, "DB를 sibling partial에 stage하지 않는다")
@@ -976,3 +1104,265 @@ def test_environment_check_guidance_is_portable_and_evidence_scoped():
         check("0.890" not in report and "0.767" not in report, "과거 처리율을 일반 운영 규칙으로 출력했다")
         check_in("DB 크기만으로 완전성을 판정할 수 없다", report, "DB 완전성의 증거 경계를 설명하지 않았다")
         check_in("핵심 5가지", report, "종합 절의 실제 항목 수가 제목과 맞지 않는다")
+
+
+def _extract_shell_function(source: str, name: str) -> str:
+    """설치기 원본에서 셸 함수 하나를 그대로 떼어낸다 (사본 실행 검증용)."""
+    opener = "%s() {\n" % name
+    start = source.find(opener)
+    if start < 0:
+        raise AssertionError("설치기에서 %s 함수를 찾지 못했다" % name)
+    end = source.find("\n}\n", start)
+    if end < 0:
+        raise AssertionError("%s 함수의 끝을 찾지 못했다" % name)
+    return source[start:end + len("\n}\n")]
+
+
+def _extract_call_line(source: str, name: str) -> str:
+    """정의부가 아닌 실제 호출 줄을 그대로 떼어낸다."""
+    calls = [
+        line
+        for line in source.splitlines()
+        if name in line and not line.startswith("%s()" % name)
+    ]
+    if len(calls) != 1:
+        raise AssertionError("%s 호출 줄이 정확히 1개가 아니다: %d개" % (name, len(calls)))
+    return calls[0]
+
+
+@regression(
+    item="install",
+    prevents=(
+        "이미지 능력 검증을 `함수 || die` 로 부르면 bash 가 함수 본문 전체에서 errexit 를 "
+        "꺼버려, AF3 버전 assert 와 patched HMMER --seq_limit 검사가 실패해도 설치가 "
+        "그대로 진행되는 버그."
+    ),
+)
+def test_installer_image_capability_gate_fails_on_every_check():
+    installer = SCRIPTS_DIR / "install_af3_ubuntu.sh"
+    source = installer.read_text(encoding="utf-8")
+    function_text = _extract_shell_function(source, "validate_image_capabilities")
+    call_line = _extract_call_line(source, "validate_image_capabilities")
+
+    # 세 검사에 대응하는 stub docker 실패 지점. 하나라도 놓치면 설치가 계속된다.
+    stages = {
+        "version": "AF3 버전 assert",
+        "hmmer": "patched HMMER --seq_limit",
+        "gpu": "JAX GPU 백엔드",
+    }
+    with tempfile.TemporaryDirectory(prefix="af3_capability_") as td:
+        root = Path(td)
+        driver = root / "drive.sh"
+        driver.write_text(
+            "set -Eeuo pipefail\n"
+            "die() { printf '[error] %s\\n' \"$1\" >&2; exit \"${2:-1}\"; }\n"
+            "IMAGE=stub-image\n"
+            "AF3_VERSION=3.0.4\n"
+            "DOCKER=(stub_docker)\n"
+            "stub_docker() {\n"
+            "  local text=\"$*\"\n"
+            "  case \"$text\" in\n"
+            "    *jackhmmer*)\n"
+            "      if [[ ${AF3_FAIL_STAGE:-} == hmmer ]]; then echo 'no such flag'; \n"
+            "      else echo '  --seq_limit <n> : truncate hits'; fi ;;\n"
+            "    *jax*)\n"
+            "      [[ ${AF3_FAIL_STAGE:-} == gpu ]] && return 1 ;;\n"
+            "    *version*)\n"
+            "      [[ ${AF3_FAIL_STAGE:-} == version ]] && return 1 ;;\n"
+            "  esac\n"
+            "  return 0\n"
+            "}\n"
+            + function_text
+            + call_line
+            + "\nprintf 'CAPABILITY_GATE_PASSED\\n'\n",
+            encoding="utf-8",
+        )
+
+        healthy = subprocess.run(
+            ["bash", str(driver)], capture_output=True, text=True, timeout=60
+        )
+        check_equal(
+            healthy.returncode,
+            0,
+            "정상 이미지를 능력 검증이 거부했다",
+            (healthy.stdout + healthy.stderr)[-800:],
+        )
+        check_in("CAPABILITY_GATE_PASSED", healthy.stdout, "정상 경로가 끝까지 가지 않았다")
+
+        for stage, what in stages.items():
+            env = dict(os.environ)
+            env["AF3_FAIL_STAGE"] = stage
+            broken = subprocess.run(
+                ["bash", str(driver)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+            report = broken.stdout + broken.stderr
+            check(
+                broken.returncode != 0,
+                "%s 검사가 실패했는데 설치기가 계속 진행했다" % what,
+                report[-800:],
+            )
+            check(
+                "CAPABILITY_GATE_PASSED" not in broken.stdout,
+                "%s 검사 실패 뒤에도 능력 검증을 통과로 보고했다" % what,
+            )
+
+
+@regression(
+    item="legacy",
+    prevents=(
+        "legacy 러너가 실행 단계와 무관하게 가중치/DB 를 모두 요구해, 가중치가 필요 없는 "
+        "CPU 전용 --stage msa 가 core 설치(가중치 미다운로드) 환경에서 시작조차 못 하는 버그."
+    ),
+)
+def test_legacy_preflight_requires_only_what_the_stage_uses():
+    # --stage msa 는 --norun_inference 라서 af3.bin 을 읽지 않는다.
+    workspace = Workspace()
+    try:
+        workspace.write_json("a.json", workspace.monomer("a"))
+        (workspace.model_dir / "af3.bin").unlink()
+        proc = run_script(
+            "af3_batch.py",
+            [
+                "--input-dir", str(workspace.input_dir),
+                "--output-dir", str(workspace.output_dir),
+                "--db-dir", str(workspace.db_dir),
+                "--model-dir", str(workspace.model_dir),
+                "--docker", "docker",
+                "--stage", "msa",
+            ],
+            workspace,
+        )
+        report = proc.stdout + proc.stderr
+        check(
+            "가중치 오류" not in report,
+            "MSA 단계가 쓰지도 않는 모델 가중치를 요구했다",
+            report[-1200:],
+        )
+        check_equal(proc.returncode, 0, "가중치 없는 MSA 단계를 실행하지 못했다", report[-1800:])
+        check(workspace.stub_calls(), "MSA 단계가 Docker 까지 가지 못했다")
+    finally:
+        workspace.cleanup()
+
+    # --stage infer 는 --norun_data_pipeline 이라서 DB 를 읽지 않는다
+    # (run_alphafold.py 는 --run_data_pipeline 일 때만 db_dir 을 해석한다).
+    workspace = Workspace()
+    try:
+        workspace.write_json("a.json", workspace.monomer("a"))
+        shutil.rmtree(workspace.db_dir)
+        proc = run_script(
+            "af3_batch.py",
+            [
+                "--input-dir", str(workspace.input_dir),
+                "--output-dir", str(workspace.output_dir),
+                "--db-dir", str(workspace.db_dir),
+                "--model-dir", str(workspace.model_dir),
+                "--docker", "docker",
+                "--stage", "infer",
+            ],
+            workspace,
+        )
+        report = proc.stdout + proc.stderr
+        check(
+            "DB 오류" not in report,
+            "추론 단계가 쓰지도 않는 DB 를 요구했다",
+            report[-1200:],
+        )
+        for call in workspace.stub_calls():
+            check(
+                not any(str(arg).startswith("--db_dir=") for arg in call.get("argv", [])),
+                "DB 없이 도는 추론 단계가 컨테이너에 --db_dir 을 넘겼다",
+            )
+    finally:
+        workspace.cleanup()
+
+    # 두 단계를 모두 도는 경우에는 둘 다 여전히 필수다.
+    for stage, missing, expected in (
+        ("oneshot", "model", "가중치 오류"),
+        ("oneshot", "db", "DB 오류"),
+        ("both", "model", "가중치 오류"),
+        ("both", "db", "DB 오류"),
+    ):
+        workspace = Workspace()
+        try:
+            workspace.write_json("a.json", workspace.monomer("a"))
+            if missing == "model":
+                (workspace.model_dir / "af3.bin").unlink()
+            else:
+                shutil.rmtree(workspace.db_dir)
+            proc = run_script(
+                "af3_batch.py",
+                [
+                    "--input-dir", str(workspace.input_dir),
+                    "--output-dir", str(workspace.output_dir),
+                    "--db-dir", str(workspace.db_dir),
+                    "--model-dir", str(workspace.model_dir),
+                    "--docker", "docker",
+                    "--stage", stage,
+                ],
+                workspace,
+            )
+            report = proc.stdout + proc.stderr
+            check(
+                proc.returncode != 0,
+                "--stage %s 가 %s 없이 시작했다" % (stage, missing),
+                report[-1200:],
+            )
+            check_in(expected, report, "--stage %s 의 %s 누락 원인을 설명하지 않았다" % (stage, missing))
+            check_equal(
+                workspace.stub_calls(), [], "--stage %s 사전 검증 실패 뒤 Docker를 실행했다" % stage
+            )
+        finally:
+            workspace.cleanup()
+
+
+@regression(
+    item="docs",
+    prevents=(
+        "초보자 경로가 (a) 설치 전에 결과물을 볼 방법이 없고 (b) 예제 1건에 시간 안내가 "
+        "없어 수십 분 걸리는 full DB MSA 를 멈춘 줄 알고 Ctrl-C 하고 (c) 4GB 슬라이스로 "
+        "잰 40.2시간을 305GB full DB 계획에 그대로 쓰는 버그."
+    ),
+)
+def test_quick_start_sets_expectations_before_the_first_long_run():
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    quick_start = readme[readme.index("## Quick Start"): readme.index("## 목차")]
+
+    # (a) 설치 0바이트로 결과물을 보는 경로가 있고, 그 파일이 실제로 커밋돼 있어야 한다.
+    for preview in (
+        "examples/view3d_example.html",
+        "results_example/af3_summary.csv",
+        "figures/example_complex_plddt.png",
+        "figures/example_complex_pae.png",
+        "figures/example_summary_6targets.png",
+    ):
+        check_in(preview, quick_start, "설치 전 미리보기 경로가 Quick Start 에 없다")
+        check(
+            (REPO_ROOT / preview).is_file(),
+            "Quick Start 가 가리키는 미리보기 파일이 저장소에 없다",
+            preview,
+        )
+
+    # (b) 첫 실행에 걸리는 시간과 '멈춘 게 아니다' 안내가 있어야 한다.
+    for expectation in ("56초", "25분", "멈춘 것처럼 보여도 정상"):
+        check_in(expectation, quick_start, "예제 1건의 소요 시간 기대치를 세우지 않았다")
+
+    # overlay 를 먼저, full DB 를 fallback 으로 주는 순서가 명령에 드러나야 한다.
+    check_in(
+        "--db-dir ~/public_databases_reduced --db-dir ~/public_databases_full",
+        quick_start,
+        "Quick Start 예제가 overlay 우선 ordered root 로 실행되지 않는다",
+    )
+    check_in(
+        "overlay는 full DB를 **대체하지 않는다.**",
+        quick_start,
+        "overlay 가 다운로드를 줄여준다는 오해를 막지 않는다",
+    )
+
+    # (c) 벤치마크 표의 '전체 DB 급' 이 무엇으로 잰 값인지 표 옆에 있어야 한다.
+    benchmark = (REPO_ROOT / "docs" / "benchmark_report.md").read_text(encoding="utf-8")
+    for caveat in ("4GB 슬라이스(합계 16GB)", "305GB", "40.2시간을 그대로 쓰면 안 된다"):
+        check_in(caveat, benchmark, "40.2시간의 측정 조건 경계를 표 옆에 적지 않았다")
