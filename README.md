@@ -16,6 +16,21 @@ AF3 소스, Google 이용약관이 적용되는 모델 가중치, 공식 DB root
 ([3-1 다운로드 목록](#3-1-다운로드-목록)). 성능 측정값은 [7절](#7-속도-개선의-근거)에
 정리했다.
 
+### 0. 설치 전에 결과물부터 보기 (다운로드 0바이트)
+
+이 도구가 무엇을 만들어 주는지는 저장소를 받는 것만으로 바로 볼 수 있다.
+AF3도 DB도 필요 없다. 커밋된 실측 산출물이다.
+
+| 보고 싶은 것 | 파일 | 여는 법 |
+|---|---|---|
+| 회전하는 3D 구조 뷰어 | `examples/view3d_example.html` | 브라우저로 더블클릭 |
+| 타깃별 신뢰도 집계 CSV | `results_example/af3_summary.csv` | 엑셀 / 스프레드시트 |
+| 잔기별 pLDDT 그림 | `figures/example_complex_plddt.png` | 이미지 뷰어 |
+| 사슬 간 PAE 그림 | `figures/example_complex_pae.png` | 이미지 뷰어 |
+| 6타깃 요약 그림 | `figures/example_summary_6targets.png` | 이미지 뷰어 |
+
+여기까지 보고 "내 데이터로도 이게 필요하다" 싶으면 아래 설치로 간다.
+
 ### 1. 설치
 
 Ubuntu에서 처음 설치할 때는 저장소를 먼저 내려받는다.
@@ -56,6 +71,21 @@ full DB를 아직 받지 않을 때는 `bash scripts/install_af3_ubuntu.sh`만 �
 
 설치가 끝나면 저장소의 단량체 JSON으로 1건을 실행한다.
 
+**먼저 MSA overlay를 만든다.** full DB를 그대로 쓰면 이 예제 1건이 **수십 분** 걸린다.
+overlay는 MSA용 FASTA 7종만 앞에서 잘라 둔 약 2GB 사본이고, 만드는 데 1분이 안 걸린다.
+같은 예제가 **1분 이내**로 끝난다.
+
+```bash
+# MSA overlay 생성 (약 1.9GB, 이 장비 실측 16.7초)
+python3 scripts/af3_db.py reduce \
+    --source ~/public_databases_full \
+    --output ~/public_databases_reduced
+```
+
+> overlay는 full DB를 **대체하지 않는다.** 템플릿용 `pdb_seqres`와 `mmcif_files`는
+> full DB에서 가져오므로 아래처럼 `--db-dir`을 두 번, overlay를 먼저 준다.
+> 다운로드 용량이 줄어드는 것이 아니라 **MSA 시간이 줄어든다.**
+
 ```bash
 # 예제 입력 폴더 준비
 mkdir -p quick_in
@@ -64,9 +94,9 @@ cp examples/vhh_monomer.json quick_in/
 # 필수 환경 점검. 누락 항목이 있으면 종료코드 1
 AF3_DB_DIR=~/public_databases_full bash scripts/af3_check.sh
 
-# 제공 예제 1건 실행
+# 제공 예제 1건 실행 (overlay 먼저, full DB를 fallback으로)
 python3 scripts/run_af3_batch_improved.py --input-dir quick_in --output-dir quick_out \
-    --db-dir ~/public_databases_full --yes
+    --db-dir ~/public_databases_reduced --db-dir ~/public_databases_full --yes
 
 # 결과 집계
 python3 scripts/af3_collect.py quick_out -o quick_summary.csv
@@ -76,8 +106,37 @@ python3 scripts/af3_collect.py quick_out -o quick_summary.csv
 python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 ```
 
+**얼마나 걸리는가** (RTX 3080 Ti, 32 논리코어, VHH 단량체 116잔기 1건 실측)
+
+| DB 구성 | 예제 1건 | 비고 |
+|---|---|---|
+| overlay 먼저 + full fallback | **56초** | 컨테이너 기동 포함, 전체 명령 기준 |
+| full DB 단독 | **25분 이상** | bfd 하나만 460초. 그 시점에 mgy/uniprot/uniref90 진행 중 |
+
+> **로그가 멈춘 것처럼 보여도 정상이다.** jackhmmer가 DB를 훑는 동안 몇 분씩 출력이
+>없을 수 있다. 진행 여부는 다른 터미널에서 `docker ps` 로 확인한다.
+> 중간에 멈춰야 하면 Ctrl-C를 쓴다. 러너가 자기 컨테이너를 정리한다.
+> 터미널이 강제로 닫혀 컨테이너가 남았다면 `--cleanup` 이 찾아서 정리한다.
+
 배치 실행이 끝나면 `quick_out/vhh_7mfv_1/`에 구조와 신뢰도 파일이 생긴다.
-`quick_summary.csv`, `quick_figures/`, `quick_viewer/index.html`에서 결과를 확인한다.
+정상 완료되면 `quick_summary.csv`에 `vhh_7mfv_1` 한 줄이 들어가고,
+`quick_figures/`에는 pLDDT/PAE 그림이, `quick_viewer/index.html`에는 회전할 수 있는
+3D 구조가 표시된다.
+
+**overlay로 무엇을 잃는가** (같은 타깃 `vhh_7mfv_1` 실측 대조)
+
+| | overlay | full DB |
+|---|---|---|
+| 등급 | A_높음 | A_높음 |
+| ranking_score | 0.90 | 0.91 |
+| pTM | 0.90 | 0.91 |
+| pLDDT 평균 | 92.32 | 93.15 |
+| MSA unpaired 깊이 | 11 | 10,640 |
+
+단량체 VHH 한 건에서는 지표 차이가 작았다. 집계 CSV의 `경고` 열에 `MSA얕음`이
+자동으로 붙으므로 어떤 조건으로 얻은 값인지 결과만 보고도 알 수 있다.
+전수 스크리닝은 overlay, 상위 후보만 full DB로 재계산하는 조합을
+[3-5절](#3-5-데이터베이스-선택)에 정리했다.
 
 ### 3. 본인 입력 준비
 
@@ -119,12 +178,12 @@ CSV/TSV도 사용할 수 있다. 첫 줄에는 열 이름이 있어야 하며 �
 | 서로 다른 단백질 사슬이 3종 이상 | AF3 JSON을 직접 작성 | `sequences` 배열에 A, B, C 사슬을 각각 추가 |
 
 multi-FASTA의 각 레코드는 서로 독립된 예측 작업이며, 여러 레코드를 한 복합체로 합치지
-않는다. `--partner-fasta` 파일에 레코드가 여러 개 있으면 현재 구현은 첫 번째 레코드만
-공통 파트너로 사용하고 경고를 출력한다.
+않는다.
 
 ### 4. 입력 유형별 실행 예제
 
-아래 예제는 모두 `--dry-run` 확인 후 JSON을 만들고 같은 배치 러너로 실행한다.
+A~D는 `--dry-run` 확인 후 JSON을 만들고, E는 제공 JSON의 문법을 확인한 뒤 같은 배치
+러너로 실행한다. 필요한 입력 유형만 선택해서 실행하면 된다.
 
 실제 입력 데이터는 다음 파일에서 확인할 수 있다. 파일 이름을 누르면 GitHub에서 전체
 내용을 볼 수 있으며 그대로 내려받아 실행할 수 있다.
@@ -142,7 +201,7 @@ FASTA 예제는 공개 PDB 유래 서열이고, 3사슬 JSON은 입력 형식 �
 
 #### A. multi-FASTA의 단백질을 각각 예측
 
-`examples/vhh_panel.fasta`의 레코드 6개가 독립 JSON 6개와 독립 작업 6개가 된다.
+한 FASTA에 여러 서열을 넣되, 서로 합치지 않고 단백질별로 하나씩 예측할 때 사용한다.
 
 ```bash
 python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta -o panel_in --dry-run
@@ -150,11 +209,21 @@ python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta -o panel_in
 python3 scripts/run_af3_batch_improved.py \
     --input-dir panel_in --output-dir panel_out \
     --db-dir ~/public_databases_full --yes
+python3 scripts/af3_collect.py panel_out -o panel_summary.csv
+~/af3_plot_env/bin/python scripts/af3_visualize.py panel_out -o panel_figures
+python3 scripts/af3_view3d.py panel_out --out-dir panel_viewer
 ```
+
+아래 그림은 위 명령을 이 컴퓨터에서 full DB로 실행해 만든 결과다. 6건 모두 완료됐고
+pTM은 0.82~0.90, 원자 평균 pLDDT는 82.9~92.7이었다. 다른 입력에서도 같은 점수가
+나온다는 뜻은 아니다.
+
+![A. multi-FASTA 6종 실제 실행 결과](figures/quickstart_a_multifasta.png)
 
 #### B. 같은 단백질 2부로 homodimer 예측
 
-`--copies 2`는 한 JSON 안에 같은 서열의 A, B 사슬을 만든다.
+동일한 단백질 두 부가 함께 있는 구조를 예측할 때 `--copies 2`를 사용한다. 만들어지는
+JSON에는 같은 서열의 A, B 사슬이 들어간다.
 
 ```bash
 python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
@@ -164,11 +233,21 @@ python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
 python3 scripts/run_af3_batch_improved.py \
     --input-dir homodimer_in --output-dir homodimer_out \
     --db-dir ~/public_databases_full --yes
+python3 scripts/af3_collect.py homodimer_out -o homodimer_summary.csv
+~/af3_plot_env/bin/python scripts/af3_visualize.py homodimer_out -o homodimer_figures
+python3 scripts/af3_view3d.py homodimer_out --out-dir homodimer_viewer
 ```
+
+이 컴퓨터의 full DB 실행에서는 1건이 완료됐고 pTM 0.60, ipTM 0.30, 원자 평균 pLDDT
+86.8이었다. 아래 PAE에서 A와 B 내부 블록은 어둡지만 사슬 사이 블록은 밝다. 각 사슬의
+접힘보다 두 사슬의 상대 배치가 불확실하다는 뜻이며, homodimer 형성의 근거로 쓰지 않는다.
+
+![B. homodimer 실제 실행의 PAE](figures/quickstart_b_homodimer_pae.png)
 
 #### C. 여러 대상에 같은 항원 추가
 
-VHH 6개마다 같은 lysozyme 항원을 붙여 대상+항원 복합체 JSON 6개를 만든다.
+VHH 6개에 같은 lysozyme을 하나씩 붙여 복합체 후보 6개를 계산한다. 파트너 FASTA에
+레코드가 여러 개 있으면 첫 번째 레코드만 사용하고 경고를 출력한다.
 
 ```bash
 python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta \
@@ -178,11 +257,15 @@ python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta \
 python3 scripts/run_af3_batch_improved.py \
     --input-dir antigen_panel_in --output-dir antigen_panel_out \
     --db-dir ~/public_databases_full --yes
+python3 scripts/af3_collect.py antigen_panel_out -o antigen_panel_summary.csv
+~/af3_plot_env/bin/python scripts/af3_visualize.py antigen_panel_out -o antigen_panel_figures
+python3 scripts/af3_view3d.py antigen_panel_out --out-dir antigen_panel_viewer
 ```
 
 #### D. 공통 파트너를 2부 추가
 
-`--partner-copies 2`는 한 JSON 안에 대상 A와 같은 파트너 B, C 사슬을 만든다.
+대상 한 부와 동일한 파트너 두 부를 한 복합체로 계산한다. `--partner-copies 2`를 주면
+대상 A와 같은 파트너 B, C 사슬이 만들어진다.
 
 ```bash
 python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
@@ -194,13 +277,16 @@ python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
 python3 scripts/run_af3_batch_improved.py \
     --input-dir partner_dimer_in --output-dir partner_dimer_out \
     --db-dir ~/public_databases_full --yes
+python3 scripts/af3_collect.py partner_dimer_out -o partner_dimer_summary.csv
+~/af3_plot_env/bin/python scripts/af3_visualize.py partner_dimer_out -o partner_dimer_figures
+python3 scripts/af3_view3d.py partner_dimer_out --out-dir partner_dimer_viewer
 ```
 
 #### E. 서로 다른 단백질 사슬 3종 예측
 
 현재 `af3_prepare.py`는 서로 다른 protein 3종을 자동 조합하지 않는다. 이 경우 A, B, C
-사슬이 들어 있는 AF3 JSON을 입력 폴더에 직접 둔다. 제공 파일은 JSON 형식과 실행 경로를
-확인하기 위한 예제이며 생물학적 benchmark가 아니다.
+사슬이 들어 있는 AF3 JSON을 입력 폴더에 직접 둔다. 제공 파일은 JSON 문법과 3사슬 실행을
+확인하기 위한 예제이며, 실제 생물학적 복합체를 뜻하지 않는다.
 
 ```bash
 python3 -m json.tool examples/three_protein_complex.json >/dev/null
@@ -209,6 +295,9 @@ cp examples/three_protein_complex.json three_chain_in/
 python3 scripts/run_af3_batch_improved.py \
     --input-dir three_chain_in --output-dir three_chain_out \
     --db-dir ~/public_databases_full --yes
+python3 scripts/af3_collect.py three_chain_out -o three_chain_summary.csv
+~/af3_plot_env/bin/python scripts/af3_visualize.py three_chain_out -o three_chain_figures
+python3 scripts/af3_view3d.py three_chain_out --out-dir three_chain_viewer
 ```
 
 CSV의 `등급` 열로 1차 선별하고, 단량체는 pTM과 pLDDT평균, 복합체는 ipTM을 본다.
@@ -305,7 +394,7 @@ tokamax 0.0.12 조합이었다. 두 경로 모두 시스템 `nvcc`를 따로 설
 
 | 경로 | 실작업 시간 | 디스크 | 어떤 경우에 |
 |------|-------------|--------|-------------|
-| **A. reduced-MSA overlay + full fallback** | full 다운로드 후 10~20분 추가 | full 해제본 627GiB + overlay 약 2GB | MSA 속도 실험·단량체 스크리닝 |
+| **A. reduced-MSA overlay + full fallback** | full 다운로드 후 1분 안팎 추가 (실측 16.7초) | full 해제본 627GiB + overlay 약 2GB | MSA 속도 실험·단량체 스크리닝 |
 | **B. full DB** | 회선에 따라 수 시간 | 해제본 약 **627GiB**; 압축본 보존 시 peak 약 850GiB | 공식에 가장 가까운 기본 경로·복합체 예측 |
 
 모델 가중치는 Google이 제공하는 URL에서 직접 받아야 하며 현재 약관을 먼저 확인한다.
@@ -323,7 +412,7 @@ tokamax 0.0.12 조합이었다. 두 경로 모두 시스템 `nvcc`를 따로 설
 | ③ | **가중치 약관 확인** | | Google에서 직접 받은 파일만 사용 | 사용자 확인 |
 | ④ | **모델 가중치 `af3.bin.zst`** | 1,020,545,840 B | 공식 Google Storage URL | 회선에 따라 |
 | ⑤ | **`ccd.pickle`** | 수백 MB. 2026-08-20 native 재검증에서는 568,392,544 B | 받는 것이 아니라 현재 환경의 `build_data` 로 굽는다 | 23.5초 (이번 native 실측). 설치 시 1회 |
-| ⑥-A | **reduced-MSA overlay** | 약 2GB 추가 | full DB의 7개 MSA FASTA를 완전 레코드 경계에서 자른다 | 10~20분 |
+| ⑥-A | **reduced-MSA overlay** | 약 2GB 추가 | full DB의 7개 MSA FASTA를 완전 레코드 경계에서 자른다 | 1분 안팎 (실측 16.7초) |
 | ⑥-B | **전체 DB** | 압축 238.8GB(223GiB), 해제본 약 **627GiB** | `fetch_databases.sh` (승인 불필요) | 회선 의존. 과거 빠른 회선 3시간 13분 |
 | ⑦ | 첫 실행 컴파일 | | | **최대 406~497초 (실측)**, 이후 웜 6.55~8.5초 |
 | | **이 저장소** | 수 MB | https://github.com/kangk1204/Kang_AF3 | 스크립트와 문서만 |
@@ -449,6 +538,15 @@ sha256sum ~/af3_models/af3.bin
 `af3.bin.zst` 는 1,020,545,840 B 이고 가중치 안에는 파라미터가 368,384,602개 있다.
 이 저장소는 pinned AF3 commit과 함께 위 크기를 엄격히 검사한다. 다른 모델 release를
 의도했다면 코드·가중치·출력 계약을 함께 다시 검증해야 한다.
+
+검증을 끝내고 다른 release 를 의도적으로 쓸 때만, 배치 러너의 크기 검사를
+`AF3_MODEL_BYTES` 로 바꿀 수 있다. 조용히 넘어가지 않고 실행할 때마다 경고를 찍는다.
+(`af3_check.sh` 의 `AF3_MODEL_SHA256` 과 같은 성격의 탈출구다.)
+
+```bash
+AF3_MODEL_BYTES=$(stat -c %s ~/af3_models/af3.bin) \
+  python3 scripts/run_af3_batch_improved.py --input-dir vhh_001_in --output-dir vhh_001_out
+```
 
 ### 3-4. build_data
 
@@ -832,15 +930,15 @@ tail -f af3.log
 모드다: `check`(환경 진단), `dry`(실행 없이 명령만 확인), `screen`(경량 스크리닝
 sample 1 / recycle 3, 전수용), `full`(정밀 sample 5 / recycle 10, 상위 후보용),
 `msa`, `infer`, `oneshot`(MSA + 추론을 한 프로세스에서), `retry`(실패한 것만),
-`bench`(앞 20건으로 건당 시간 측정), `collect`(CSV 집계).
+`bench`(가장 짧은 20건의 경량 스모크), `collect`(CSV 집계).
 
 2000건을 처음 돌릴 때의 권장 순서:
 
 ```bash
 bash scripts/af3run.sh vhh_001 check      # 1. 환경
 bash scripts/af3run.sh vhh_001 dry        # 2. 명령 확인
-bash scripts/af3run.sh vhh_001 bench      # 3. 20건으로 건당 시간 측정
-# 측정한 건당 시간에 전체 건수를 곱해 예상 시간을 계산한다
+bash scripts/af3run.sh vhh_001 bench      # 3. 가장 짧은 20건으로 실행 경로 스모크
+# 전체 시간은 버킷별 표본을 실제 운영 설정으로 별도 측정해 계산한다
 bash scripts/af3run.sh vhh_001 screen     # 4. 전수
 bash scripts/af3run.sh vhh_001 collect    # 5. 집계
 ```
@@ -895,6 +993,8 @@ MSA(CPU)와 추론(GPU)을 분리하면 MSA 산출물(`*_data.json`)이 `msa_sto
 
 ```bash
 # 1단계: MSA 만 전수 (CPU 바운드)
+# 이 단계는 --norun_inference 라서 GPU 도 af3.bin 도 필요 없다.
+# 가중치를 아직 내려받지 않은 core 설치에서도 여기까지는 돌릴 수 있다.
 python3 scripts/af3_batch.py --name vhh_001 --stage msa
 
 # 2단계: 추론만, 경량 설정으로 전수 (GPU) 후 집계해 상위 100건 목록을 만든다
@@ -1091,7 +1191,9 @@ pLDDT 평균은 집계 단위를 확인해야 한다. `af3_collect.py`의 `pLDDT
 등급과 별개로 `경고` 열이 붙는다. `충돌`(has_clash > 0, 원자 중첩 구조 확인 필요),
 `무질서`(fraction_disordered ≥ 0.1), `MSA얕음`(unpaired 깊이 < 100.
 축소 DB 를 쓰면 정상적으로 붙는다), `샘플불안`(ranking 산포 ≥ 0.05. 샘플마다 결과가
-흔들려 재현성이 낮다), `버킷256`(패딩 버킷 ≥ 256. 추론이 2.25배 느려진 건이다).
+흔들려 재현성이 낮다), `버킷256`(패딩 버킷 ≥ 256. 더 큰 연산 구간이라는 표시)이다.
+2.25배는 이 컴퓨터에서 버킷 128과 256을 비교한 값이며 다른 버킷이나 장비에 그대로
+적용하지 않는다.
 
 > ### 주의 1. 신뢰도는 정답과의 일치도가 아니다
 >
@@ -1142,8 +1244,9 @@ MSA(`MSA_unpaired깊이, MSA_paired깊이`), 규모(`토큰수, 원자수, 체�
 패딩버킷`), 샘플 산포(`샘플수, ranking최고/최저/산포`), 체인별
 (`chain_pTM, chain_ipTM, min_chain_pair_ipTM`), 검산(`ranking검산차`), 그리고 출처
 (`출력경로, 폴더명, 실행시각, 실행수, 중복정책`)다. 여러 번 실행해 타임스탬프 폴더가
-생겼으면 `--all-runs` 로 전부 집계할 수 있고, 열 이름을 영어로 뽑으려면
-`--filename-lang en` 을 준다.
+생겼으면 `--all-runs` 로 전부 집계할 수 있다. `-o`를 생략했을 때 기본 CSV 파일명을
+ASCII로 만들려면 `--filename-lang en`을 준다. 이 옵션은 파일명만 바꾸며 CSV 열 이름은
+바꾸지 않는다.
 
 실행하면 화면에 이렇게 요약이 뜬다 (검증 호스트 실물 출력, 축소 DB 6종).
 
@@ -1168,7 +1271,8 @@ MSA(`MSA_unpaired깊이, MSA_paired깊이`), 규모(`토큰수, 원자수, 체�
 `ranking_score 검산`이 전건 일치인지 확인한다. 불일치는 서로 다른 실행의 파일이 섞였을
 가능성을 뜻한다.
 실제 출력 예시는 [results_example/af3_summary.csv](results_example/af3_summary.csv)
-(축소 DB 대 전체 DB 6종 비교, 실측)에 있다.
+(축소 DB 대 전체 DB 6종 비교, 실측)에 있다. 현재 35열 형식으로 맞췄으며, 과거 실행에서
+시각을 따로 보존하지 않아 `실행시각`은 비어 있다.
 
 ### 8-5. 검토 순서
 
@@ -1290,9 +1394,10 @@ AlphaFold DB 와 같으므로 그쪽에서 본 그림과 나란히 비교할 수
 - 확산 샘플 간 ranking score 표준편차가 크다
 
 **복합체(VHH + 항원) 확인 항목**: 사슬별 버튼으로 바꿔 어느 쪽이 VHH이고 어느 쪽이
-항원인지 확인한 뒤 두 사슬의 접촉면 색과 ipTM을 함께 본다. 계면이 파랑/하늘색이면
-상대 배치 신뢰도가 높고, 노랑/주황이면 계면 위치가 불확실하다. ipTM이 낮고 pTM이 높은
-경우에는 개별 사슬 접힘보다 사슬 간 배치의 불확실성이 크다.
+항원인지 확인한다. pLDDT 색은 각 잔기의 국소 구조 신뢰도만 나타내므로 접촉면이
+파랑/하늘색이어도 두 사슬의 상대 배치가 맞다는 뜻은 아니다. 상대 배치는 사슬 간 PAE
+블록과 ipTM으로 판단한다. ipTM이 낮고 pTM이 높은 경우에는 개별 사슬 접힘보다 사슬 간
+배치의 불확실성이 크다.
 
 ### 9-6. PyMOL / ChimeraX 로 보기
 
@@ -1315,10 +1420,10 @@ color orange, lowconf
 범례를 포함한다. AlphaFold 관례(파랑=높음, 주황=낮음)는
 `spectrum b, orange_yellow_cyan_blue, minimum=50, maximum=90` 이다.
 
-**(b) ChimeraX.** `chimerax ..._model.cif` 로 열고 명령줄에 붙인다.
-`color bfactor palette alphafold` 가 AlphaFold 공식 pLDDT 배색을 그대로 적용하므로
-이 색칠은 ChimeraX 가 한 줄로 끝난다. `cartoon`, `set bgColor white`,
-`show :/bfactor<70 atoms`(낮은 부위 강조)를 함께 쓴다.
+**(b) ChimeraX.** `af3_visualize.py`가 만든 `viewer_chimerax_plddt.cxc`를 연다. 일부
+ChimeraX 버전은 `palette alphafold`를 0~1 범위로 해석하므로, 생성된 파일은 pLDDT의
+0~100 경계를 명시한 palette를 사용한다. `cartoon`, `set bgColor white`, 낮은 부위 선택
+명령도 같은 파일에 들어 있다.
 
 **구조 중첩.** 같은 계열 나노바디에서 CDR 루프만 다른지 확인할 때 PyMOL은
 `load` 후 `align m2, m1`, ChimeraX 는 `open` 후 `matchmaker #2 to #1` 이다.
@@ -1420,7 +1525,7 @@ python3 scripts/af3_batch.py --name big --stage infer --no-prealloc --unified-me
 
 이 저장소의 최적화는 `--input_dir` 로 한 프로세스가 전수 순회하는 것에 기반하므로 이게
 없으면 핵심 이득을 못 얻는다. `git fetch --all` 후 확인된 커밋으로 `git checkout` 하고
-이미지를 다시 빌드한다([3-2](#3-2-af3-소스와-도커-이미지)). 즉시 재빌드할 수 없으면
+이미지를 다시 빌드한다([3-2](#3-2-ubuntu-단일-설치기)). 즉시 재빌드할 수 없으면
 캐시 디렉터리를 지정한다. 이 설정만으로 31.95초에서 18.13초(1.76배)로 줄었다.
 단일 프로세스화(5.10배)는 포기해야 한다.
 
@@ -1561,9 +1666,11 @@ AF3 commit `97d20234c6eb89e8d05376e9eecc9321e60a559b`의 native 환경이다.
    (front-sliced FASTA와 1,239개 selected template의 정확한 ID/query manifest가 저장소에 없다),
    **RAM 하한**(120~126GB 호스트에서만 측정했다).
 
-성능 계획에는 `bash scripts/af3run.sh vhh_001 bench`로 측정한 대표 입력 20건의 값을
-사용한다. 건당 시간에 2000을 곱한 값이 표의 조건(GPU 추론 5.39초 + 데이터 파이프라인
-축소 DB 1.98초 / 전체 DB급 4GB 슬라이스 30.41초)과 다르면 해당 장비의 측정값을 우선한다.
+`bash scripts/af3run.sh vhh_001 bench`는 길이순으로 정렬된 입력 중 가장 짧은 20건을
+sample 1/recycle 3으로 실행하는 빠른 스모크다. 대표 표본이나 정밀 설정의 처리시간으로
+간주하지 않는다. 전체 작업 시간을 계획할 때는 사용할 버킷별로 입력을 뽑고 실제 운영과
+같은 sample/recycle 조건으로 별도 pilot을 실행한다. 이 조건을 맞추지 않은 값은 표의
+sample 5/recycle 10 측정치와 직접 비교하지 않는다.
 
 ---
 

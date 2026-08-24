@@ -172,3 +172,6 @@ temp/
 scratch/
 nohup.out
 core.*
+
+# oh-my-claudecode 세션 상태 (도구가 만드는 것이라 저장소와 무관하다)
+.omc/
