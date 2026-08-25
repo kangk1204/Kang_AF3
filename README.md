@@ -71,9 +71,9 @@ full DB를 아직 받지 않을 때는 `bash scripts/install_af3_ubuntu.sh`만 �
 
 설치가 끝나면 저장소의 단량체 JSON으로 1건을 실행한다.
 
-**먼저 MSA overlay를 만든다.** full DB를 그대로 쓰면 이 예제 1건이 **수십 분** 걸린다.
+**먼저 MSA overlay를 만든다.** full DB를 그대로 쓰면 이 예제 1건이 **34.8분** 걸린다.
 overlay는 MSA용 FASTA 7종만 앞에서 잘라 둔 약 2GB 사본이고, 만드는 데 1분이 안 걸린다.
-같은 예제가 **1분 이내**로 끝난다.
+같은 예제가 **52.6초**로 끝난다. 40배 차이다.
 
 ```bash
 # MSA overlay 생성 (약 1.9GB, 이 장비 실측 16.7초)
@@ -108,10 +108,14 @@ python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 
 **얼마나 걸리는가** (RTX 3080 Ti, 32 논리코어, VHH 단량체 116잔기 1건 실측)
 
-| DB 구성 | 예제 1건 | 비고 |
-|---|---|---|
-| overlay 먼저 + full fallback | **56초** | 컨테이너 기동 포함, 전체 명령 기준 |
-| full DB 단독 | **25분 이상** | bfd 하나만 460초. 그 시점에 mgy/uniprot/uniref90 진행 중 |
+| DB 구성 | 예제 1건 | MSA (data pipeline) | 추론 |
+|---|---|---|---|
+| overlay 먼저 + full fallback | **52.6초** | 4.4초 | 23.5초 |
+| full DB 단독 | **34.8분** | 2055.0초 (34.3분) | 13.0초 |
+
+차이는 전부 MSA 에서 난다. 추론 시간은 DB 와 무관하다 (위의 23.5초는 JAX 컴파일
+캐시를 비우고 처음 돌린 값이고, 34.8분 쪽은 그 캐시를 재사용했다).
+두 값 모두 컨테이너 기동을 포함한 전체 명령 기준이다.
 
 > **로그가 멈춘 것처럼 보여도 정상이다.** jackhmmer가 DB를 훑는 동안 몇 분씩 출력이
 >없을 수 있다. 진행 여부는 다른 터미널에서 `docker ps` 로 확인한다.
@@ -123,18 +127,22 @@ python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 `quick_figures/`에는 pLDDT/PAE 그림이, `quick_viewer/index.html`에는 회전할 수 있는
 3D 구조가 표시된다.
 
-**overlay로 무엇을 잃는가** (같은 타깃 `vhh_7mfv_1` 실측 대조)
+**overlay로 무엇을 잃는가** (같은 타깃 `vhh_7mfv_1`, 2026-08-25 같은 날 같은 기본
+설정으로 나란히 실측. 확산 샘플 5, recycle 기본)
 
 | | overlay | full DB |
 |---|---|---|
 | 등급 | A_높음 | A_높음 |
-| ranking_score | 0.90 | 0.91 |
-| pTM | 0.90 | 0.91 |
-| pLDDT 평균 | 92.32 | 93.15 |
-| MSA unpaired 깊이 | 11 | 10,640 |
+| ranking_score | 0.900000 | 0.900000 |
+| pTM | 0.900000 | 0.900000 |
+| pLDDT 평균 (원자) | 92.357 | 92.687 |
+| MSA unpaired / paired 깊이 | 11 / 187 | 10,640 / 24,469 |
+| 걸린 시간 | 52.6초 | 34.8분 |
 
-단량체 VHH 한 건에서는 지표 차이가 작았다. 집계 CSV의 `경고` 열에 `MSA얕음`이
-자동으로 붙으므로 어떤 조건으로 얻은 값인지 결과만 보고도 알 수 있다.
+단량체 VHH 한 건에서는 MSA 깊이가 967배 차이인데도 ranking score 와 pTM 이
+소수점 여섯 자리까지 같았고 pLDDT 평균은 0.33 차이였다. **이 한 건을 일반화하지
+말라.** 복합체는 계면 예측이 MSA 깊이에 훨씬 민감하다. 집계 CSV의 `경고` 열에
+`MSA얕음`이 자동으로 붙으므로 어떤 조건으로 얻은 값인지 결과만 보고도 알 수 있다.
 전수 스크리닝은 overlay, 상위 후보만 full DB로 재계산하는 조합을
 [3-5절](#3-5-데이터베이스-선택)에 정리했다.
 

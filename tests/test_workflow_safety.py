@@ -7,6 +7,7 @@ import csv
 import fcntl
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1347,8 +1348,15 @@ def test_quick_start_sets_expectations_before_the_first_long_run():
         )
 
     # (b) 첫 실행에 걸리는 시간과 '멈춘 게 아니다' 안내가 있어야 한다.
-    for expectation in ("56초", "25분", "멈춘 것처럼 보여도 정상"):
-        check_in(expectation, quick_start, "예제 1건의 소요 시간 기대치를 세우지 않았다")
+    # 특정 숫자를 박아 두지 않는다. 다시 측정하면 값은 바뀌고, 그때 이 테스트가
+    # '틀렸다'고 말하면 안 된다. 지켜야 하는 것은 값이 아니라 계약이다:
+    # 빠른 쪽은 초 단위로, 느린 쪽은 분 단위로 기대치를 적어 두어야 한다.
+    quick_seconds = re.search(r"\*\*[0-9]+(?:\.[0-9]+)?초\*\*", quick_start)
+    slow_minutes = re.search(r"\*\*[0-9]+(?:\.[0-9]+)?분(?: 이상)?\*\*", quick_start)
+    check(quick_seconds, "overlay 경로의 소요 시간을 초 단위로 적지 않았다")
+    check(slow_minutes, "full DB 경로의 소요 시간을 분 단위로 적지 않았다")
+    check_in("멈춘 것처럼 보여도 정상", quick_start,
+             "오래 걸리는 단계에서 사용자가 Ctrl-C 하지 않도록 안내하지 않았다")
 
     # overlay 를 먼저, full DB 를 fallback 으로 주는 순서가 명령에 드러나야 한다.
     check_in(
