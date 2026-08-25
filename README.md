@@ -1340,10 +1340,18 @@ python3 scripts/af3_view3d.py vhh_001_out --out-dir 뷰어 --lib embed --engine 
 | `뷰어/index.html` | 타깃 목록. ranking score 내림차순. pTM, ipTM, 평균 pLDDT, 사슬 수, pLDDT 구간 분포 막대가 한 줄에 있다. 타깃 이름을 누르면 구조로 간다 |
 | `뷰어/<타깃>.html` | 구조 하나. 왼쪽에 신뢰도 지표와 색 범례, 오른쪽에 3D 화면 |
 
-`--lib cdn` (기본)이면 HTML 한 개가 0.1~0.2MB 다. 열 때 인터넷이 필요하다.
-`--lib embed` 면 3D 라이브러리가 파일 안에 들어가서 인터넷 없이 열리고,
-한 개가 약 5MB (`--engine 3dmol` 이면 약 0.6MB)가 된다.
-인터넷 없이 많은 결과를 열 때는 `--engine 3dmol --lib embed`를 사용한다.
+`--lib cdn` (기본)이면 HTML 이 작고 열 때 인터넷이 필요하다. `--lib embed` 면
+3D 라이브러리가 파일 안에 들어가서 인터넷 없이 열리는 대신 파일이 커진다.
+크기는 구조가 클수록 커진다 (mmCIF 가 파일 안에 들어간다).
+
+| 만드는 법 | 단량체 116잔기 | 복합체 277잔기 |
+|---|---|---|
+| `--lib cdn` (기본) | 0.13 MB | 0.27 MB |
+| `--lib embed` (Mol\*) | 4.99 MB | 5.13 MB |
+| `--lib embed --engine 3dmol` | 0.64 MB | 0.78 MB |
+
+이 장비 2026-08-25 실측이다. 인터넷 없이 많은 결과를 열 때는
+`--engine 3dmol --lib embed`를 사용한다.
 
 CDN URL은 version과 SRI가 고정돼 있고 embed 다운로드/cache는 SHA-256을 검사한다.
 `--lib-file`은 일반 data가 아니라 사용자가 신뢰한 **실행 JavaScript**를 직접 제공하는

@@ -1366,3 +1366,39 @@ def test_quick_start_sets_expectations_before_the_first_long_run():
     benchmark = (REPO_ROOT / "docs" / "benchmark_report.md").read_text(encoding="utf-8")
     for caveat in ("4GB 슬라이스(합계 16GB)", "305GB", "40.2시간을 그대로 쓰면 안 된다"):
         check_in(caveat, benchmark, "40.2시간의 측정 조건 경계를 표 옆에 적지 않았다")
+
+
+@regression(
+    item="docs",
+    prevents="재주입을 늘려도 docs/testing_notes.md 의 건수와 목록이 그대로 남아,\n"
+             "문서가 실제보다 적은 검증을 했다고 말하는 버그. 조용히 낡는다.",
+)
+def test_testing_notes_matches_the_registered_mutations():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "af3_injections", REPO_ROOT / "tests" / "verify_tests_catch_bugs.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    injections = module.INJECTIONS
+    check(injections, "재주입 목록이 비었다")
+
+    notes = (REPO_ROOT / "docs" / "testing_notes.md").read_text(encoding="utf-8")
+    total = len(injections)
+    check_in(
+        "재주입 %d건" % total,
+        notes,
+        "docs/testing_notes.md 의 재주입 건수가 실제와 다르다 (실제 %d건)" % total,
+    )
+    check_in(
+        "mutation %d건" % total,
+        notes,
+        "release gate 설명의 mutation 건수가 실제와 다르다 (실제 %d건)" % total,
+    )
+
+    missing = [item["name"] for item in injections if item["name"] not in notes]
+    check(
+        not missing,
+        "docs/testing_notes.md 에 빠진 재주입이 있다",
+        "\n".join(missing[:10]),
+    )

@@ -169,27 +169,45 @@ python3 tests/verify_tests_catch_bugs.py
 `scripts/` 를 임시 폴더에 복사해 문자열 치환으로 옛 버그를 되살린 뒤, 해당
 테스트만 돌려 실패하는지 확인한다. 원본 저장소는 건드리지 않는다.
 
-### 결과: 재주입 17건, 17건 모두 테스트가 잡았다 (약 22초)
+### 결과: 재주입 32건, 32건 모두 테스트가 잡았다
+
+아래 표는 `tests/verify_tests_catch_bugs.py` 의 `INJECTIONS` 그대로다.
+건수가 어긋나면 `test_testing_notes_matches_the_registered_mutations` 가 잡는다.
 
 | 재주입한 버그 | 잡은 테스트 |
 | --- | --- |
-| 완료판정을 폴더 존재로 되돌린다 (`is_complete` → `return True`) | `test_data_json_only_is_not_complete`, `test_exit_code_nonzero_when_jobs_remain` |
+| 완료판정을 폴더 존재로 되돌린다 | `test_data_json_only_is_not_complete`, `test_exit_code_nonzero_when_jobs_remain` |
 | 완료판정에서 크기 0 검사를 뺀다 | `test_data_json_only_is_not_complete` |
-| 결과 폴더를 `name` 대신 파일명으로 찾는다 | `test_output_dir_follows_json_name_not_filename`, `test_runner_and_af3_agree_on_output_folder_name` |
-| 이름 충돌 검사를 없앤다 | `test_name_collision_is_rejected_before_running` |
+| 결과 폴더를 JSON name 대신 파일명으로 찾는다 | `test_output_dir_follows_json_name_not_filename`, `test_runner_and_af3_agree_on_output_folder_name` |
+| 이름 충돌·빈 이름 검사를 없앤다 | `test_name_collision_is_rejected_before_running` |
 | 빈 정규화 이름을 통과시킨다 | `test_hangul_only_name_is_rejected` |
 | 깨진 JSON 사전 검증을 없앤다 | `test_broken_json_is_caught_before_running` |
 | macOS 사이드카 제외를 없앤다 | `test_macos_appledouble_sidecar_is_excluded` |
-| 미완료가 남아도 종료코드 0 | `test_exit_code_nonzero_when_jobs_remain` |
+| 미완료가 남아도 종료코드 0 을 돌려준다 | `test_exit_code_nonzero_when_jobs_remain` |
 | staging 소유 표식 확인을 없앤다 | `test_foreign_staging_dir_is_preserved` |
 | 격리 개수 제한을 없앤다 | `test_quarantine_growth_is_bounded_per_job`, `test_quarantine_keep_option_is_honoured` |
-| 중복 실행 잠금을 없앤다 (`flock` → `pass`) | `test_concurrent_run_on_same_output_is_blocked` |
+| 중복 실행 잠금을 없앤다 | `test_concurrent_run_on_same_output_is_blocked` |
 | 구버전 이미지 대비 전환을 없앤다 | `test_legacy_image_without_input_dir_falls_back_to_per_file` |
-| 이미지 확인 실패를 무시하고 추측 실행 | `test_image_probe_failure_stops_with_reason` |
+| 이미지 확인 실패를 무시하고 최신 플래그를 추측한다 | `test_image_probe_failure_stops_with_reason` |
 | 집계에서 숨은/관리 폴더 제외를 없앤다 | `test_managed_dirs_are_excluded_from_collection` |
 | 집계 결과가 없어도 0 을 돌려준다 | `test_empty_collection_exits_nonzero` |
 | 시각화에서 숨은/관리 폴더 제외를 없앤다 | `test_managed_dirs_are_excluded_from_visualization` |
-| 타임스탬프 접미사 폴더 탐색을 없앤다 | `test_batch_finds_timestamp_suffix_result_dirs` |
+| 타임스탬프 접미사 결과 폴더 탐색을 없앤다 | `test_batch_finds_timestamp_suffix_result_dirs` |
+| 이미지 능력 검증을 errexit 의존 형태로 되돌린다 | `test_installer_image_capability_gate_fails_on_every_check` |
+| legacy 러너가 단계와 무관하게 가중치를 요구하게 되돌린다 | `test_legacy_preflight_requires_only_what_the_stage_uses` |
+| 뷰어 템플릿을 순차 치환으로 되돌린다 | `test_viewer_page_placeholders_survive_target_names_that_look_like_placeholders` |
+| af3.bin 크기 핀의 우회 수단을 없앤다 | `test_model_size_pin_is_overridable_and_says_so` |
+| staging 파일/폴더 충돌 검사를 무력화한다 | `test_staging_detects_file_directory_conflicts_without_pairwise_scan` |
+| 배치 경로의 격리 실패를 다시 무방비로 둔다 | `test_batch_run_survives_one_unquarantinable_result` |
+| prepare --report 가 다시 symlink 를 따라가게 한다 | `test_prepare_report_does_not_follow_a_symlinked_destination` |
+| prepare 의 비-폴더 출력 경로 검사를 없앤다 | `test_prepare_rejects_a_non_directory_output_path_with_a_readable_error` |
+| 컨테이너에 이름을 붙이지 않는다 | `test_runner_names_containers_and_reports_orphans` |
+| 고아 컨테이너 판정을 없앤다 | `test_runner_names_containers_and_reports_orphans` |
+| 종료 시 컨테이너 정리를 없앤다 | `test_runner_names_containers_and_reports_orphans` |
+| CSP 에서 'unsafe-eval' 을 다시 뺀다 | `test_viewer_csp_allows_what_the_molstar_engine_needs` |
+| CSP 위반 기록을 없앤다 | `test_viewer_failure_message_names_csp_when_csp_is_the_cause` |
+| 시점 초기화를 화면 맞춤으로 되돌린다 | `test_reset_button_restores_the_first_view_not_just_the_framing` |
+| 템플릿 주석에 자리표시자를 적는다 | `test_each_template_placeholder_appears_exactly_once` |
 
 ### 역검증이 실제로 잡아낸 것 (이 트랙에서 고친 테스트 3건)
 
@@ -213,7 +231,7 @@ python3 tests/verify_tests_catch_bugs.py
 ## 현재 저장소 버전의 release gate
 
 등록된 테스트는 `--strict`에서 known failure 없이 전부 통과해야 한다. 별도 통합 suite와
-mutation 17건도 전부 통과해야 한다. `.github/workflows/tests.yml`은 Python 3.9, 3.12,
+mutation 32건도 전부 통과해야 한다. `.github/workflows/tests.yml`은 Python 3.9, 3.12,
 3.14에서 `tests/run_all.py`를 실행하고, 3.12 lane은 `requirements.txt`를 설치해
 matplotlib 그림 생성 경로도 실행한다. 실제 Docker/AF3/GPU smoke는 수동 gate다.
 
