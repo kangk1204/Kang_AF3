@@ -323,8 +323,8 @@ INJECTIONS = [
         'name': 'CSP 위반 기록을 없앤다',
         'detail': "라이브러리가 CSP 로 막혀도 페이지가 '인터넷 문제'라고만 안내한다. 원인을 못 찾는다.",
         'script': 'af3_view3d.py',
-        'old': "window.__af3_csp = [];\ndocument.addEventListener('securitypolicyviolation', function(ev){\n  if (window.__af3_csp.length < 8) {\n    window.__af3_csp.push((ev.violatedDirective || 'CSP')\n      + (ev.blockedURI ? ' -> ' + ev.blockedURI : ''));\n  }\n});",
-        'new': 'window.__af3_csp = [];',
+        'old': "window.__af3_csp = [];\nwindow.__af3_csp_blocking = [];\n// 모든 위반이 화면을 망가뜨리는 것은 아니다. 라이브러리를 실제로 못 싣게 만드는\n// 지시어만 원인으로 삼는다. 그러지 않으면 무해한 위반 하나 때문에 엉뚱한 실패까지\n// CSP 탓으로 안내하게 된다.\nwindow.__af3_csp_blocking_directives = ['script-src', 'style-src', 'worker-src',\n                                        'child-src', 'default-src'];\ndocument.addEventListener('securitypolicyviolation', function(ev){\n  var directive = ev.violatedDirective || 'CSP';\n  var line = directive + (ev.blockedURI ? ' -> ' + ev.blockedURI : '');\n  if (window.__af3_csp.length < 8) { window.__af3_csp.push(line); }\n  var names = window.__af3_csp_blocking_directives;\n  for (var ni = 0; ni < names.length; ni++) {\n    if (directive.indexOf(names[ni]) === 0) {\n      if (window.__af3_csp_blocking.length < 8) { window.__af3_csp_blocking.push(line); }\n      break;\n    }\n  }\n});",
+        'new': 'window.__af3_csp = [];\nwindow.__af3_csp_blocking = [];',
         'tests': ['test_viewer_failure_message_names_csp_when_csp_is_the_cause'],
     },
     {

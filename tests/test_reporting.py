@@ -497,6 +497,17 @@ def test_viewer_failure_message_names_csp_when_csp_is_the_cause():
     check_in("__af3_csp", fail_block, "실패 안내가 기록된 CSP 위반을 쓰지 않는다")
     check_in("CSP", fail_block, "실패 안내가 CSP 를 원인으로 이름 붙이지 않는다")
 
+    # 모든 위반을 원인으로 삼으면 안 된다. 렌더링과 무관한 위반(예: connect-src)이
+    # 늘 하나 기록되므로, 그것 때문에 엉뚱한 실패까지 CSP 탓이 된다.
+    # 라이브러리를 실제로 못 싣게 만드는 지시어만 원인으로 본다.
+    check_in(
+        "__af3_csp_blocking",
+        fail_block,
+        "실패 안내가 라이브러리 로드를 막는 위반만 골라 쓰지 않는다",
+    )
+    for directive in ("script-src", "worker-src"):
+        check_in(directive, page, "차단성 지시어 목록에 %s 가 없다" % directive)
+
 
 @regression(
     item="reporting",
@@ -564,4 +575,23 @@ def test_reset_button_restores_the_first_view_not_just_the_framing():
             "af3InitialView",
             reset,
             "%s 의 시점 초기화가 저장해 둔 처음 시점을 쓰지 않는다" % name,
+        )
+
+
+@regression(
+    item="reporting",
+    prevents="--lib cdn 과 --lib embed 가 화면 동작까지 달라져,\n"
+             "한쪽에서만 확인한 버튼·카메라 수정이 다른 쪽에는 안 들어가는 버그.",
+)
+def test_library_mode_changes_only_how_the_library_is_loaded():
+    mod = load_module("af3_view3d.py")
+    # lib 모드는 라이브러리를 어디서 싣는지만 정한다. 엔진 코드(버튼, 카메라, 색칠)는
+    # 같아야 한다. 같으므로 브라우저 확인을 한쪽에서만 해도 다른 쪽에 그대로 적용된다.
+    for engine in ("molstar", "3dmol"):
+        engine_js = mod.ENGINE_MOLSTAR_JS if engine == "molstar" else mod.ENGINE_3DMOL_JS
+        for handle in ("window.af3SetColor", "window.af3ResetView", "af3InitialView"):
+            check_in(handle, engine_js, "%s 엔진에 %s 가 없다" % (engine, handle))
+        check(
+            "lib_mode" not in engine_js and "__LIBBODY__" not in engine_js,
+            "%s 엔진 코드가 라이브러리 적재 방식에 따라 갈린다" % engine,
         )

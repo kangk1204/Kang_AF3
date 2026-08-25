@@ -56,6 +56,13 @@ def test_viewer_csp_allows_what_the_molstar_engine_needs():
     check_in("'unsafe-eval'", policy, "CSP가 molstar 초기화에 필요한 eval 을 막는다")
     for required in ("worker-src blob:", "img-src data: blob:"):
         check_in(required, policy, "CSP가 molstar 렌더링에 필요한 것을 막는다")
+    # molstar 는 초기화 중 data: URI 를 fetch 한다. connect-src 'none' 이면 브라우저가
+    # 매번 위반을 기록한다. 화면은 뜨지만, 위반이 항상 남아 있으면 실패 안내가 무관한
+    # 원인을 CSP 탓으로 돌리게 된다. data: 는 바깥으로 나가지 않으므로 허용해도 안전하다.
+    connect = [d.strip() for d in policy.split(";") if d.strip().startswith("connect-src")]
+    check_equal(len(connect), 1, "connect-src 지시어가 하나가 아니다", policy)
+    check_in("data:", connect[0], "CSP가 molstar 의 data: 요청을 막아 위반이 계속 쌓인다")
+    check("http" not in connect[0], "connect-src 가 바깥 출처로 열렸다", connect[0])
     # 조인 상태는 유지해야 한다. 허용 목록이 넓어지면 이 검사가 잡는다.
     check_in("default-src 'none'", policy, "CSP 기본값이 열려 있다")
     check("*" not in policy, "CSP에 와일드카드 출처가 들어갔다", policy)

@@ -1276,7 +1276,7 @@ PAGE_TMPL = """<!DOCTYPE html>
 <html lang="ko"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; img-src data: blob:; connect-src 'none'; font-src data:; worker-src blob:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; img-src data: blob:; connect-src data:; font-src data:; worker-src blob:">
 <title>__TITLE__</title>
 __LIBHEAD__
 <style>__CSS__</style>
@@ -1357,18 +1357,30 @@ function af3Ready(engine){
 // 한 번 헤맸다. 그래서 위반을 직접 받아 두고 실패 안내에서 원인을 이름 붙인다.
 // 이 등록은 반드시 라이브러리를 싣는 script 보다 앞에 있어야 한다.
 window.__af3_csp = [];
+window.__af3_csp_blocking = [];
+// 모든 위반이 화면을 망가뜨리는 것은 아니다. 라이브러리를 실제로 못 싣게 만드는
+// 지시어만 원인으로 삼는다. 그러지 않으면 무해한 위반 하나 때문에 엉뚱한 실패까지
+// CSP 탓으로 안내하게 된다.
+window.__af3_csp_blocking_directives = ['script-src', 'style-src', 'worker-src',
+                                        'child-src', 'default-src'];
 document.addEventListener('securitypolicyviolation', function(ev){
-  if (window.__af3_csp.length < 8) {
-    window.__af3_csp.push((ev.violatedDirective || 'CSP')
-      + (ev.blockedURI ? ' -> ' + ev.blockedURI : ''));
+  var directive = ev.violatedDirective || 'CSP';
+  var line = directive + (ev.blockedURI ? ' -> ' + ev.blockedURI : '');
+  if (window.__af3_csp.length < 8) { window.__af3_csp.push(line); }
+  var names = window.__af3_csp_blocking_directives;
+  for (var ni = 0; ni < names.length; ni++) {
+    if (directive.indexOf(names[ni]) === 0) {
+      if (window.__af3_csp_blocking.length < 8) { window.__af3_csp_blocking.push(line); }
+      break;
+    }
   }
 });
 function af3Fail(msg){
   var s = document.getElementById('status');
   var hint = '__FAILHINT__';
-  if (window.__af3_csp && window.__af3_csp.length) {
+  if (window.__af3_csp_blocking && window.__af3_csp_blocking.length) {
     hint = '<b>원인은 인터넷이 아니라 이 페이지의 보안 정책(CSP)이다.</b><br>'
-      + '막힌 것: ' + window.__af3_csp.slice(0, 3).join(' / ').replace(/</g,'&lt;')
+      + '막힌 것: ' + window.__af3_csp_blocking.slice(0, 3).join(' / ').replace(/</g,'&lt;')
       + '<br>이 파일이 옛 버전으로 만들어졌을 수 있다. 최신 af3_view3d.py 로 다시 만들어라.';
   }
   if (s) s.innerHTML = '<div class="bad"><b>구조를 표시하지 못했다.</b><br>'
