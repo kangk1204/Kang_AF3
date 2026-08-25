@@ -76,6 +76,9 @@ AF3 출력은 두 값을 같게 쓴다. 실측으로 확인했다 (복합체 277
 라이브러리 원본은 `--lib-cache` (기본 `~/.cache/af3_view3d`) 에 한 번 내려받아
 둔다. 고정 SHA-256이 맞는 cache만 재사용한다. CDN mode는 같은 고정 byte의 SRI와
 `crossorigin=anonymous`를 사용하고 generated page는 CSP로 외부 연결을 차단한다.
+CSP의 `script-src`에는 `'unsafe-eval'`이 들어 있다. molstar 번들이 초기화 중
+`new Function(...)`을 부르므로 빼면 EvalError로 죽고 구조가 표시되지 않는다.
+출처가 두 CDN으로 고정되고 SRI로 잠겨 있어 실행 가능한 것은 그 번들뿐이다.
 CDN 두 곳(jsdelivr, unpkg)이 모두 막히면 npm 레지스트리 tarball 을 받아
 안에서 필요한 파일만 꺼낸다 (`tarfile` 은 표준 라이브러리다). 셋 다 막히면
 실패 이유와 함께 "인터넷 되는 컴퓨터에서 이 URL 을 저장해 `--lib-file` 로

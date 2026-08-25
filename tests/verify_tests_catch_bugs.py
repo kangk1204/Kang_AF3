@@ -311,6 +311,14 @@ INJECTIONS = [
         "new": '',
         "tests": ["test_runner_names_containers_and_reports_orphans"],
     },
+    {
+        "name": "CSP 에서 'unsafe-eval' 을 다시 뺀다",
+        "detail": "molstar 가 초기화 중 new Function 을 못 불러 죽는다. 지표 표만 뜨고 구조는 안 나온다.",
+        "script": "af3_view3d.py",
+        "old": """script-src 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net""",
+        "new": """script-src 'unsafe-inline' https://cdn.jsdelivr.net""",
+        "tests": ["test_viewer_csp_allows_what_the_molstar_engine_needs"],
+    },
 ]
 
 

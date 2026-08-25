@@ -1229,11 +1229,17 @@ ul.tight li { margin-bottom:3px; }
 a { color:#0053D6; }
 """
 
+# CSP 주의: script-src 의 'unsafe-eval' 은 지워도 되는 것처럼 보이지만 지우면 안 된다.
+# molstar 5.11.0 번들은 초기화 중에 new Function(...) 을 부르고, 막히면 EvalError 로
+# 죽어서 페이지에 "molstar 전역이 없다" 만 남는다. HTML 을 아무리 정적으로 검사해도
+# 안 잡히고 실제 브라우저에서만 드러난다 (2026-08-25 Chrome 에서 확인).
+# 대신 출처를 CDN 두 곳으로 고정하고 SRI 로 잠갔으므로, 여기서 돌 수 있는 것은
+# 해시가 일치하는 그 번들뿐이다. tests/test_security.py 가 이 균형을 지킨다.
 PAGE_TMPL = """<!DOCTYPE html>
 <html lang="ko"><head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; img-src data: blob:; connect-src 'none'; font-src data:; worker-src blob:">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' https://cdn.jsdelivr.net https://unpkg.com; style-src 'unsafe-inline' https://cdn.jsdelivr.net https://unpkg.com; img-src data: blob:; connect-src 'none'; font-src data:; worker-src blob:">
 <title>__TITLE__</title>
 __LIBHEAD__
 <style>__CSS__</style>

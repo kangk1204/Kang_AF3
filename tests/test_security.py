@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import subprocess
 import sys
 import tempfile
@@ -32,6 +33,39 @@ def test_committed_viewer_example_has_csp_and_sri():
     check_in("default-src 'none'", html, "3D 예시 CSP가 기본 외부 로드를 막지 않는다")
     check_equal(html.count('integrity="sha384-'), 2, "3D 예시의 CDN CSS/JS에 SRI가 모두 없다")
     check_equal(html.count('crossorigin="anonymous"'), 2, "3D 예시의 SRI CORS 설정이 불완전하다")
+
+
+@regression(
+    item="security",
+    prevents="CSP를 조이다가 molstar 가 쓰는 new Function 을 막아,\n"
+             "브라우저에서 지표 표만 뜨고 구조는 영영 안 나오는 버그. 정적 검사로는 통과한다.",
+)
+def test_viewer_csp_allows_what_the_molstar_engine_needs():
+    source = (SCRIPTS_DIR / "af3_view3d.py").read_text(encoding="utf-8")
+    policies = re.findall(r'http-equiv="Content-Security-Policy" content="([^"]+)"', source)
+    check(policies, "생성기에 CSP 메타 태그가 없다")
+
+    script_policies = [p for p in policies if "script-src" in p]
+    check_equal(len(script_policies), 1, "스크립트를 싣는 CSP가 하나가 아니다", "\n".join(policies))
+    policy = script_policies[0]
+
+    # molstar 5.11.0 번들은 초기화 중에 new Function(...) 을 부른다. 'unsafe-eval' 이
+    # 없으면 EvalError 로 죽고, 페이지는 "molstar 전역이 없다" 만 띄운다. 실제 Chrome
+    # 에서 확인한 증상이다. 소스는 CDN 두 곳으로 고정돼 있고 SRI 로 잠겨 있으므로
+    # 여기서 허용되는 것은 그 고정된 번들뿐이다.
+    check_in("'unsafe-eval'", policy, "CSP가 molstar 초기화에 필요한 eval 을 막는다")
+    for required in ("worker-src blob:", "img-src data: blob:"):
+        check_in(required, policy, "CSP가 molstar 렌더링에 필요한 것을 막는다")
+    # 조인 상태는 유지해야 한다. 허용 목록이 넓어지면 이 검사가 잡는다.
+    check_in("default-src 'none'", policy, "CSP 기본값이 열려 있다")
+    check("*" not in policy, "CSP에 와일드카드 출처가 들어갔다", policy)
+
+    example = (REPO_ROOT / "examples" / "view3d_example.html").read_text(encoding="utf-8")
+    check_in(
+        policy,
+        example,
+        "커밋된 3D 예시의 CSP가 생성기와 다르다 (예시가 오래됐거나 손으로 고쳐졌다)",
+    )
 
 
 @regression(
