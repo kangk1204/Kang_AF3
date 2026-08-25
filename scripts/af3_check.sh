@@ -340,16 +340,19 @@ cat <<'GUIDE'
 
   터미널 A - 선점을 끄고 1건만 실행:
     docker run --rm --gpus all \
+      --user $(id -u):$(id -g) -e HOME=/tmp \
       -e XLA_PYTHON_CLIENT_PREALLOCATE=false \
       -e XLA_CLIENT_MEM_FRACTION=1.0 \
-      -v $HOME/public_databases_full:/root/public_databases \
-      -v $HOME/af3_models:/root/af3_models \
-      -v $PWD/vhh_001_in:/root/af3_in \
-      -v $PWD/vhh_001_out:/root/af3_out \
+      -v $HOME/public_databases_full:/af3/db:ro \
+      -v $HOME/af3_models:/af3/models:ro \
+      -v $PWD/vhh_001_in:/af3/in:ro \
+      -v $PWD/vhh_001_out:/af3/out \
       alphafold3 python run_alphafold.py \
-        --json_path=/root/af3_in/<하나만>.json \
-        --model_dir=/root/af3_models --db_dir=/root/public_databases \
-        --output_dir=/root/af3_out
+        --json_path=/af3/in/<하나만>.json \
+        --model_dir=/af3/models --db_dir=/af3/db \
+        --output_dir=/af3/out
+    (--user 가 없으면 결과가 root 소유가 되고, 마운트를 /root 아래 두면
+     non-root 가 못 들어간다. 러너가 하는 것과 같은 조합이다)
 
   터미널 B - 1초마다 실제 사용량 기록:
     nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu \

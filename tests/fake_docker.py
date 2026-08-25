@@ -142,6 +142,8 @@ def parse_docker_args(argv: list[str]) -> dict:
         "af3_flag_values": {},
         "af3_switches": [],
         "name": None,
+        "user": None,
+        "env": {},
         "raw": list(argv),
     }
     index = 0
@@ -156,6 +158,15 @@ def parse_docker_args(argv: list[str]) -> dict:
             index += 2
         elif token == "--name":
             result["name"] = argv[index + 1]
+            index += 2
+        elif token == "--user":
+            # 값(uid:gid)을 이미지로 오인하면 안 된다. 반드시 두 토큰을 소비한다.
+            result["user"] = argv[index + 1]
+            index += 2
+        elif token in ("-e", "--env"):
+            # -e KEY=VALUE 도 두 토큰이다. 안 그러면 VALUE 가 이미지 자리를 차지한다.
+            key, _, value = argv[index + 1].partition("=")
+            result["env"][key] = value
             index += 2
         elif token == "-v":
             parts = argv[index + 1].split(":")
@@ -388,6 +399,8 @@ def main(argv: list[str]) -> int:
             "name": parsed["name"],
             "mode": mode,
             "gpus": parsed["gpus"],
+            "user": parsed.get("user"),
+            "env": parsed.get("env", {}),
             "per_file": "json_path" in flags,
             "flags": sorted(flags),
             "af3_flag_values": parsed["af3_flag_values"],

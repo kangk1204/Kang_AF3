@@ -109,13 +109,20 @@ INFRASTRUCTURE_EXIT_CODES = frozenset({125, 126, 127})
 # SSH 끊김 모두에서 확인). 이름에 PID 를 박아 두어야 나중에 "이 컨테이너를 띄운 실행이
 # 이미 끝났는가" 를 판정하고 --audit/--cleanup 이 안전하게 정리할 수 있다.
 CONTAINER_PREFIX = "af3run_"
+
+
+def container_user() -> str | None:
+    """컨테이너 안 프로세스를 호출한 사용자의 uid:gid 로 돌린다. POSIX 가 아니면 None."""
+    if not hasattr(os, "getuid"):
+        return None
+    return f"{os.getuid()}:{os.getgid()}"
 CONTAINER_NAME_RE = re.compile(
     r"^" + CONTAINER_PREFIX + r"(?P<pid>[0-9]+)_[0-9]+$"
 )
-CONTAINER_INPUT = "/root/af3_in"
-CONTAINER_OUTPUT = "/root/af3_out"
-CONTAINER_MODELS = "/root/af3_models"
-CONTAINER_CACHE = "/root/af3_cache"
+CONTAINER_INPUT = "/af3/in"
+CONTAINER_OUTPUT = "/af3/out"
+CONTAINER_MODELS = "/af3/models"
+CONTAINER_CACHE = "/af3/cache"
 
 
 @dataclass(frozen=True)
@@ -903,6 +910,16 @@ def docker_base(
     command = [*docker_command, "run", "--rm"]
     if container:
         command.extend(("--name", container))
+    user = container_user()
+    if user:
+        # 이것이 없으면 컨테이너가 root 로 쓰고, 사용자는 자기 결과 폴더를 지우지
+        # 못한다 (rm -rf quick_out 이 Permission denied). docker 데몬이 root 라서
+        # sudo 없이 돌려도 똑같이 생긴다. 실제로 그렇게 됐다.
+        # 마운트를 /root 아래 두면 안 된다. 이미지의 /root 는 700 이라 non-root 는
+        # 통과조차 못 한다 (실제로 /root/af3_out 에서 Permission denied). 그래서
+        # 마운트는 전부 /af3/ 아래다. HOME 은 uid 에 passwd 항목이 없어도 쓸 수
+        # 있는 곳으로 고정한다.
+        command.extend(("--user", user, "-e", "HOME=/tmp"))
     if mode != "data":
         command.extend(("--gpus", "all"))
 
@@ -911,7 +928,7 @@ def docker_base(
     db_mounts: list[str] = []
     if mode in {"full", "data"}:
         for index, db_dir in enumerate(db_dirs):
-            container_db = f"/root/af3_db_{index}"
+            container_db = f"/af3/db_{index}"
             db_mounts.append(container_db)
             command.extend(("-v", f"{db_dir}:{container_db}:ro"))
     if mode in {"full", "inference"}:

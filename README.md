@@ -1549,7 +1549,7 @@ ChimeraX 버전은 `palette alphafold`를 0~1 범위로 해석하므로, 생성�
 | AF3 설치 시 python 3.11 이 거부된다 | AF3 가 `requires-python >=3.12` | `conda create -y -n af3 python=3.12` |
 | `/usr/include/zlib.h` 없음, sudo 불가 | 시스템 zlib 개발 헤더가 없다 | `conda install -y -c conda-forge zlib cmake` 후 `export CMAKE_PREFIX_PATH=$CONDA_PREFIX` |
 | 중간에 끊겼는데 어디까지 됐는지 모른다 | | `cat <이름>_work/state.json`, `ls <이름>_out \| wc -l`. 같은 명령을 다시 실행하면 끝난 것은 건너뛴다 |
-| 결과 파일이 root 소유라 지울 수 없다 | `sudo docker` 로 돌렸다 | `sudo chown -R $USER:$USER vhh_001_out` |
+| 결과 파일이 root 소유라 지울 수 없다 | 2026-08-25 이전 러너로 돌렸다. 컨테이너에 `--user` 를 안 넘겨서 docker 데몬(root)이 쓴 파일이 root 소유가 됐다. `sudo docker` 와 무관하게 생긴다 | `sudo chown -R $USER:$USER <결과폴더>` 로 한 번 정리하고 러너를 최신으로 받는다. 지금 러너는 호출한 사용자의 uid:gid 로 컨테이너를 돌려 결과가 본인 소유로 남는다 |
 
 아래 세 항목은 별도 설명이 필요한 문제다.
 

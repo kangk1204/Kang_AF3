@@ -343,6 +343,30 @@ INJECTIONS = [
         'new': '<!-- __ENGINEJS__ 자리다 -->\n<script>__ENGINEJS__</script>',
         'tests': ['test_each_template_placeholder_appears_exactly_once'],
     },
+    {
+        'name': 'preferred 러너에서 --user 를 뺀다',
+        'detail': '컨테이너가 root 로 결과를 써서 사용자가 quick_out 을 못 지운다.',
+        'script': 'run_af3_batch_improved.py',
+        'old': '        command.extend(("--user", user, "-e", "HOME=/tmp"))',
+        'new': '        pass',
+        'tests': ['test_runner_writes_results_as_the_invoking_user'],
+    },
+    {
+        'name': 'legacy 러너에서 --user 를 뺀다',
+        'detail': 'af3run.sh 경로만 결과가 root 소유로 남는다.',
+        'script': 'af3_batch.py',
+        'old': '        cmd += ["--user", user, "-e", "HOME=/tmp"]',
+        'new': '        pass',
+        'tests': ['test_legacy_runner_writes_results_as_the_invoking_user'],
+    },
+    {
+        'name': '마운트를 /root 아래로 되돌린다',
+        'detail': "--user 는 있는데 /root(700) 를 못 지나가 전건 'Permission denied' 로 실패한다.",
+        'script': 'run_af3_batch_improved.py',
+        'old': 'CONTAINER_OUTPUT = "/af3/out"',
+        'new': 'CONTAINER_OUTPUT = "/root/af3_out"',
+        'tests': ['test_container_mounts_are_reachable_by_a_non_root_user'],
+    },
 ]
 
 

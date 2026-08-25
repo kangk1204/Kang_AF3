@@ -129,10 +129,10 @@ DEFAULT_BUCKETS = [128, 256, 384, 512, 768, 1024, 1280, 1536, 2048, 2560,
 
 # 컨테이너 내부 마운트 지점 (연구자 기존 명령과 동일하게 유지)
 C_DB = "/root/public_databases"
-C_MODEL = "/root/af3_models"
-C_IN = "/root/af3_in"
-C_OUT = "/root/af3_out"
-C_CACHE = "/root/af3_cache"
+C_MODEL = "/af3/models"
+C_IN = "/af3/in"
+C_OUT = "/af3/out"
+C_CACHE = "/af3/cache"
 
 
 def csv_safe_cell(value):
@@ -732,6 +732,13 @@ def validate_data_json(path):
 # `docker run` 으로 띄운 컨테이너는 이 프로세스가 죽어도 데몬이 계속 돌린다
 # (Ctrl-C, SIGTERM, SSH 끊김 모두에서 확인). 이름을 붙여 두고 끝날 때 직접 지운다.
 CONTAINER_PREFIX = "af3run_"
+
+
+def container_user():
+    """호출한 사용자의 uid:gid. POSIX 가 아니면 None (--user 를 붙이지 않는다)."""
+    if not hasattr(os, "getuid"):
+        return None
+    return "%d:%d" % (os.getuid(), os.getgid())
 _STARTED_CONTAINERS = []
 _TEARDOWN_DOCKER = []
 
@@ -763,6 +770,11 @@ def build_cmd(args, docker, stage, input_dir, output_dir, buckets,
     cmd = list(docker) + ["run", "--rm"]
     if container:
         cmd += ["--name", container]
+    user = container_user()
+    if user:
+        # 결과를 root 가 아니라 호출한 사용자 소유로 쓴다. 마운트가 /af3/ 아래인 것도
+        # 이 때문이다 (/root 는 700 이라 non-root 가 못 들어간다).
+        cmd += ["--user", user, "-e", "HOME=/tmp"]
 
     if stage != "msa" or args.msa_gpus:
         cmd += ["--gpus", "all"]          # MSA 단계는 GPU가 필요 없다
@@ -791,7 +803,7 @@ def build_cmd(args, docker, stage, input_dir, output_dir, buckets,
     db_mounts = []
     if wants_db:
         for index, db_dir in enumerate(args.db_dirs):
-            container_db = "/root/af3_db_%d" % index
+            container_db = "/af3/db_%d" % index
             db_mounts.append(container_db)
             cmd += ["-v", "%s:%s:ro" % (absp(db_dir), container_db)]
     if wants_model:

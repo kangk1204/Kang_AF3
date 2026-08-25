@@ -153,14 +153,14 @@ def test_stub_reproduces_generator_stop_on_broken_json():
                 "run",
                 "--rm",
                 "-v",
-                f"{workspace.input_dir}:/root/af3_in:ro",
+                f"{workspace.input_dir}:/af3/in:ro",
                 "-v",
-                f"{workspace.output_dir}:/root/af3_out",
+                f"{workspace.output_dir}:/af3/out",
                 "alphafold3",
                 "python",
                 "run_alphafold.py",
-                "--output_dir=/root/af3_out",
-                "--input_dir=/root/af3_in",
+                "--output_dir=/af3/out",
+                "--input_dir=/af3/in",
             ],
             capture_output=True,
             text=True,
@@ -225,7 +225,7 @@ def test_macos_appledouble_sidecar_is_excluded():
             if call.get("call") != "run":
                 continue
             for host, container, _option in call.get("mounts", []):
-                if container == "/root/af3_in":
+                if container == "/af3/in":
                     leftovers = [
                         p.name
                         for p in __import__("pathlib").Path(host).glob("._*")
@@ -430,5 +430,67 @@ def test_data_mode_does_not_request_gpu():
             (workspace.output_dir / "vhh_a" / "vhh_a_data.json").is_file(),
             "_data.json 이 만들어지지 않았다",
         )
+    finally:
+        workspace.cleanup()
+
+
+@regression(
+    item="beginner",
+    prevents="컨테이너가 root 로 결과를 써서 Quick Start 를 따라한 사용자가\n"
+             "rm -rf quick_out 에 실패하고, 문서는 원인을 'sudo docker' 탓으로 잘못 짚는 버그.",
+)
+def test_runner_writes_results_as_the_invoking_user():
+    import os
+
+    workspace = Workspace()
+    try:
+        workspace.write_json("a.json", workspace.monomer("vhh_a"))
+        proc = run_script(RUNNER, default_args(workspace, "--yes"), workspace)
+        check_equal(proc.returncode, 0, f"실행이 실패했다\n{proc.stdout[-1200:]}")
+        runs = [c for c in workspace.stub_calls() if c.get("call") == "run"]
+        check(runs, "docker 를 실행하지 않았다")
+        expected = f"{os.getuid()}:{os.getgid()}"
+        for call in runs:
+            check_equal(
+                call.get("user"),
+                expected,
+                "docker run 에 --user <uid>:<gid> 를 넘기지 않았다 (결과가 root 소유가 된다)",
+            )
+            # --user 값이 이미지 자리를 잡아먹지 않았는지도 본다.
+            check(
+                ":" not in (call.get("image") or ""),
+                "--user 값이 이미지로 잘못 해석됐다",
+                f"image={call.get('image')}",
+            )
+    finally:
+        workspace.cleanup()
+
+
+@regression(
+    item="beginner",
+    prevents="--user 는 넘기면서 마운트를 /root 아래 되돌려, 이미지의 /root(700) 를\n"
+             "non-root 가 통과 못 해 'Failed to create output directory' 로 전건 실패하는 버그.",
+)
+def test_container_mounts_are_reachable_by_a_non_root_user():
+    import os
+    preferred = load_module("run_af3_batch_improved.py")
+    legacy = load_module("af3_batch.py")
+    for name in ("CONTAINER_INPUT", "CONTAINER_OUTPUT", "CONTAINER_MODELS", "CONTAINER_CACHE"):
+        value = getattr(preferred, name)
+        check(not value.startswith("/root"), f"preferred 러너 {name} 이 /root 아래다", value)
+    for name in ("C_MODEL", "C_IN", "C_OUT", "C_CACHE"):
+        value = getattr(legacy, name)
+        check(not value.startswith("/root"), f"legacy 러너 {name} 이 /root 아래다", value)
+    # DB 마운트는 인덱스로 만들어지므로 실제 조립 결과에서 본다.
+    workspace = Workspace()
+    try:
+        workspace.write_json("a.json", workspace.monomer("vhh_a"))
+        proc = run_script(RUNNER, default_args(workspace, "--yes"), workspace)
+        check_equal(proc.returncode, 0, f"실행이 실패했다\n{proc.stdout[-800:]}")
+        for call in [c for c in workspace.stub_calls() if c.get("call") == "run"]:
+            for _host, container, _opt in call["mounts"]:
+                check(not container.startswith("/root"), "docker -v 대상이 /root 아래다", container)
+            check_equal(call.get("env", {}).get("HOME"), "/tmp",
+                        "HOME 을 non-root 가 쓸 수 있는 곳으로 고정하지 않았다")
     finally:
         workspace.cleanup()

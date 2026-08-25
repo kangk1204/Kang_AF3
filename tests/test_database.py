@@ -178,10 +178,10 @@ def test_preferred_runner_preserves_multiple_db_roots():
         runs = [c for c in workspace.stub_calls() if c.get("call") == "run"]
         check(runs, "Docker 실행 기록이 없다")
         mounts = runs[0]["mounts"]
-        db_mounts = [m for m in mounts if "/root/af3_db_" in m[1]]
+        db_mounts = [m for m in mounts if "/af3/db_" in m[1]]
         check_equal(len(db_mounts), 2, "DB root 두 개를 별도 마운트하지 않았다", str(mounts))
         values = runs[0].get("af3_flag_values", {}).get("db_dir", [])
-        check_equal(values, ["/root/af3_db_0", "/root/af3_db_1"], "--db_dir 순서가 보존되지 않았다", str(values))
+        check_equal(values, ["/af3/db_0", "/af3/db_1"], "--db_dir 순서가 보존되지 않았다", str(values))
     finally:
         workspace.cleanup()
 

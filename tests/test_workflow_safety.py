@@ -1410,3 +1410,33 @@ def test_testing_notes_matches_the_registered_mutations():
         "docs/testing_notes.md 에 빠진 재주입이 있다",
         "\n".join(missing[:10]),
     )
+
+
+@regression(
+    item="beginner",
+    prevents="legacy 러너(af3run.sh 경로)만 --user 를 빠뜨려 결과가 root 소유로 남는 버그.",
+)
+def test_legacy_runner_writes_results_as_the_invoking_user():
+    workspace = Workspace()
+    try:
+        workspace.write_json("a.json", workspace.monomer("a"))
+        proc = run_script(
+            "af3_batch.py",
+            [
+                "--input-dir", str(workspace.input_dir),
+                "--output-dir", str(workspace.output_dir),
+                "--db-dir", str(workspace.db_dir),
+                "--model-dir", str(workspace.model_dir),
+                "--docker", "docker",
+                "--stage", "msa",
+            ],
+            workspace,
+        )
+        check_equal(proc.returncode, 0, "legacy MSA 실행이 실패했다", proc.stdout[-1500:])
+        runs = [c for c in workspace.stub_calls() if c.get("call") == "run"]
+        check(runs, "docker 를 실행하지 않았다")
+        expected = f"{os.getuid()}:{os.getgid()}"
+        for call in runs:
+            check_equal(call.get("user"), expected, "legacy 러너가 --user 를 넘기지 않았다")
+    finally:
+        workspace.cleanup()

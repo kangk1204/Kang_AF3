@@ -228,6 +228,10 @@ MSA와 GPU는 서로 다른 자원(CPU 대 GPU)을 쓰므로, **이 둘을 겹�
 이 한 줄이 5.10배의 전부다. 지금 쓰는 명령에서 바꿀 것은 두 곳이다.
 
 ```bash
+> 아래는 당시(2026-08-20) 기록 그대로다. 2026-08-25 이후 러너는 `--user $(id -u):$(id -g)` 를
+> 붙이고 마운트를 `/root` 가 아니라 `/af3/` 아래에 둔다. 이 명령을 그대로 복사하면 결과가
+> root 소유로 남으니 손으로 돌릴 때는 `scripts/af3_check.sh` 가 안내하는 형태를 쓴다.
+
 docker run --rm --gpus all \
   -e XLA_PYTHON_CLIENT_PREALLOCATE=false \
   -v $HOME/public_databases:/root/public_databases \
