@@ -16,6 +16,7 @@ import sys
 from pathlib import Path
 
 from harness import (
+    REPO_ROOT,
     SCRIPTS_DIR,
     Failure,
     Workspace,
@@ -465,4 +466,102 @@ def test_viewer_page_placeholders_survive_target_names_that_look_like_placeholde
             "AF3 구조 보기",
             title_lines[0],
             "타깃명이 <title> 을 갈라놓았다: %s" % label,
+        )
+
+
+@regression(
+    item="reporting",
+    prevents="라이브러리가 CSP 때문에 막혔는데 페이지가 '인터넷/CDN 문제'라고 안내해,\n"
+             "사용자가 방화벽만 뒤지다 진짜 원인을 못 찾는 버그.",
+)
+def test_viewer_failure_message_names_csp_when_csp_is_the_cause():
+    source = (SCRIPTS_DIR / "af3_view3d.py").read_text(encoding="utf-8")
+    page = source.partition("PAGE_TMPL = ")[2].partition('\n"""\n')[0]
+    check(page, "PAGE_TMPL 을 찾지 못했다")
+
+    listener = page.find("securitypolicyviolation")
+    check(listener != -1, "페이지가 CSP 위반을 기록하지 않는다")
+
+    # 위반 기록은 라이브러리를 싣기 전에 걸어야 한다. 뒤에 걸면 정작 막힌 그 로드를
+    # 놓친다 (이 순서가 뒤집히면 안내가 다시 네트워크 탓을 하게 된다).
+    libbody = page.find("__LIBBODY__")
+    check(libbody != -1, "PAGE_TMPL 에 __LIBBODY__ 자리가 없다")
+    check(
+        listener < libbody,
+        "CSP 위반 기록을 라이브러리 로드보다 늦게 건다",
+        "listener=%d libbody=%d" % (listener, libbody),
+    )
+
+    fail_block = page.partition("function af3Fail")[2].partition("\n}")[0]
+    check(fail_block, "af3Fail 을 찾지 못했다")
+    check_in("__af3_csp", fail_block, "실패 안내가 기록된 CSP 위반을 쓰지 않는다")
+    check_in("CSP", fail_block, "실패 안내가 CSP 를 원인으로 이름 붙이지 않는다")
+
+
+@regression(
+    item="reporting",
+    prevents="템플릿 주석이나 안내문에 __LIBBODY__ 같은 자리표시자를 적어,\n"
+             "5MB 라이브러리나 mmCIF 가 페이지에 두 번 들어가는 버그. 오류 없이 통과한다.",
+)
+def test_each_template_placeholder_appears_exactly_once():
+    mod = load_module("af3_view3d.py")
+    for name in ("PAGE_TMPL", "INDEX_TMPL"):
+        template = getattr(mod, name)
+        counts = {}
+        for token in mod.PLACEHOLDER_RE.findall(template):
+            counts[token] = counts.get(token, 0) + 1
+        repeated = sorted(tok for tok, n in counts.items() if n > 1)
+        check(
+            not repeated,
+            "%s 안에서 같은 자리표시자가 여러 번 나온다 (내용이 중복 삽입된다)" % name,
+            ", ".join(repeated),
+        )
+        check(counts, "%s 에 자리표시자가 하나도 없다" % name)
+
+
+@regression(
+    item="reporting",
+    prevents="커밋된 3D 예시가 생성기보다 오래돼, 생성기에서 고친 결함이 예시에는\n"
+             "남아 있는 버그. 예시는 초보자가 제일 먼저 여는 파일이라 조용히 오래된다.",
+)
+def test_committed_viewer_example_matches_the_current_generator_shell():
+    mod = load_module("af3_view3d.py")
+    example = (REPO_ROOT / "examples" / "view3d_example.html").read_text(encoding="utf-8")
+
+    # 자리표시자를 뺀 나머지(껍데기)는 타깃과 무관하게 항상 같아야 한다.
+    # 데이터가 아니라 코드가 낡았는지만 본다.
+    missing = []
+    for segment in mod.PLACEHOLDER_RE.split(mod.PAGE_TMPL):
+        chunk = segment.strip()
+        if len(chunk) < 40:
+            continue
+        if chunk not in example:
+            missing.append(chunk[:160])
+    check(
+        not missing,
+        "커밋된 3D 예시에 현재 생성기의 껍데기가 없다 (예시를 다시 만들어야 한다)",
+        "\n---\n".join(missing[:4]),
+    )
+
+
+@regression(
+    item="reporting",
+    prevents="'시점 초기화' 가 화면만 다시 맞추고 회전은 그대로 두는 버그.\n"
+             "구조를 이상한 각도로 돌려 놓은 사용자는 처음 각도로 못 돌아온다.",
+)
+def test_reset_button_restores_the_first_view_not_just_the_framing():
+    mod = load_module("af3_view3d.py")
+    for name in ("ENGINE_MOLSTAR_JS", "ENGINE_3DMOL_JS"):
+        engine = getattr(mod, name)
+        check_in(
+            "af3InitialView",
+            engine,
+            "%s 가 처음 시점을 저장하지 않는다" % name,
+        )
+        reset = engine.partition("window.af3ResetView = function")[2].partition(";\n")[0]
+        check(reset, "%s 에서 af3ResetView 를 찾지 못했다" % name)
+        check_in(
+            "af3InitialView",
+            reset,
+            "%s 의 시점 초기화가 저장해 둔 처음 시점을 쓰지 않는다" % name,
         )

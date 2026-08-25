@@ -319,6 +319,30 @@ INJECTIONS = [
         "new": """script-src 'unsafe-inline' https://cdn.jsdelivr.net""",
         "tests": ["test_viewer_csp_allows_what_the_molstar_engine_needs"],
     },
+    {
+        'name': 'CSP 위반 기록을 없앤다',
+        'detail': "라이브러리가 CSP 로 막혀도 페이지가 '인터넷 문제'라고만 안내한다. 원인을 못 찾는다.",
+        'script': 'af3_view3d.py',
+        'old': "window.__af3_csp = [];\ndocument.addEventListener('securitypolicyviolation', function(ev){\n  if (window.__af3_csp.length < 8) {\n    window.__af3_csp.push((ev.violatedDirective || 'CSP')\n      + (ev.blockedURI ? ' -> ' + ev.blockedURI : ''));\n  }\n});",
+        'new': 'window.__af3_csp = [];',
+        'tests': ['test_viewer_failure_message_names_csp_when_csp_is_the_cause'],
+    },
+    {
+        'name': '시점 초기화를 화면 맞춤으로 되돌린다',
+        'detail': '돌려 놓은 구조를 처음 각도로 못 되돌린다. 버튼 이름이 하는 일과 다르다.',
+        'script': 'af3_view3d.py',
+        'old': '    window.af3ResetView = function(){\n      // camera.setState() 로는 안 된다. trackball 이 매 프레임 자기 상태를 다시\n      // 얹으므로 무시된다. Mol* 자신이 쓰는 경로로 돌려줘야 한다.\n      if (af3InitialView) {\n        P.canvas3d.requestCameraReset(\n          { snapshot: function(){ return af3InitialView; }, durationMs: 300 });\n      } else {\n        P.canvas3d.requestCameraReset();\n      }\n    };',
+        'new': '    window.af3ResetView = function(){ P.canvas3d.requestCameraReset(); };',
+        'tests': ['test_reset_button_restores_the_first_view_not_just_the_framing'],
+    },
+    {
+        'name': '템플릿 주석에 자리표시자를 적는다',
+        'detail': '__ENGINEJS__ 가 두 번 치환돼 엔진 스크립트가 페이지에 중복으로 들어간다.',
+        'script': 'af3_view3d.py',
+        'old': '<script>__ENGINEJS__</script>',
+        'new': '<!-- __ENGINEJS__ 자리다 -->\n<script>__ENGINEJS__</script>',
+        'tests': ['test_each_template_placeholder_appears_exactly_once'],
+    },
 ]
 
 

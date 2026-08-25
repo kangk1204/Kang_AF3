@@ -1090,7 +1090,37 @@ ENGINE_MOLSTAR_JS = r"""
         cur.components, { color: theme });
       af3MarkButton(mode);
     };
-    window.af3ResetView = function(){ P.canvas3d.requestCameraReset(); };
+    // '시점 초기화' 는 화면을 다시 맞추는 것이 아니라 **처음 각도로 되돌리는** 것이다.
+    // requestCameraReset() 만 부르면 확대와 중심만 맞추고 회전은 그대로 둔다. 이상한
+    // 각도로 돌려 놓은 사용자가 원래대로 못 돌아온다 (실제 Chrome 에서 확인했다).
+    // 그래서 처음 자동 프레이밍이 끝난 시점을 저장해 두고 그것을 복원한다.
+    // 여기서 카메라를 건드리면 안 된다. Mol* 이 구조를 실은 뒤 스스로 화면에 맞추는데,
+    // 그 전에 requestCameraReset() 을 부르면 경계가 아직 없어서 구조가 제대로 안 잡힌다.
+    // 그래서 아무것도 하지 않고, 자동 프레이밍이 '멈춘 뒤' 의 시점만 받아 둔다.
+    // 고정 지연(예: 800ms)으로 찍으면 안 된다. 프레이밍이 아직 진행 중인 카메라를
+    // 집어서, 나중에 그것을 복원하면 구조가 잘려 거의 안 보인다. 실제로 그렇게 됐다.
+    // 그래서 값이 두 번 연속 같아질 때까지 기다린다.
+    var af3InitialView = null;
+    (function captureInitialView(previous, tries){
+      var now = null;
+      try { now = P.canvas3d.camera.getSnapshot(); } catch (e) { now = null; }
+      if (!now) { return; }
+      var key = [].concat(Array.prototype.slice.call(now.position),
+                          Array.prototype.slice.call(now.target),
+                          [now.radius]).join(',');
+      if (key === previous || tries > 40) { af3InitialView = now; return; }
+      setTimeout(function(){ captureInitialView(key, tries + 1); }, 150);
+    })(null, 0);
+    window.af3ResetView = function(){
+      // camera.setState() 로는 안 된다. trackball 이 매 프레임 자기 상태를 다시
+      // 얹으므로 무시된다. Mol* 자신이 쓰는 경로로 돌려줘야 한다.
+      if (af3InitialView) {
+        P.canvas3d.requestCameraReset(
+          { snapshot: function(){ return af3InitialView; }, durationMs: 300 });
+      } else {
+        P.canvas3d.requestCameraReset();
+      }
+    };
     // 검증 스크립트가 잔기별 색 배정을 되읽을 수 있게 손잡이를 남긴다.
     // 화면 동작에는 쓰이지 않는다 (tests/ 와 docs/view3d_notes.md 6-3 참조).
     window.__af3_plugin = P;
@@ -1161,7 +1191,13 @@ ENGINE_3DMOL_JS = r"""
       v.render();
     }
     window.af3SetColor = function(mode){ paint(mode); af3MarkButton(mode); };
-    window.af3ResetView = function(){ v.zoomTo(); v.render(); };
+    // Mol* 경로와 같은 이유다. zoomTo() 는 확대/중심만 맞추고 회전은 그대로 둔다.
+    var af3InitialView = null;
+    window.af3ResetView = function(){
+      if (af3InitialView) { v.setView(af3InitialView); }
+      else { v.zoomTo(); }
+      v.render();
+    };
     // 검증 스크립트용 손잡이 (Mol* 경로와 같은 이유. 화면 동작에는 쓰이지 않는다).
     // 3Dmol 은 colorfunc 결과를 atom.color 에 되쓰지 않으므로, 색을 확인하려면
     // 렌더러가 부르는 이 함수 자체를 불러야 한다.
@@ -1171,6 +1207,7 @@ ENGINE_3DMOL_JS = r"""
     paint('plddt');
     v.zoomTo();
     v.render();
+    try { af3InitialView = v.getView(); } catch (e) { af3InitialView = null; }
     af3MarkButton('plddt');
     af3Ready('3Dmol.js');
   } catch (e) {
@@ -1315,10 +1352,27 @@ function af3Ready(engine){
   window.__af3_engine = engine;
   window.__af3_ready = true;
 }
+// CSP 가 라이브러리를 막으면 우리 코드에는 '전역이 없다' 로만 보인다. 그러면
+// 아래 안내가 네트워크를 탓하고, 사용자는 방화벽만 뒤지게 된다. 실제로 그렇게
+// 한 번 헤맸다. 그래서 위반을 직접 받아 두고 실패 안내에서 원인을 이름 붙인다.
+// 이 등록은 반드시 라이브러리를 싣는 script 보다 앞에 있어야 한다.
+window.__af3_csp = [];
+document.addEventListener('securitypolicyviolation', function(ev){
+  if (window.__af3_csp.length < 8) {
+    window.__af3_csp.push((ev.violatedDirective || 'CSP')
+      + (ev.blockedURI ? ' -> ' + ev.blockedURI : ''));
+  }
+});
 function af3Fail(msg){
   var s = document.getElementById('status');
+  var hint = '__FAILHINT__';
+  if (window.__af3_csp && window.__af3_csp.length) {
+    hint = '<b>원인은 인터넷이 아니라 이 페이지의 보안 정책(CSP)이다.</b><br>'
+      + '막힌 것: ' + window.__af3_csp.slice(0, 3).join(' / ').replace(/</g,'&lt;')
+      + '<br>이 파일이 옛 버전으로 만들어졌을 수 있다. 최신 af3_view3d.py 로 다시 만들어라.';
+  }
   if (s) s.innerHTML = '<div class="bad"><b>구조를 표시하지 못했다.</b><br>'
-    + msg.replace(/</g,'&lt;') + '<br><br>__FAILHINT__</div>';
+    + msg.replace(/</g,'&lt;') + '<br><br>' + hint + '</div>';
   window.__af3_error = msg;
 }
 </script>
