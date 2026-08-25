@@ -244,6 +244,7 @@ A~D는 `--dry-run` 확인 후 JSON을 만들고, E는 제공 JSON의 문법을 �
 | 모든 대상에 같은 항원 추가 | [multi-FASTA 6종](examples/vhh_panel.fasta) + [공통 항원 FASTA](examples/antigen.fasta) | 대상 6개 + lysozyme 1개 |
 | 공통 파트너 N부 추가 | [단일 VHH FASTA](examples/vhh_single.fasta) + [공통 항원 FASTA](examples/antigen.fasta) | 대상 1개 + 반복할 파트너 1개 |
 | 서로 다른 단백질 3종 | [서로 다른 단백질 3사슬 JSON](examples/three_protein_complex.json) | `sequences` 배열의 A, B, C protein |
+| 실제로 결합하는 3사슬 복합체 | [트랜스듀신 헤테로3량체 JSON](examples/gprotein_heterotrimer_1got.json) | PDB 1GOT 의 Gα 350 + Gβ1 340 + Gγ1 73 잔기. 계면이 실제로 잡히는 대조군이다 |
 
 FASTA 예제는 공개 PDB 유래 서열이고, 3사슬 JSON은 입력 형식 확인용 조합이다. 실제 연구
 서열은 같은 형식으로 별도 파일에 준비하며 Git에는 추가하지 않는다.
