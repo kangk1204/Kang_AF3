@@ -852,3 +852,32 @@ def test_image_probe_container_is_named_so_cleanup_can_find_it():
         "프로브 이름이 정리 대상 규칙에 걸리지 않는다",
         f"이름={name} 규칙={mod.CONTAINER_NAME_RE.pattern}",
     )
+
+
+@regression(
+    item="beginner",
+    prevents="GPU 를 이미 다른 AF3 가 선점했는데도 컨테이너를 띄워,\n"
+             "CUDA_ERROR_OUT_OF_MEMORY 와 JAX 역추적만 남기고 죽는 버그.\n"
+             "사용자는 자기 입력이 잘못된 줄 안다.",
+)
+def test_busy_gpu_is_refused_before_starting_a_container():
+    mod = load_module("run_af3_batch_improved.py")
+    check(hasattr(mod, "gpu_busy_reason"), "GPU 선점 여부를 미리 보지 않는다")
+
+    # 다른 실행이 이미 GPU 를 잡고 있다.
+    reason = mod.gpu_busy_reason(others=["af3run_4242_0"], free_mib=300)
+    check(reason, "다른 AF3 가 돌고 있는데 막지 않았다")
+    check_in("af3run_4242_0", reason, "어떤 실행이 GPU 를 쓰는지 알려주지 않는다")
+
+    # 우리 것만 있으면 막지 않는다 (재실행/이어하기).
+    check_equal(mod.gpu_busy_reason(others=[], free_mib=11000), None,
+                "GPU 가 비어 있는데 막았다")
+
+    # 남이 아니라 메모리만 부족한 경우도 잡는다.
+    only_memory = mod.gpu_busy_reason(others=[], free_mib=300)
+    check(only_memory, "여유 메모리가 없는데 막지 않았다")
+    check_in("MiB", only_memory, "얼마나 남았는지 숫자로 말하지 않는다")
+
+    # 메모리를 읽을 수 없는 환경(GPU 없음 등)에서는 막지 않는다.
+    check_equal(mod.gpu_busy_reason(others=[], free_mib=None), None,
+                "GPU 정보를 못 읽었다고 실행을 막았다")

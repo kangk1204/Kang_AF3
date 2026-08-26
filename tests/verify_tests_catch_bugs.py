@@ -383,6 +383,22 @@ INJECTIONS = [
         'new': '        pass',
         'tests': ['test_legacy_runner_also_detects_an_unwritable_cache'],
     },
+    {
+        'name': 'GPU 선점 점검을 없앤다',
+        'detail': '다른 AF3 가 GPU 를 잡고 있어도 컨테이너를 띄워, CUDA_ERROR_OUT_OF_MEMORY 로 죽는다.',
+        'script': 'run_af3_batch_improved.py',
+        'old': '    if others:\n        return (\n            "다른 AF3 실행이 GPU 를 쓰고 있다: "',
+        'new': '    if False:\n        return (\n            "다른 AF3 실행이 GPU 를 쓰고 있다: "',
+        'tests': ['test_busy_gpu_is_refused_before_starting_a_container'],
+    },
+    {
+        'name': 'GPU 여유 메모리 하한 점검을 없앤다',
+        'detail': '남이 GPU 를 쓰는 경우(다른 AF3 가 아닌)를 못 잡는다.',
+        'script': 'run_af3_batch_improved.py',
+        'old': '    if free_mib is not None and free_mib < GPU_FREE_MIB_MIN:',
+        'new': '    if False:',
+        'tests': ['test_busy_gpu_is_refused_before_starting_a_container'],
+    },
 ]
 
 

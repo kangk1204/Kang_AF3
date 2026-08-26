@@ -658,6 +658,51 @@ def list_managed_containers(docker_command: Sequence[str]) -> list[str]:
     ]
 
 
+GPU_FREE_MIB_MIN = 2000
+
+
+def gpu_free_mib() -> int | None:
+    """비어 있는 GPU 메모리(MiB). 읽을 수 없으면 None (GPU 없는 환경 포함)."""
+    if shutil.which("nvidia-smi") is None:
+        return None
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=20, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if proc.returncode != 0:
+        return None
+    values = [int(v) for v in re.findall(r"\d+", proc.stdout)]
+    return max(values) if values else None
+
+
+def gpu_busy_reason(others: Sequence[str], free_mib: int | None) -> str | None:
+    """GPU 를 쓸 수 있는 상태인지 본다. 못 쓰면 사람이 읽을 이유를 돌려준다.
+
+    AF3(JAX)는 GPU 메모리의 약 95%를 먼저 잡는다. 그래서 두 번째 실행은 계산을
+    시작하지도 못하고 CUDA_ERROR_OUT_OF_MEMORY 와 JAX 역추적만 남기고 죽는다.
+    실측: 12288MiB 카드에서 한 실행이 11692MiB 를 점유했고, 겹쳐 띄운 쪽은
+    'no supported devices found for platform CUDA' 로 끝났다. 그 상태를 만들기
+    전에 멈추는 편이 낫다.
+    """
+    if others:
+        return (
+            "다른 AF3 실행이 GPU 를 쓰고 있다: " + ", ".join(sorted(others)) + "\n"
+            "       AF3 는 GPU 메모리를 거의 전부 선점하므로 둘이 같이 돌 수 없다.\n"
+            "       그 실행이 끝난 뒤 다시 시작하라. 상태는 docker ps 로 볼 수 있다.\n"
+            "       그래도 강행하려면 --allow-busy-gpu 를 붙인다."
+        )
+    if free_mib is not None and free_mib < GPU_FREE_MIB_MIN:
+        return (
+            f"GPU 여유 메모리가 {free_mib}MiB 뿐이다 (최소 {GPU_FREE_MIB_MIN}MiB 필요).\n"
+            "       다른 프로그램이 GPU 를 쓰고 있는지 nvidia-smi 로 확인하라.\n"
+            "       그래도 강행하려면 --allow-busy-gpu 를 붙인다."
+        )
+    return None
+
+
 def orphan_containers(docker_command: Sequence[str]) -> list[str]:
     """띄운 실행이 이미 끝난 컨테이너만 고른다.
 
@@ -1213,6 +1258,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--per-file", action="store_true", help="파일마다 컨테이너를 따로 실행")
     parser.add_argument("--no-cache", action="store_true", help="JAX 컴파일 캐시를 사용하지 않음")
+    parser.add_argument("--allow-busy-gpu", action="store_true",
+                        help="다른 AF3 가 GPU 를 쓰고 있어도 강행 (보통은 필요 없다)")
     action_group = parser.add_mutually_exclusive_group()
     action_group.add_argument(
         "--guide", action="store_true", help="초보자용 설명과 현재 경로만 표시하고 종료"
@@ -1628,6 +1675,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     if unsupported_reason is not None:
         print(f"[오류] {unsupported_reason}")
         return 2
+
+    if args.mode != "data" and not args.allow_busy_gpu:
+        mine = {name for name in list_managed_containers(docker_command)
+                if (CONTAINER_NAME_RE.match(name) or (None,))
+                and CONTAINER_NAME_RE.match(name).group("pid") == str(os.getpid())}
+        others = [name for name in list_managed_containers(docker_command) if name not in mine]
+        busy = gpu_busy_reason(others, gpu_free_mib())
+        if busy:
+            print(f"[오류] {busy}")
+            return 2
 
     use_cache = (
         not args.no_cache
