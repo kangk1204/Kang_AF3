@@ -55,9 +55,25 @@ GPU 이름, Driver Version, Memory-Usage 표가 출력되면 다음 단계로 �
 또는 드라이버와 통신할 수 없다는 오류가 나오면 설치기를 실행하지 않고 NVIDIA 드라이버를
 먼저 설정한다. 설치기는 드라이버를 설치하거나 업그레이드하지 않는다.
 
-Google의 현재 가중치 약관을 직접 확인·수락했다면 설치 명령은 아래 한 줄이다. Docker,
-NVIDIA Container Toolkit, 확인된 AF3 소스 커밋으로 빌드한 이미지, 가중치, full DB,
-그림 환경을 설치하고 완료 후 환경을 점검한다.
+설치 전에 모델 가중치 약관을 읽는다.
+
+> **가중치는 어디서 받는가.** 설치기가 자동으로 내려받는다. 따로 신청하거나 승인을
+> 기다릴 필요는 없다. 다만 약관이 **받아서 쓰는 행위 자체를 동의로 본다.** 그래서
+> 아래를 먼저 읽고, 세 가지를 확인한다.
+>
+> [WEIGHTS_TERMS_OF_USE.md (원문)](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)
+>
+> ① 비영리 연구 목적인가 ② 받은 가중치를 남에게 주지 않을 것인가(사내 스토리지,
+> 공유 폴더, 깃 저장소 모두 해당한다) ③ AF3 출력으로 다른 구조예측 모델을 학습시키지
+> 않을 것인가.
+>
+> 세 가지가 맞으면 아래 명령의 `--accept-weights-terms` 가 그 확인을 뜻한다.
+> 내려받은 날짜를 적어 두면 나중에 논문 심사나 기관 감사에서 근거가 된다.
+> 파일은 약 1.1GB 이고 `~/af3_models/af3.bin` 에 놓인다. 손으로 받는 방법과
+> 체크섬은 [3-3](#3-3-모델-가중치-확보)에 있다.
+
+설치 명령은 한 줄이다. Docker, NVIDIA Container Toolkit, 확인된 AF3 소스 커밋으로 빌드한
+이미지, 가중치, full DB, 그림 환경을 설치하고 완료 후 환경을 점검한다.
 
 ```bash
 bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms

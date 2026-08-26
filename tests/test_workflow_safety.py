@@ -125,6 +125,12 @@ def test_markdown_local_links_resolve():
     for shown in ("figures/example_complex_plddt.png", "figures/example_complex_pae.png",
                   "figures/view3d_screenshot.png"):
         check_in(shown, quick_summary, "Quick Start가 실제 결과 그림을 보여 주지 않는다")
+    # 가중치를 어디서 어떻게 받는지 Quick Start 안에서 답해야 한다. 실험 연구자가
+    # --accept-weights-terms 를 붙이기 전에 무엇에 동의하는지 알 수 있어야 한다.
+    check_in("WEIGHTS_TERMS_OF_USE.md", quick_summary,
+             "Quick Start가 가중치 약관 원문을 링크하지 않는다")
+    check_in("설치기가 자동으로 내려받는다", quick_summary,
+             "Quick Start가 가중치를 어디서 받는지 답하지 않는다")
     for input_step in (
         "cp examples/vhh_monomer.json quick_in/",
         "--fasta my_sequences.fasta",
