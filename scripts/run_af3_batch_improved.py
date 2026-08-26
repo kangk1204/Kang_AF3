@@ -728,26 +728,56 @@ def list_managed_containers(docker_command: Sequence[str]) -> list[str]:
 
 
 GPU_FREE_MIB_MIN = 2000
+GPU_FREE_FRACTION_MIN = 0.5
 
 
-def gpu_free_mib() -> int | None:
-    """비어 있는 GPU 메모리(MiB). 읽을 수 없으면 None (GPU 없는 환경 포함)."""
+def gpu_free_floor(total_mib: int | None) -> int:
+    """비어 있어야 하는 최소 메모리.
+
+    고정 2000MiB 는 큰 카드에서 너무 낮다. 12GiB 카드에 2500MiB 만 남아도 통과하는데,
+    AF3 는 카드의 95%를 선점하므로 그 상태로 띄우면 어차피 CUDA 초기화에서 죽는다.
+    그래서 카드 용량의 절반과 2000MiB 중 큰 쪽을 쓴다.
+    """
+    if not total_mib:
+        return GPU_FREE_MIB_MIN
+    return max(GPU_FREE_MIB_MIN, int(total_mib * GPU_FREE_FRACTION_MIN))
+
+
+def gpu_memory_mib() -> tuple[int | None, int | None]:
+    """(비어 있는 MiB, 전체 MiB). 읽을 수 없으면 (None, None).
+
+    카드가 여럿이면 여유가 가장 큰 카드를 본다. 그 카드에서 돌 것이기 때문이다.
+    """
     if shutil.which("nvidia-smi") is None:
-        return None
+        return None, None
     try:
         proc = subprocess.run(
-            ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"],
+            ["nvidia-smi", "--query-gpu=memory.free,memory.total",
+             "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=20, check=False,
         )
     except (OSError, subprocess.TimeoutExpired):
-        return None
+        return None, None
     if proc.returncode != 0:
-        return None
-    values = [int(v) for v in re.findall(r"\d+", proc.stdout)]
-    return max(values) if values else None
+        return None, None
+    # 물어본 것은 "free, total" 두 값이다. 그 형태가 아니면 읽은 값을 믿을 수 없다.
+    # 예전 파서는 아무 줄에서나 앞의 두 숫자를 집어서, 질의를 무시하는 구현
+    # (테스트 스텁 등) 에서 free=0 으로 오인하고 실행을 막았다.
+    best = None
+    for line in proc.stdout.splitlines():
+        if not line.strip():
+            continue
+        fields = [f.strip() for f in line.split(",")]
+        if len(fields) != 2 or not all(f.isdigit() for f in fields):
+            return None, None
+        free, total = int(fields[0]), int(fields[1])
+        if best is None or free > best[0]:
+            best = (free, total)
+    return best if best else (None, None)
 
 
-def gpu_busy_reason(others: Sequence[str], free_mib: int | None) -> str | None:
+def gpu_busy_reason(others: Sequence[str], free_mib: int | None,
+                    total_mib: int | None = None) -> str | None:
     """GPU 를 쓸 수 있는 상태인지 본다. 못 쓰면 사람이 읽을 이유를 돌려준다.
 
     AF3(JAX)는 GPU 메모리의 약 95%를 먼저 잡는다. 그래서 두 번째 실행은 계산을
@@ -763,9 +793,10 @@ def gpu_busy_reason(others: Sequence[str], free_mib: int | None) -> str | None:
             "       그 실행이 끝난 뒤 다시 시작하라. 상태는 docker ps 로 볼 수 있다.\n"
             "       그래도 강행하려면 --allow-busy-gpu 를 붙인다."
         )
-    if free_mib is not None and free_mib < GPU_FREE_MIB_MIN:
+    floor = gpu_free_floor(total_mib)
+    if free_mib is not None and free_mib < floor:
         return (
-            f"GPU 여유 메모리가 {free_mib}MiB 뿐이다 (최소 {GPU_FREE_MIB_MIN}MiB 필요).\n"
+            f"GPU 여유 메모리가 {free_mib}MiB 뿐이다 (최소 {floor}MiB 필요).\n"
             "       다른 프로그램이 GPU 를 쓰고 있는지 nvidia-smi 로 확인하라.\n"
             "       그래도 강행하려면 --allow-busy-gpu 를 붙인다."
         )
@@ -1772,7 +1803,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if (CONTAINER_NAME_RE.match(name) or (None,))
                 and CONTAINER_NAME_RE.match(name).group("pid") == str(os.getpid())}
         others = [name for name in list_managed_containers(docker_command) if name not in mine]
-        busy = gpu_busy_reason(others, gpu_free_mib())
+        free_mib, total_mib = gpu_memory_mib()
+        busy = gpu_busy_reason(others, free_mib, total_mib)
         if busy:
             print(f"[오류] {busy}")
             return 2

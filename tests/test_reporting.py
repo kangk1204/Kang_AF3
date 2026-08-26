@@ -630,3 +630,26 @@ def test_summary_scatter_uses_the_interface_metric_for_complexes():
     check_equal(xs[names.index("nb_1kxv")], 0.18, "섞인 경우에도 복합체는 ipTM 이어야 한다")
     check_equal(xs[names.index("vhh")], 0.9, "섞인 경우 단량체는 pTM 이어야 한다")
     check_in("ipTM", mod.L[key][0], "축 이름이 ipTM 을 언급하지 않는다")
+
+
+@regression(
+    item="reporting",
+    prevents="사슬이 여럿인데 ipTM 이 없는 결과를 단량체처럼 pTM 으로 그려,\n"
+             "계면을 평가하지 못한 건이 좋은 후보로 보이는 버그.\n"
+             "ipTM 이 없다는 것은 '단량체' 가 아니라 '계면을 알 수 없음' 일 수 있다.",
+)
+def test_scatter_does_not_treat_a_multichain_target_as_a_monomer():
+    mod = load_module("af3_visualize.py")
+    rows = [
+        {"name": "복합체인데 ipTM 없음", "ptm": 0.91, "iptm": None,
+         "mean_atom_plddt": 90.0, "n_chain": 2},
+        {"name": "정상 단량체", "ptm": 0.90, "iptm": None,
+         "mean_atom_plddt": 92.0, "n_chain": 1},
+    ]
+    xs, ys, names, key = mod.scatter_metric(rows)
+    check(
+        "복합체인데 ipTM 없음" not in names,
+        "사슬이 여럿인데 ipTM 이 없는 건을 pTM 으로 그렸다",
+        f"그려진 것={names}",
+    )
+    check_in("정상 단량체", names, "진짜 단량체까지 빼 버렸다")

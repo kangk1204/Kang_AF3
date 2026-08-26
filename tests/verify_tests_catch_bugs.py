@@ -395,9 +395,9 @@ INJECTIONS = [
         'name': 'GPU 여유 메모리 하한 점검을 없앤다',
         'detail': '남이 GPU 를 쓰는 경우(다른 AF3 가 아닌)를 못 잡는다.',
         'script': 'run_af3_batch_improved.py',
-        'old': '    if free_mib is not None and free_mib < GPU_FREE_MIB_MIN:',
+        'old': '    if free_mib is not None and free_mib < floor:',
         'new': '    if False:',
-        'tests': ['test_busy_gpu_is_refused_before_starting_a_container'],
+        'tests': ['test_gpu_floor_scales_with_card_size'],
     },
     {
         'name': '요약 산점도를 다시 pTM 으로 되돌린다',
@@ -486,6 +486,30 @@ INJECTIONS = [
         'old': '            die("--ligand-ccd 에 쓸 만한 CCD 코드가 없다: %r" % args.ligand_ccd)',
         'new': '            pass',
         'tests': ['test_prepare_refuses_an_empty_ligand_list'],
+    },
+    {
+        'name': '사슬 여럿 + ipTM 없음을 다시 pTM 으로 그린다',
+        'detail': '계면을 평가 못 한 건이 좋은 후보 자리에 찍힌다.',
+        'script': 'af3_visualize.py',
+        'old': '        elif (r.get("n_chain") or 1) > 1:',
+        'new': '        elif False:',
+        'tests': ['test_scatter_does_not_treat_a_multichain_target_as_a_monomer'],
+    },
+    {
+        'name': 'GPU 문턱을 다시 고정값으로 만든다',
+        'detail': '12GiB 카드에 2500MiB 만 남아도 통과시켜 CUDA 초기화에서 죽는다.',
+        'script': 'run_af3_batch_improved.py',
+        'old': '    return max(GPU_FREE_MIB_MIN, int(total_mib * GPU_FREE_FRACTION_MIN))',
+        'new': '    return GPU_FREE_MIB_MIN',
+        'tests': ['test_gpu_floor_scales_with_card_size'],
+    },
+    {
+        'name': 'nvidia-smi 출력 형식 확인을 없앤다',
+        'detail': '질의를 무시하는 구현에서 free=0 으로 오인해 멀쩡한 실행을 막는다.',
+        'script': 'run_af3_batch_improved.py',
+        'old': '        fields = [f.strip() for f in line.split(",")]\n        if len(fields) != 2 or not all(f.isdigit() for f in fields):\n            return None, None\n        free, total = int(fields[0]), int(fields[1])',
+        'new': '        numbers = [int(v) for v in re.findall(r"\\d+", line)]\n        if len(numbers) < 2:\n            continue\n        free, total = numbers[0], numbers[1]',
+        'tests': ['test_gpu_memory_reading_is_ignored_when_the_output_is_not_what_we_asked_for'],
     },
 ]
 

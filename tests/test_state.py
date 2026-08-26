@@ -1036,3 +1036,59 @@ def test_stage2_does_not_borrow_another_targets_msa():
             good,
             "이름이 맞는 _data.json 을 고르지 못했다",
         )
+
+
+@regression(
+    item="beginner",
+    prevents="GPU 여유 문턱이 2000MiB 로 고정돼, 12GiB 카드에 2500MiB 만 남아도\n"
+             "통과시키는 버그. AF3 는 카드의 95%를 선점하므로 그대로 죽는다.",
+)
+def test_gpu_floor_scales_with_card_size():
+    mod = load_module("run_af3_batch_improved.py")
+    check(hasattr(mod, "gpu_free_floor"), "카드 용량을 고려한 문턱이 없다")
+    check_equal(mod.gpu_free_floor(12288), 6144, "12GiB 카드의 문턱이 절반이 아니다")
+    check_equal(mod.gpu_free_floor(2048), 2000, "작은 카드에서 하한이 무너졌다")
+    check_equal(mod.gpu_free_floor(None), 2000, "용량을 모를 때 기본 하한을 쓰지 않는다")
+
+    # 12GiB 카드에 2500MiB 만 남은 상황은 막아야 한다.
+    reason = mod.gpu_busy_reason(others=[], free_mib=2500, total_mib=12288)
+    check(reason, "큰 카드에 여유가 거의 없는데 통과시켰다")
+    check_in("2500", reason, "얼마나 남았는지 알려주지 않는다")
+
+    # 넉넉하면 막지 않는다.
+    check_equal(
+        mod.gpu_busy_reason(others=[], free_mib=11000, total_mib=12288),
+        None,
+        "GPU 가 비어 있는데 막았다",
+    )
+
+
+@regression(
+    item="beginner",
+    prevents="nvidia-smi 출력을 형식 확인 없이 숫자만 긁어, 질의를 무시하는 구현에서\n"
+             "free=0 으로 오인하고 멀쩡한 실행을 막는 버그.\n"
+             "GPU 상태를 못 읽는 경우와 '비어 있지 않다'는 구분돼야 한다.",
+)
+def test_gpu_memory_reading_is_ignored_when_the_output_is_not_what_we_asked_for():
+    mod = load_module("run_af3_batch_improved.py")
+    import shutil as _shutil
+
+    with tempfile.TemporaryDirectory(prefix="af3_smi_") as td:
+        bin_dir = Path(td)
+        fake = bin_dir / "nvidia-smi"
+        # 질의를 무시하고 사람이 읽는 표를 내보내는 구현
+        fake.write_text(
+            "#!/bin/sh\necho '0, Stub GPU, 999.0, 16384 MiB, 0 MiB, 16384 MiB, 0 %, 9.0'\n",
+            encoding="utf-8",
+        )
+        fake.chmod(0o755)
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = f"{bin_dir}{os.pathsep}{old_path}"
+        try:
+            free, total = mod.gpu_memory_mib()
+        finally:
+            os.environ["PATH"] = old_path
+        check_equal((free, total), (None, None),
+                    "형식이 다른 출력을 값으로 받아들였다")
+        check_equal(mod.gpu_busy_reason([], free, total), None,
+                    "GPU 상태를 못 읽었는데 실행을 막았다")

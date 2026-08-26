@@ -954,6 +954,11 @@ def scatter_metric(rows):
         iptm, ptm = r.get("iptm"), r.get("ptm")
         if iptm is not None:
             x, saw_iptm = iptm, True
+        elif (r.get("n_chain") or 1) > 1:
+            # 사슬이 여럿인데 ipTM 이 없다. '단량체라 값이 없다' 가 아니라 '계면을
+            # 평가하지 못했다' 는 뜻이다. pTM 으로 그리면 계면을 모르는 건이
+            # 오른쪽 위(좋은 후보) 자리에 앉는다. 그래서 아예 그리지 않는다.
+            continue
         elif ptm is not None:
             x, saw_ptm = ptm, True
         else:

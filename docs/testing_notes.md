@@ -169,7 +169,7 @@ python3 tests/verify_tests_catch_bugs.py
 `scripts/` 를 임시 폴더에 복사해 문자열 치환으로 옛 버그를 되살린 뒤, 해당
 테스트만 돌려 실패하는지 확인한다. 원본 저장소는 건드리지 않는다.
 
-### 결과: 재주입 50건, 50건 모두 테스트가 잡았다
+### 결과: 재주입 53건, 53건 모두 테스트가 잡았다
 
 아래 표는 `tests/verify_tests_catch_bugs.py` 의 `INJECTIONS` 그대로다.
 건수가 어긋나면 `test_testing_notes_matches_the_registered_mutations` 가 잡는다.
@@ -214,7 +214,7 @@ python3 tests/verify_tests_catch_bugs.py
 | 캐시 권한 점검에서 하위 폴더를 빼먹는다 | `test_unwritable_jax_cache_is_detected_and_explained` |
 | legacy 러너의 캐시 권한 점검을 없앤다 | `test_legacy_runner_also_detects_an_unwritable_cache` |
 | GPU 선점 점검을 없앤다 | `test_busy_gpu_is_refused_before_starting_a_container` |
-| GPU 여유 메모리 하한 점검을 없앤다 | `test_busy_gpu_is_refused_before_starting_a_container` |
+| GPU 여유 메모리 하한 점검을 없앤다 | `test_gpu_floor_scales_with_card_size` |
 | 요약 산점도를 다시 pTM 으로 되돌린다 | `test_summary_scatter_uses_the_interface_metric_for_complexes` |
 | 래퍼의 스레드 설정 검증을 없앤다 | `test_wrapper_rejects_non_numeric_thread_settings` |
 | 래퍼의 작업 이름 검증을 없앤다 | `test_wrapper_rejects_names_that_escape_the_work_directory` |
@@ -226,6 +226,9 @@ python3 tests/verify_tests_catch_bugs.py
 | stage2 가 폴더 안 첫 _data.json 을 그냥 고르게 한다 | `test_stage2_does_not_borrow_another_targets_msa` |
 | 선정내역 CSV 의 symlink 방어를 없앤다 | `test_stage2_manifest_does_not_follow_a_symlink` |
 | 빈 리간드 목록을 다시 통과시킨다 | `test_prepare_refuses_an_empty_ligand_list` |
+| 사슬 여럿 + ipTM 없음을 다시 pTM 으로 그린다 | `test_scatter_does_not_treat_a_multichain_target_as_a_monomer` |
+| GPU 문턱을 다시 고정값으로 만든다 | `test_gpu_floor_scales_with_card_size` |
+| nvidia-smi 출력 형식 확인을 없앤다 | `test_gpu_memory_reading_is_ignored_when_the_output_is_not_what_we_asked_for` |
 
 ### 역검증이 실제로 잡아낸 것 (이 트랙에서 고친 테스트 3건)
 
@@ -272,7 +275,7 @@ python3 tests/verify_tests_catch_bugs.py
 ## 현재 저장소 버전의 release gate
 
 등록된 테스트는 `--strict`에서 known failure 없이 전부 통과해야 한다. 별도 통합 suite와
-mutation 50건도 전부 통과해야 한다. `.github/workflows/tests.yml`은 Python 3.9, 3.12,
+mutation 53건도 전부 통과해야 한다. `.github/workflows/tests.yml`은 Python 3.9, 3.12,
 3.14에서 `tests/run_all.py`를 실행하고, 3.12 lane은 `requirements.txt`를 설치해
 matplotlib 그림 생성 경로도 실행한다. 실제 Docker/AF3/GPU smoke는 수동 gate다.
 
