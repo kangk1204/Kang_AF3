@@ -55,6 +55,8 @@ MSA 검색, 실제 추론, VRAM 사용량, ranking score 의 물리적 의미. �
 ------------------------------------------------
 AF3_STUB_LOG        호출 내역을 JSON Lines 로 기록할 경로
 AF3_STUB_GPU_FAIL   --gpus 를 붙인 run 을 실패시킨다 (컨테이너가 GPU 를 못 보는 상황)
+AF3_STUB_JAX_CPU    컨테이너 안 JAX 가 cpu 백엔드로 떨어진 상황
+AF3_STUB_JAX_FAIL   컨테이너 안 JAX 초기화 자체가 실패하는 상황
 AF3_STUB_FAIL_AT    N번째 작업에서 _data.json 만 쓰고 중단 (추론 중 끊김 재현)
 AF3_STUB_FAIL_NAMES 이 정규화 이름들에서 중단 (쉼표 구분)
 AF3_STUB_EXIT       중단 시 종료코드 (기본 1)
@@ -350,6 +352,16 @@ def main(argv: list[str]) -> int:
                   "driver \"nvidia\" with capabilities: [[gpu]].", file=sys.stderr)
             return 125
         print("Stub NVIDIA GPU, 16384 MiB, 999.0")
+        return 0
+    if any("import jax" in a for a in argv):
+        if os.environ.get("AF3_STUB_JAX_CPU"):
+            # 드라이버/CUDA 조합이 어긋나 JAX 가 CPU 로 떨어진 상황
+            print("cpu")
+            return 0
+        if os.environ.get("AF3_STUB_JAX_FAIL"):
+            print("RuntimeError: Unable to initialize backend 'cuda'", file=sys.stderr)
+            return 1
+        print("gpu")
         return 0
     if "jackhmmer" in argv and "-h" in argv:
         print("HMMER 3.4 stub\n  --seq_limit <n> : truncate hits")

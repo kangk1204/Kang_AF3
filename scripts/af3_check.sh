@@ -160,6 +160,22 @@ if [ -n "$DOCKER" ]; then
       printf '%s\n' "$GPU_IN_CONTAINER" | head -5 | sed 's/^/         /'
     fi
     echo
+    # 컨테이너가 GPU 장치를 보는 것과 JAX 가 그 위에서 도는 것은 또 다르다.
+    # 드라이버/CUDA 조합이 어긋나면 nvidia-smi 는 되는데 JAX 가 CPU 로 떨어진다.
+    # 그 상태로 배치를 돌리면 추론이 몇십 배 느려지거나 그대로 죽는다.
+    echo "[측정] 컨테이너 안에서 JAX 가 GPU 를 잡는가:"
+    if JAX_BACKEND="$($DOCKER run --rm --gpus all --entrypoint python3 "$IMAGE" -c \
+          'import jax; print(jax.default_backend()); assert jax.devices()' 2>&1)"; then
+      printf '%s\n' "$JAX_BACKEND" | tail -3 | sed 's/^/         /'
+      if ! printf '%s' "$JAX_BACKEND" | grep -qw gpu; then
+        fail "JAX 가 GPU 대신 다른 백엔드를 쓴다. 드라이버와 CUDA 조합을 확인하라."
+      fi
+    else
+      fail "컨테이너 안에서 JAX 를 초기화하지 못했다. 아래 출력을 확인하라."
+      printf '%s\n' "$JAX_BACKEND" | tail -5 | sed 's/^/         /'
+    fi
+    echo
+
     echo "[측정] 이 이미지의 run_alphafold.py 가 지원하는 주요 플래그 (실제 --help 에서 추출):"
     HELP_TXT="$($DOCKER run --rm "$IMAGE" python run_alphafold.py --help 2>&1)"
     for f in input_dir json_path output_dir buckets num_diffusion_samples num_recycles \

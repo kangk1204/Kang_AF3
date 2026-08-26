@@ -1654,3 +1654,36 @@ def test_environment_check_fails_when_container_cannot_see_the_gpu():
         )
     finally:
         workspace.cleanup()
+
+
+@regression(
+    item="check",
+    prevents="컨테이너가 GPU 장치를 보는 것과 JAX 가 그 위에서 도는 것은 다르다.\n"
+             "드라이버/CUDA 조합이 어긋나면 nvidia-smi 는 되는데 JAX 가 CPU 로 떨어지고,\n"
+             "그 상태로 배치를 돌리면 추론이 몇십 배 느려지거나 그대로 죽는다.",
+)
+def test_environment_check_fails_when_jax_does_not_reach_the_gpu():
+    for mode, label in (("AF3_STUB_JAX_CPU", "CPU 로 떨어진 경우"),
+                        ("AF3_STUB_JAX_FAIL", "초기화가 실패한 경우")):
+        workspace = Workspace()
+        try:
+            env = dict(os.environ)
+            env["PATH"] = str(make_stub_bin(workspace.root)) + os.pathsep + env.get("PATH", "")
+            env["AF3_DOCKER"] = "docker"
+            env["AF3_DB_DIR"] = str(workspace.db_dir)
+            env["AF3_MODEL_DIR"] = str(workspace.model_dir)
+            env["AF3_MODEL_SHA256"] = (
+                "121b85224e4474eb6de00bf17f0acde299569ac8ed4e13220c7b88c01192ad8d")
+            env[mode] = "1"
+            proc = subprocess.run(
+                ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
+                cwd=workspace.root, env=env, capture_output=True, text=True, timeout=300,
+            )
+            check(
+                proc.returncode != 0,
+                f"JAX 가 GPU 를 못 쓰는데 환경 점검이 통과했다 ({label})",
+                (proc.stdout + proc.stderr)[-500:],
+            )
+            check_in("JAX", proc.stdout, f"JAX 를 이유로 들지 않았다 ({label})")
+        finally:
+            workspace.cleanup()

@@ -527,6 +527,14 @@ INJECTIONS = [
         'new': '      : "컨테이너 GPU 실패를 무시한다"',
         'tests': ['test_environment_check_fails_when_container_cannot_see_the_gpu'],
     },
+    {
+        'name': 'JAX 백엔드 확인을 없앤다',
+        'detail': 'nvidia-smi 는 되는데 JAX 가 CPU 로 떨어진 상태를 통과시킨다.',
+        'script': 'af3_check.sh',
+        'old': '        fail "JAX 가 GPU 대신 다른 백엔드를 쓴다. 드라이버와 CUDA 조합을 확인하라."',
+        'new': '        : "무시한다"',
+        'tests': ['test_environment_check_fails_when_jax_does_not_reach_the_gpu'],
+    },
 ]
 
 
