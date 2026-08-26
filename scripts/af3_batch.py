@@ -919,8 +919,11 @@ def collect_msa_outputs(msa_raw, msa_store):
         if is_sidecar(p.name):
             continue
         target = msa_store / p.name
-        if target.exists() and target.stat().st_size >= p.stat().st_size:
-            continue
+        # 크기로 판단하면 안 된다. 이번 실행이 방금 만든 결과가 항상 옳다.
+        # 옛 파일이 더 크다는 이유로 남기면, 서열이나 DB 가 바뀐 뒤에도 옛 MSA 와
+        # 템플릿이 추론에 들어간다. 그것을 크기로는 구분할 수 없다.
+        if target.is_symlink():
+            target.unlink()
         shutil.copy2(p, target)
         moved += 1
     return moved
@@ -1266,7 +1269,10 @@ def main(argv=None):
 
     output_dir.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
-    lock_path = work / ".af3_batch.lock"
+    # 잠금은 두 실행이 실제로 다투는 것을 보호해야 한다. work 는 실행마다 다를 수
+    # 있지만 output-dir 은 공유된다. work 를 잠그면 --work 를 달리한 두 실행이
+    # 같은 결과 트리에 동시에 쓴다.
+    lock_path = output_dir / ".af3_batch.lock"
     lock_flags = os.O_RDWR | os.O_CREAT
     if hasattr(os, "O_NOFOLLOW"):
         lock_flags |= os.O_NOFOLLOW

@@ -78,9 +78,14 @@ echo "       자동값 min(논리 CPU 수/2, 8)은 이 저장소의 과거 측�
 head1 "2. GPU / 드라이버"
 # -----------------------------------------------------------------------------
 if command -v nvidia-smi >/dev/null 2>&1; then
+  # 바이너리가 있다고 드라이버가 도는 것은 아니다. 파이프로 넘기면 뒤의 sed 가
+  # 성공해서 nvidia-smi 의 종료코드가 묻힌다. 그래서 먼저 따로 실행해 본다.
+  if ! GPU_SUMMARY="$(nvidia-smi --query-gpu=index,name,driver_version,memory.total,memory.used,memory.free,utilization.gpu,compute_cap --format=csv 2>&1)"; then
+    fail "nvidia-smi 는 있으나 실행에 실패했다 (드라이버 문제). 아래 출력을 확인하라."
+    printf '%s\n' "$GPU_SUMMARY" | sed 's/^/         /'
+  else
   echo "[측정] nvidia-smi 요약:"
-  nvidia-smi --query-gpu=index,name,driver_version,memory.total,memory.used,memory.free,utilization.gpu,compute_cap \
-             --format=csv 2>/dev/null | sed 's/^/         /'
+  printf '%s\n' "$GPU_SUMMARY" | sed 's/^/         /'
   echo
   echo "[측정] 현재 GPU를 점유 중인 프로세스:"
   nvidia-smi --query-compute-apps=pid,process_name,used_memory --format=csv 2>/dev/null | sed 's/^/         /'
@@ -90,6 +95,7 @@ if command -v nvidia-smi >/dev/null 2>&1; then
   echo "       XLA_CLIENT_MEM_FRACTION=0.95 로 설정되어 있어서, 프로세스가 시작하는 순간"
   echo "       실제 사용량과 무관하게 VRAM의 95%를 선점(preallocate)한다. 실사용량을 보려면"
   echo "       아래 7번 항목의 방법으로 선점을 끄고 다시 측정해야 한다."
+  fi
 else
   fail "nvidia-smi 를 찾을 수 없다. NVIDIA 드라이버가 설치되지 않았거나 PATH에 없다."
 fi

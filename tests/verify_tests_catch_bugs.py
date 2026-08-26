@@ -439,6 +439,30 @@ INJECTIONS = [
         'new': '                if not is_complete(output_dir / job.output_name, job.output_name, args.mode)',
         'tests': ['test_changed_input_is_not_mistaken_for_a_finished_result'],
     },
+    {
+        'name': 'legacy MSA 보관소를 크기 비교로 되돌린다',
+        'detail': '옛 MSA 가 더 크면 새 결과를 버려, 바뀐 서열에 옛 MSA 를 쓴다.',
+        'script': 'af3_batch.py',
+        'old': '        if target.is_symlink():\n            target.unlink()\n        shutil.copy2(p, target)',
+        'new': '        if target.exists() and target.stat().st_size >= p.stat().st_size:\n            continue\n        shutil.copy2(p, target)',
+        'tests': ['test_legacy_msa_store_does_not_keep_a_stale_result'],
+    },
+    {
+        'name': 'legacy 잠금을 work-dir 로 되돌린다',
+        'detail': '--work 가 다른 두 실행이 같은 결과 트리에 동시에 쓴다.',
+        'script': 'af3_batch.py',
+        'old': '    lock_path = output_dir / ".af3_batch.lock"',
+        'new': '    lock_path = work / ".af3_batch.lock"',
+        'tests': ['test_legacy_lock_protects_the_output_directory'],
+    },
+    {
+        'name': 'nvidia-smi 종료코드 검사를 없앤다',
+        'detail': "드라이버가 고장 나도 환경 점검이 '모두 통과' 로 끝난다.",
+        'script': 'af3_check.sh',
+        'old': '  if ! GPU_SUMMARY="$(nvidia-smi --query-gpu=index,name,driver_version,memory.total,memory.used,memory.free,utilization.gpu,compute_cap --format=csv 2>&1)"; then',
+        'new': '  if false; then',
+        'tests': ['test_environment_check_fails_when_nvidia_smi_cannot_run'],
+    },
 ]
 
 

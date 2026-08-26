@@ -956,3 +956,52 @@ def test_unchanged_input_is_still_skipped():
         )
     finally:
         workspace.cleanup()
+
+
+@regression(
+    item="provenance",
+    prevents="legacy MSA 보관소가 '기존 파일이 더 크면 새 것을 버린다'로 동작해,\n"
+             "서열이나 DB 가 바뀐 뒤에도 옛 MSA·템플릿이 추론에 쓰이는 버그.",
+)
+def test_legacy_msa_store_does_not_keep_a_stale_result():
+    mod = load_module("af3_batch.py")
+    with tempfile.TemporaryDirectory(prefix="af3_msa_store_") as td:
+        root = Path(td)
+        raw = root / "raw"
+        store = root / "store"
+        (raw / "vhh_a").mkdir(parents=True)
+        store.mkdir()
+
+        # 보관소에 옛 결과가 이미 있고, 새 결과가 더 작다 (서열이 짧아졌거나 MSA 가 얕다).
+        stale = store / "vhh_a_data.json"
+        stale.write_text(json.dumps({"msa": "old" * 100}), encoding="utf-8")
+        fresh = raw / "vhh_a" / "vhh_a_data.json"
+        fresh.write_text(json.dumps({"msa": "new"}), encoding="utf-8")
+
+        mod.collect_msa_outputs(raw, store)
+        kept = json.loads(stale.read_text(encoding="utf-8"))
+        check_equal(
+            kept.get("msa"),
+            "new",
+            "새로 계산한 MSA 를 버리고 옛 결과를 남겼다 (크기 비교로 판단했다)",
+        )
+
+
+@regression(
+    item="9",
+    prevents="legacy 러너가 공유 대상인 output-dir 이 아니라 work-dir 을 잠가,\n"
+             "서로 다른 work 를 쓰는 두 실행이 같은 결과 트리에 동시에 쓰는 버그.",
+)
+def test_legacy_lock_protects_the_output_directory():
+    mod = load_module("af3_batch.py")
+    import inspect
+
+    source = inspect.getsource(mod.main)
+    pos = source.find("lock_path")
+    check(pos >= 0, "legacy 러너에 잠금이 없다")
+    window = source[pos : pos + 200]
+    check(
+        "output_dir" in window,
+        "잠금이 공유 대상인 output-dir 을 보호하지 않는다",
+        window[:160],
+    )

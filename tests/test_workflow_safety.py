@@ -1551,3 +1551,47 @@ def test_wrapper_rejects_names_that_escape_the_work_directory():
                 proc.stdout + proc.stderr,
                 f"이름이 왜 거부됐는지 알려주지 않는다 (이름={bad!r})",
             )
+
+
+@regression(
+    item="check",
+    prevents="af3_check.sh 가 nvidia-smi 바이너리 존재만 확인해,\n"
+             "드라이버가 고장 나 실행이 실패해도 '모두 통과' 로 끝나는 버그.\n"
+             "파이프 뒤의 sed 가 성공하면 producer 의 종료코드가 묻힌다.",
+)
+def test_environment_check_fails_when_nvidia_smi_cannot_run():
+    workspace = Workspace()
+    try:
+        bin_dir = make_stub_bin(workspace.root)
+        # 존재하지만 항상 실패하는 nvidia-smi (드라이버 고장). 나머지는 완전한 stub
+        # 환경이므로, 진단이 실패한다면 원인은 이것 하나뿐이다.
+        broken = bin_dir / "nvidia-smi"
+        broken.write_text(
+            "#!/bin/sh\necho 'could not communicate with the NVIDIA driver' >&2\nexit 9\n",
+            encoding="utf-8",
+        )
+        broken.chmod(0o755)
+
+        env = dict(os.environ)
+        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
+        env["AF3_DOCKER"] = "docker"
+        env["AF3_DB_DIR"] = str(workspace.db_dir)
+        env["AF3_MODEL_DIR"] = str(workspace.model_dir)
+        env["AF3_MODEL_SHA256"] = (
+            "121b85224e4474eb6de00bf17f0acde299569ac8ed4e13220c7b88c01192ad8d")
+        proc = subprocess.run(
+            ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
+            cwd=workspace.root, env=env, capture_output=True, text=True, timeout=300,
+        )
+        check(
+            proc.returncode != 0,
+            "nvidia-smi 가 실패하는데 환경 점검이 통과했다",
+            (proc.stdout + proc.stderr)[-600:],
+        )
+        check_in(
+            "실행에 실패했다",
+            proc.stdout,
+            "드라이버 실행 실패를 이유로 들지 않았다",
+        )
+    finally:
+        workspace.cleanup()
