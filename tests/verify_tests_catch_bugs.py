@@ -423,6 +423,22 @@ INJECTIONS = [
         'new': '  __never_matches__)',
         'tests': ['test_wrapper_rejects_names_that_escape_the_work_directory'],
     },
+    {
+        'name': '완료 판정에서 provenance 비교를 없앤다',
+        'detail': '서열이 바뀌어도 같은 이름이면 옛 결과를 완료로 본다.',
+        'script': 'run_af3_batch_improved.py',
+        'old': '    return provenance_mismatch(result_dir, job_output_name, record)',
+        'new': '    return None',
+        'tests': ['test_changed_input_is_not_mistaken_for_a_finished_result'],
+    },
+    {
+        'name': '잠금 뒤 재확인만 provenance 를 무시한다',
+        'detail': "선정에서는 다시 계산 대상인데 잠금 뒤 '이미 끝났다'로 되돌아간다.",
+        'script': 'run_af3_batch_improved.py',
+        'old': '                if needs_run(output_dir, job.output_name, args.mode, provenance[job.output_name])',
+        'new': '                if not is_complete(output_dir / job.output_name, job.output_name, args.mode)',
+        'tests': ['test_changed_input_is_not_mistaken_for_a_finished_result'],
+    },
 ]
 
 

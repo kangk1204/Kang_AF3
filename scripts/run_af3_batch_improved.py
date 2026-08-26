@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import fcntl
+import hashlib
 import json
 import os
 import re
@@ -277,6 +278,74 @@ def nonempty_file(path: Path) -> bool:
         return not path.is_symlink() and path.is_file() and path.stat().st_size > 0
     except OSError:
         return False
+
+
+PROVENANCE_SUFFIX = "_af3run_provenance.json"
+PROVENANCE_VERSION = 1
+
+
+def provenance_path(result_dir: Path, output_name: str) -> Path:
+    return result_dir / f"{output_name}{PROVENANCE_SUFFIX}"
+
+
+def job_provenance(job_file: Path, mode: str, db_dirs: Sequence[Path],
+                   model_dir: Path, image: str) -> dict:
+    """이 결과가 '무엇으로부터' 나왔는지 적는다.
+
+    이름만 같으면 완료로 보던 것이 문제였다. 서열을 고치고 같은 이름으로 다시
+    돌리면 옛 구조가 새 결과로 보고된다. 그래서 다음 실행이 같은 조건인지 비교할
+    수 있도록 입력과 설정을 함께 남긴다.
+    """
+    digest = hashlib.sha256(job_file.read_bytes()).hexdigest()
+    return {
+        "provenance_version": PROVENANCE_VERSION,
+        "input_sha256": digest,
+        "input_file": job_file.name,
+        "mode": mode,
+        "db_dirs": [str(Path(d).expanduser()) for d in db_dirs],
+        "model_dir": str(Path(model_dir).expanduser()),
+        "image": image,
+    }
+
+
+def write_provenance(result_dir: Path, output_name: str, record: dict) -> None:
+    try:
+        result_dir.mkdir(parents=True, exist_ok=True)
+        provenance_path(result_dir, output_name).write_text(
+            json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        print(f"[경고] provenance 기록을 남기지 못했습니다: {exc}")
+
+
+def needs_run(output_dir: Path, job_output_name: str, mode: str, record: dict) -> str | None:
+    """다시 계산해야 하면 그 이유를, 아니면 None 을 준다.
+
+    완료 판정이 두 곳에 흩어져 있으면 한쪽만 provenance 를 보게 되어, 잠금 획득 뒤
+    재확인에서 "이미 끝났다" 로 되돌아간다. 실제로 그렇게 한 번 틀렸다.
+    """
+    result_dir = output_dir / job_output_name
+    if not is_complete(result_dir, job_output_name, mode):
+        return "결과물 없음"
+    return provenance_mismatch(result_dir, job_output_name, record)
+
+
+def provenance_mismatch(result_dir: Path, output_name: str, record: dict) -> str | None:
+    """옛 결과가 지금 조건과 다른지 본다. 기록이 없으면 판단하지 않는다(None)."""
+    path = provenance_path(result_dir, output_name)
+    if not path.is_file():
+        return None
+    try:
+        stored = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return "provenance 기록을 읽을 수 없다"
+    for key, label in (("input_sha256", "입력 JSON 내용"), ("mode", "실행 모드"),
+                       ("db_dirs", "데이터베이스 경로"), ("model_dir", "모델 폴더"),
+                       ("image", "도커 이미지")):
+        if stored.get(key) != record.get(key):
+            return label
+    return None
 
 
 def is_complete(result_dir: Path, output_name: str, mode: str = "full") -> bool:
@@ -1594,11 +1663,33 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"   - {name!r} <- {files}")
         return 2
 
-    pending = [
-        job
+    provenance = {
+        job.output_name: job_provenance(
+            job.json_file, args.mode, db_dirs, model_dir, args.image)
         for job in jobs
-        if not is_complete(output_dir / job.output_name, job.output_name, args.mode)
-    ]
+    }
+    pending = []
+    changed = []
+    unverifiable = []
+    for job in jobs:
+        reason = needs_run(output_dir, job.output_name, args.mode, provenance[job.output_name])
+        if reason:
+            pending.append(job)
+            if reason != "결과물 없음":
+                changed.append((job.output_name, reason))
+        elif not provenance_path(output_dir / job.output_name, job.output_name).is_file():
+            unverifiable.append(job.output_name)
+    if changed:
+        print(f"\n[상태] 입력이 바뀌었거나 설정이 달라진 {len(changed)}건은 다시 계산합니다.")
+        for name, reason in changed[:10]:
+            print(f"   - {name}: {reason} 이(가) 지난 실행과 다릅니다")
+        if len(changed) > 10:
+            print(f"   ... 외 {len(changed) - 10}건")
+    if unverifiable:
+        print(f"\n[주의] {len(unverifiable)}건은 provenance 기록이 없어 지난 실행과 같은 "
+              "입력인지 확인할 수 없습니다.")
+        print("       이 기록 이전 버전으로 만든 결과입니다. 완료로 보고 건너뜁니다.")
+        print("       입력이 바뀐 적이 있다면 해당 결과 폴더를 지우고 다시 실행하십시오.")
     print(
         f"\n[상태] 모드={args.mode}, JSON {len(jobs)}개 중 "
         f"완료 {len(jobs) - len(pending)}개, 미완료 {len(pending)}개."
@@ -1715,7 +1806,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             pending = [
                 job
                 for job in pending
-                if not is_complete(output_dir / job.output_name, job.output_name, args.mode)
+                if needs_run(output_dir, job.output_name, args.mode, provenance[job.output_name])
             ]
             if not pending:
                 print("[완료] 잠금 대기 중 다른 실행이 모든 작업을 끝냈습니다.")
@@ -1786,6 +1877,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     except OSError as exc:
         print(f"[오류] 파일 준비 또는 결과 보존 중 오류가 발생했습니다: {exc}")
         return 1
+
+    # 이번에 끝난 것에 한해 provenance 를 남긴다. 다음 실행이 같은 입력·설정인지
+    # 비교할 근거가 여기서 생긴다. 실패한 건에는 남기지 않는다.
+    for job in pending:
+        if is_complete(output_dir / job.output_name, job.output_name, args.mode):
+            write_provenance(
+                output_dir / job.output_name,
+                job.output_name,
+                provenance[job.output_name],
+            )
 
     completed = sum(
         is_complete(output_dir / job.output_name, job.output_name, args.mode)

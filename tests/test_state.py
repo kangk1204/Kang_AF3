@@ -502,9 +502,22 @@ def test_pending_list_is_rechecked_after_acquiring_lock():
     recheck_pos = source.find("pending = [", lock_pos)
     check(lock_pos >= 0, "main 에 output lock 이 없다")
     check(recheck_pos > lock_pos, "잠금 획득 뒤 pending 재판정이 없다")
+    # 어떤 함수로 판정하는지는 구현 사정이다. 지켜야 하는 것은 잠금 안쪽에서
+    # 결과 폴더를 다시 보고 결정한다는 것, 그리고 바깥과 같은 기준을 쓴다는 것이다.
+    window = source[recheck_pos : recheck_pos + 400]
     check(
-        "is_complete(output_dir / job.output_name" in source[recheck_pos : recheck_pos + 400],
-        "잠금 안쪽 재판정이 정식 완료 기준을 쓰지 않는다",
+        "needs_run(" in window or "is_complete(" in window,
+        "잠금 안쪽 재판정이 완료 여부를 다시 보지 않는다",
+        window[:200],
+    )
+    outer_pos = source.find("pending = []")
+    if outer_pos < 0:
+        outer_pos = source.find("pending = [")
+    outer = source[outer_pos : outer_pos + 400]
+    check(
+        ("needs_run(" in outer) == ("needs_run(" in window),
+        "잠금 바깥과 안쪽이 서로 다른 완료 기준을 쓴다",
+        f"바깥={outer[:120]!r}\n안쪽={window[:120]!r}",
     )
 
 
@@ -881,3 +894,65 @@ def test_busy_gpu_is_refused_before_starting_a_container():
     # 메모리를 읽을 수 없는 환경(GPU 없음 등)에서는 막지 않는다.
     check_equal(mod.gpu_busy_reason(others=[], free_mib=None), None,
                 "GPU 정보를 못 읽었다고 실행을 막았다")
+
+
+@regression(
+    item="provenance",
+    prevents="같은 이름이면 서열이 바뀌어도 옛 결과를 완료로 보고 건너뛰는 버그.\n"
+             "서열을 고쳐 다시 돌린 사용자가 옛 구조를 새 결과로 보고한다.\n"
+             "과학 데이터 무결성 문제다.",
+)
+def test_changed_input_is_not_mistaken_for_a_finished_result():
+    workspace = Workspace()
+    try:
+        # 1회차: 어떤 서열로 끝까지 돌린다.
+        workspace.write_json("a.json", workspace.monomer("vhh_a"))
+        first = run_script(RUNNER, default_args(workspace, "--yes"), workspace)
+        check_equal(first.returncode, 0, f"1회차 실행이 실패했다\n{first.stdout[-800:]}")
+        runs_before = len([c for c in workspace.stub_calls() if c.get("call") == "run"])
+        check(runs_before, "1회차에 docker 를 부르지 않았다")
+
+        # 2회차: 같은 이름, 다른 서열. 옛 결과를 재사용하면 안 된다.
+        changed = workspace.monomer("vhh_a")
+        changed["sequences"][0]["protein"]["sequence"] += "WWWW"
+        workspace.write_json("a.json", changed)
+        workspace.stub_log.write_text("", encoding="utf-8")
+        second = run_script(RUNNER, default_args(workspace, "--yes"), workspace)
+        runs_after = [c for c in workspace.stub_calls() if c.get("call") == "run"]
+        check(
+            runs_after,
+            "서열이 바뀌었는데 다시 계산하지 않고 옛 결과를 완료로 처리했다",
+            second.stdout[-900:],
+        )
+        check_in(
+            "입력이 바뀌었",
+            second.stdout,
+            "무엇이 달라져서 다시 도는지 알려주지 않는다",
+        )
+        check_equal(second.returncode, 0, f"2회차 실행이 실패했다\n{second.stdout[-800:]}")
+    finally:
+        workspace.cleanup()
+
+
+@regression(
+    item="provenance",
+    prevents="입력이 그대로인데도 매번 다시 계산해 2000건 배치가 끝나지 않는 버그.\n"
+             "provenance 검사를 넣다가 반대로 과하게 만드는 것을 막는다.",
+)
+def test_unchanged_input_is_still_skipped():
+    workspace = Workspace()
+    try:
+        workspace.write_json("a.json", workspace.monomer("vhh_a"))
+        first = run_script(RUNNER, default_args(workspace, "--yes"), workspace)
+        check_equal(first.returncode, 0, "1회차 실행이 실패했다")
+
+        workspace.stub_log.write_text("", encoding="utf-8")
+        second = run_script(RUNNER, default_args(workspace, "--yes"), workspace)
+        check_equal(second.returncode, 0, "2회차 실행이 실패했다")
+        check_equal(
+            [c for c in workspace.stub_calls() if c.get("call") == "run"],
+            [],
+            "입력이 그대로인데 다시 계산했다",
+        )
+    finally:
+        workspace.cleanup()

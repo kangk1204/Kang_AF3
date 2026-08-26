@@ -176,6 +176,13 @@ python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 > 이 상황을 감지해 종료코드 2 로 멈추고 어느 실행이 GPU 를 쓰는지 알려준다.
 > 큰 GPU 라 정말 겹쳐 돌리려면 `--allow-busy-gpu` 를 붙인다.
 
+> **입력을 고치면 다시 계산한다.** 결과 폴더마다
+> `<타깃>_af3run_provenance.json` 이 함께 생기고, 거기에 입력 JSON 의 SHA-256,
+> 실행 모드, DB 경로, 모델 폴더, 도커 이미지가 적힌다. 다음 실행에서 이 값이 하나라도
+> 다르면 그 건은 완료로 보지 않고 다시 돌린다. 무엇이 달라졌는지도 알려 준다.
+> 2026-08-26 이전에 만든 결과에는 이 기록이 없어 지난 입력과 같은지 확인할 수 없다.
+> 그런 건은 완료로 보고 건너뛰되 실행할 때마다 몇 건인지 알려 준다.
+
 배치 실행이 끝나면 `quick_out/vhh_7mfv_1/`에 구조와 신뢰도 파일이 생긴다.
 정상 완료되면 `quick_summary.csv`에 `vhh_7mfv_1` 한 줄이 들어가고,
 `quick_figures/`에는 pLDDT/PAE 그림이, `quick_viewer/index.html`에는 회전할 수 있는
