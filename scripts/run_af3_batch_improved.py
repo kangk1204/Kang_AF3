@@ -111,6 +111,32 @@ INFRASTRUCTURE_EXIT_CODES = frozenset({125, 126, 127})
 CONTAINER_PREFIX = "af3run_"
 
 
+def cache_dir_problem(cache_dir: Path) -> str | None:
+    """JAX 캐시를 컨테이너가 쓸 수 있는지 본다. 못 쓰면 사람이 읽을 이유를 돌려준다.
+
+    2026-08-25 이전 러너는 컨테이너를 root 로 돌려서 캐시 하위 폴더가 root 소유로
+    남았다. 지금은 --user 로 돌리므로 그 폴더에 못 쓰고, AF3 는 죽지는 않지만
+    PERMISSION_DENIED 를 수천 줄 뱉는다. 상위 폴더만 봐서는 안 잡힌다 - 문제는
+    항상 하위(xla_gpu_per_fusion_autotune_cache_dir)에 있다.
+    """
+    if not cache_dir.exists():
+        return None
+    targets = [cache_dir]
+    try:
+        targets.extend(child for child in cache_dir.iterdir() if child.is_dir())
+    except OSError as exc:
+        return f"JAX 캐시 폴더를 읽을 수 없다: {cache_dir} ({exc})"
+    for path in targets:
+        if not os.access(path, os.W_OK | os.X_OK):
+            return (
+                f"JAX 캐시에 쓸 수 없다: {path}\n"
+                f"       예전 러너가 root 로 만든 캐시가 남아 있으면 이렇게 된다.\n"
+                f"       고치려면: sudo chown -R $USER:$USER {cache_dir}\n"
+                f"       또는 --cache-dir 로 다른 폴더를 쓰거나 --no-cache 로 끈다."
+            )
+    return None
+
+
 def container_user() -> str | None:
     """컨테이너 안 프로세스를 호출한 사용자의 uid:gid 로 돌린다. POSIX 가 아니면 None."""
     if not hasattr(os, "getuid"):
@@ -119,6 +145,16 @@ def container_user() -> str | None:
 CONTAINER_NAME_RE = re.compile(
     r"^" + CONTAINER_PREFIX + r"(?P<pid>[0-9]+)_[0-9]+$"
 )
+
+
+def probe_container_name() -> str:
+    """이미지 확인용 컨테이너 이름.
+
+    --rm 을 붙여도 시간초과로 docker 클라이언트가 죽으면 컨테이너는 Created 로
+    남는다. 이름이 없으면 --audit 이 찾지도, --cleanup 이 지우지도 못한다.
+    실행용과 같은 규칙(af3run_<pid>_<n>)을 쓰되 순번은 0 자리를 피해 999 로 둔다.
+    """
+    return "%s%d_999" % (CONTAINER_PREFIX, os.getpid())
 CONTAINER_INPUT = "/af3/in"
 CONTAINER_OUTPUT = "/af3/out"
 CONTAINER_MODELS = "/af3/models"
@@ -845,6 +881,8 @@ def probe_flags(
         *docker_command,
         "run",
         "--rm",
+        "--name",
+        probe_container_name(),
         image,
         "python",
         "run_alphafold.py",
@@ -1025,6 +1063,9 @@ def run_one_by_one(
             had_failure = True
             reason = f"종료코드 {returncode}" if returncode != 0 else "필수 결과물 누락"
             print(f"[경고] {job.json_file.name} 실패: {reason}")
+            print("       같은 GPU 에서 AF3 를 두 개 이상 동시에 돌리면 이렇게 죽을 수 "
+                  "있습니다.")
+            print("       다른 실행이 있는지: docker ps    (한 번에 하나만 돌리십시오)")
         if returncode in INFRASTRUCTURE_EXIT_CODES:
             print("[오류] Docker 실행 환경 오류이므로 반복 재시도를 중단합니다.")
             return True
@@ -1593,6 +1634,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         and args.mode != "data"
         and "jax_compilation_cache_dir" in supported
     )
+    if use_cache:
+        problem = cache_dir_problem(cache_dir)
+        if problem:
+            # 죽이지는 않는다. 캐시는 속도를 위한 것이고, 없어도 결과는 같다.
+            print(f"[경고] {problem}")
+            print("       이번 실행은 캐시 없이 진행한다 (첫 입력이 느려진다).")
+            use_cache = False
     if use_cache:
         try:
             cache_dir.mkdir(parents=True, exist_ok=True)

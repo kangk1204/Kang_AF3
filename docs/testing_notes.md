@@ -169,7 +169,7 @@ python3 tests/verify_tests_catch_bugs.py
 `scripts/` 를 임시 폴더에 복사해 문자열 치환으로 옛 버그를 되살린 뒤, 해당
 테스트만 돌려 실패하는지 확인한다. 원본 저장소는 건드리지 않는다.
 
-### 결과: 재주입 35건, 35건 모두 테스트가 잡았다
+### 결과: 재주입 37건, 37건 모두 테스트가 잡았다
 
 아래 표는 `tests/verify_tests_catch_bugs.py` 의 `INJECTIONS` 그대로다.
 건수가 어긋나면 `test_testing_notes_matches_the_registered_mutations` 가 잡는다.
@@ -211,6 +211,8 @@ python3 tests/verify_tests_catch_bugs.py
 | preferred 러너에서 --user 를 뺀다 | `test_runner_writes_results_as_the_invoking_user` |
 | legacy 러너에서 --user 를 뺀다 | `test_legacy_runner_writes_results_as_the_invoking_user` |
 | 마운트를 /root 아래로 되돌린다 | `test_container_mounts_are_reachable_by_a_non_root_user` |
+| 캐시 권한 점검에서 하위 폴더를 빼먹는다 | `test_unwritable_jax_cache_is_detected_and_explained` |
+| legacy 러너의 캐시 권한 점검을 없앤다 | `test_legacy_runner_also_detects_an_unwritable_cache` |
 
 ### 역검증이 실제로 잡아낸 것 (이 트랙에서 고친 테스트 3건)
 
@@ -234,7 +236,7 @@ python3 tests/verify_tests_catch_bugs.py
 ## 현재 저장소 버전의 release gate
 
 등록된 테스트는 `--strict`에서 known failure 없이 전부 통과해야 한다. 별도 통합 suite와
-mutation 35건도 전부 통과해야 한다. `.github/workflows/tests.yml`은 Python 3.9, 3.12,
+mutation 37건도 전부 통과해야 한다. `.github/workflows/tests.yml`은 Python 3.9, 3.12,
 3.14에서 `tests/run_all.py`를 실행하고, 3.12 lane은 `requirements.txt`를 설치해
 matplotlib 그림 생성 경로도 실행한다. 실제 Docker/AF3/GPU smoke는 수동 gate다.
 

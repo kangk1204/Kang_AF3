@@ -71,6 +71,20 @@ full DB를 아직 받지 않을 때는 `bash scripts/install_af3_ubuntu.sh`만 �
 
 설치가 끝나면 저장소의 단량체 JSON으로 1건을 실행한다.
 
+> **이 단계는 `--full` 설치를 마친 상태를 전제한다.** 아래 명령은 `~/public_databases_full`
+> 을 읽는다. 1단계에서 `--full` 없이 core 모드로만 설치했다면 그 폴더가 없어서
+> `FAIL source DB directory does not exist` 로 멈춘다. 그 경우 먼저 아래를 끝내고 온다.
+>
+> ```bash
+> bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
+> ```
+>
+> 지금 설치 상태가 어떤지 모르겠으면 이것으로 확인한다. 없으면 종료코드 1 이다.
+>
+> ```bash
+> python3 scripts/af3_db.py verify --db-dir ~/public_databases_full
+> ```
+
 **먼저 MSA overlay를 만든다.** full DB를 그대로 쓰면 이 예제 1건이 **34.8분** 걸린다.
 overlay는 MSA용 FASTA 7종만 앞에서 잘라 둔 약 2GB 사본이고, 만드는 데 1분이 안 걸린다.
 같은 예제가 **52.6초**로 끝난다. 40배 차이다.
@@ -143,6 +157,10 @@ python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 >없을 수 있다. 진행 여부는 다른 터미널에서 `docker ps` 로 확인한다.
 > 중간에 멈춰야 하면 Ctrl-C를 쓴다. 러너가 자기 컨테이너를 정리한다.
 > 터미널이 강제로 닫혀 컨테이너가 남았다면 `--cleanup` 이 찾아서 정리한다.
+>
+> **한 번에 하나만 돌린다.** 같은 GPU 에서 AF3 배치를 두 개 겹쳐 띄우면 뒤에 오는
+> 작업이 이유 없이 종료코드 1 로 죽을 수 있다 (실제로 겪었다. 단독으로 다시 돌리면
+> 같은 입력이 65초에 끝났다). 시작 전에 `docker ps` 로 확인한다.
 
 배치 실행이 끝나면 `quick_out/vhh_7mfv_1/`에 구조와 신뢰도 파일이 생긴다.
 정상 완료되면 `quick_summary.csv`에 `vhh_7mfv_1` 한 줄이 들어가고,
@@ -178,6 +196,22 @@ WD40 반복 계열이라 어느 조각에서도 동족체가 많이 나온다. V
 아니고, 양쪽 다 `C_계면실패` 로 옳게 버린 것이다. 진짜 복합체에서 등급이 같았던
 것은 1GOT 한 건이다. 네 건으로 규칙을 만들기엔 적으므로 아래는 "이 네 건에서
 성립한 것" 으로 읽어야 한다.
+
+**overlay 의 ipTM 은 낮게도, 높게도 나온다.** 나노바디 복합체 10건을 overlay 로 훑고
+그중 경계 근처 3건을 full DB 로 다시 돌린 결과다.
+
+| 타깃 | overlay ipTM | full DB ipTM | 등급 |
+|---|---|---|---|
+| `nb_1kxt` | 0.59 | **0.20** | C_계면실패 = C_계면실패 |
+| `nb_1kxv` | 0.18 | 0.15 | C_계면실패 = C_계면실패 |
+| `cplx_4krl` | 0.13 | 0.13 | C_계면실패 = C_계면실패 |
+
+`nb_1kxt` 는 overlay 가 **0.39 높게** 나왔다. 얕은 MSA 가 계면을 과대평가한 것이다.
+앞의 VHH-항원 복합체에서는 반대로 overlay 가 0.05 낮았다. 즉 방향이 일정하지 않으므로
+**overlay 의 ipTM 은 크든 작든 그대로 믿을 수 없다.**
+
+한편 지금까지 대조한 복합체 7건에서 **집계기 등급이 뒤집힌 적은 없다.** 거르는
+용도로는 그래서 쓸 만하다.
 
 정리하면 이렇다. **집계 CSV 의 `MSA_unpaired깊이` 열을 본다.** overlay 로 돌렸는데
 수백 이상이면 full DB 와 거의 같은 답이 나왔고, 한 자리~열 자리면 계면 지표
@@ -1550,6 +1584,7 @@ ChimeraX 버전은 `palette alphafold`를 0~1 범위로 해석하므로, 생성�
 | AF3 설치 시 python 3.11 이 거부된다 | AF3 가 `requires-python >=3.12` | `conda create -y -n af3 python=3.12` |
 | `/usr/include/zlib.h` 없음, sudo 불가 | 시스템 zlib 개발 헤더가 없다 | `conda install -y -c conda-forge zlib cmake` 후 `export CMAKE_PREFIX_PATH=$CONDA_PREFIX` |
 | 중간에 끊겼는데 어디까지 됐는지 모른다 | | `cat <이름>_work/state.json`, `ls <이름>_out \| wc -l`. 같은 명령을 다시 실행하면 끝난 것은 건너뛴다 |
+| JAX 캐시에서 `PERMISSION_DENIED` 가 수천 줄 나온다 | 예전 러너(root 컨테이너)가 만든 `~/af3_cache` 가 남아 있다. 지금 러너는 호출한 사용자로 돌아서 그 폴더에 못 쓴다 | `sudo chown -R $USER:$USER ~/af3_cache`. 러너가 이 상황을 감지하면 경고를 띄우고 캐시 없이 계속 진행한다(결과는 같고 첫 입력만 느려진다) |
 | 결과 파일이 root 소유라 지울 수 없다 | 2026-08-25 이전 러너로 돌렸다. 컨테이너에 `--user` 를 안 넘겨서 docker 데몬(root)이 쓴 파일이 root 소유가 됐다. `sudo docker` 와 무관하게 생긴다 | `sudo chown -R $USER:$USER <결과폴더>` 로 한 번 정리하고 러너를 최신으로 받는다. 지금 러너는 호출한 사용자의 uid:gid 로 컨테이너를 돌려 결과가 본인 소유로 남는다 |
 
 아래 세 항목은 별도 설명이 필요한 문제다.

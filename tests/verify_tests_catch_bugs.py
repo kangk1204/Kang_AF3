@@ -367,6 +367,22 @@ INJECTIONS = [
         'new': 'CONTAINER_OUTPUT = "/root/af3_out"',
         'tests': ['test_container_mounts_are_reachable_by_a_non_root_user'],
     },
+    {
+        'name': '캐시 권한 점검에서 하위 폴더를 빼먹는다',
+        'detail': '상위만 보고 통과시켜, root 가 만든 하위 캐시에서 PERMISSION_DENIED 가 계속 난다.',
+        'script': 'run_af3_batch_improved.py',
+        'old': '        targets.extend(child for child in cache_dir.iterdir() if child.is_dir())',
+        'new': '        pass',
+        'tests': ['test_unwritable_jax_cache_is_detected_and_explained'],
+    },
+    {
+        'name': 'legacy 러너의 캐시 권한 점검을 없앤다',
+        'detail': 'af3run.sh 경로만 옛 캐시에서 로그가 수천 줄 쏟아진다.',
+        'script': 'af3_batch.py',
+        'old': '        targets.extend(c for c in d.iterdir() if c.is_dir())',
+        'new': '        pass',
+        'tests': ['test_legacy_runner_also_detects_an_unwritable_cache'],
+    },
 ]
 
 

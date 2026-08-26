@@ -734,6 +734,25 @@ def validate_data_json(path):
 CONTAINER_PREFIX = "af3run_"
 
 
+def cache_dir_problem(cache_dir):
+    """JAX 캐시를 컨테이너가 쓸 수 있는지 본다 (improved 러너와 같은 이유)."""
+    d = Path(cache_dir)
+    if not d.exists():
+        return None
+    targets = [d]
+    try:
+        targets.extend(c for c in d.iterdir() if c.is_dir())
+    except OSError as exc:
+        return "JAX 캐시 폴더를 읽을 수 없다: %s (%s)" % (d, exc)
+    for path in targets:
+        if not os.access(path, os.W_OK | os.X_OK):
+            return ("JAX 캐시에 쓸 수 없다: %s\n"
+                    "       예전 러너가 root 로 만든 캐시가 남아 있으면 이렇게 된다.\n"
+                    "       고치려면: sudo chown -R $USER:$USER %s\n"
+                    "       또는 --cache-dir 로 다른 폴더를 쓴다." % (path, d))
+    return None
+
+
 def container_user():
     """호출한 사용자의 uid:gid. POSIX 가 아니면 None (--user 를 붙이지 않는다)."""
     if not hasattr(os, "getuid"):
@@ -1203,6 +1222,11 @@ def main(argv=None):
 
     if args.cache_dir:
         args.cache_dir = str(Path(args.cache_dir).expanduser())
+        problem = cache_dir_problem(args.cache_dir)
+        if problem:
+            log("경고: " + problem)
+            log("      이번 실행은 캐시 없이 진행한다 (첫 입력이 느려진다).")
+            args.cache_dir = None
     db_values = args.db_dir or [
         os.environ.get("AF3_DB_DIR", str(Path.home() / "public_databases_full"))
     ]

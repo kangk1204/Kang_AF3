@@ -778,3 +778,77 @@ def test_runner_names_containers_and_reports_orphans():
             )
         finally:
             workspace.cleanup()
+
+
+@regression(
+    item="beginner",
+    prevents="예전 러너(root 컨테이너)가 만든 JAX 캐시가 남아 있으면, --user 로 바뀐 뒤\n"
+             "컨테이너가 그 안에 못 써서 PERMISSION_DENIED 가 쏟아지는 버그.\n"
+             "사용자는 원인을 알 수 없고, 로그만 수천 줄 늘어난다.",
+)
+def test_unwritable_jax_cache_is_detected_and_explained():
+    mod = load_module("run_af3_batch_improved.py")
+    check(hasattr(mod, "cache_dir_problem"), "캐시 쓰기 가능 여부를 점검하지 않는다")
+    with tempfile.TemporaryDirectory(prefix="af3_cache_perm_") as td:
+        root = Path(td)
+        good = root / "ok"
+        good.mkdir()
+        check_equal(mod.cache_dir_problem(good), None, "쓸 수 있는 캐시를 문제로 봤다")
+
+        # 예전 root 컨테이너가 남긴 하위 폴더를 흉내낸다: 상위는 쓸 수 있고
+        # 하위만 못 쓴다. 상위만 검사하면 놓치는 바로 그 형태다.
+        bad = root / "legacy"
+        sub = bad / "xla_gpu_per_fusion_autotune_cache_dir"
+        sub.mkdir(parents=True)
+        sub.chmod(0o555)
+        try:
+            problem = mod.cache_dir_problem(bad)
+            check(problem, "하위 폴더가 읽기전용인데 문제로 보지 않았다")
+            check_in(str(sub), problem, "어느 폴더가 문제인지 알려주지 않는다")
+            check_in("chown", problem, "고치는 방법을 알려주지 않는다")
+        finally:
+            sub.chmod(0o755)
+
+
+@regression(
+    item="beginner",
+    prevents="improved 러너만 캐시 권한을 점검하고 legacy(af3run.sh 경로)는 그대로 두어,\n"
+             "같은 상황에서 legacy 만 PERMISSION_DENIED 를 쏟는 버그.",
+)
+def test_legacy_runner_also_detects_an_unwritable_cache():
+    mod = load_module("af3_batch.py")
+    check(hasattr(mod, "cache_dir_problem"), "legacy 러너가 캐시 권한을 점검하지 않는다")
+    with tempfile.TemporaryDirectory(prefix="af3_cache_legacy_") as td:
+        root = Path(td)
+        ok = root / "ok"
+        ok.mkdir()
+        check_equal(mod.cache_dir_problem(str(ok)), None, "쓸 수 있는 캐시를 문제로 봤다")
+        bad = root / "legacy"
+        sub = bad / "xla_gpu_per_fusion_autotune_cache_dir"
+        sub.mkdir(parents=True)
+        sub.chmod(0o555)
+        try:
+            problem = mod.cache_dir_problem(str(bad))
+            check(problem, "하위 폴더가 읽기전용인데 문제로 보지 않았다")
+            check_in("chown", problem, "고치는 방법을 알려주지 않는다")
+        finally:
+            sub.chmod(0o755)
+
+
+@regression(
+    item="beginner",
+    prevents="이미지 확인 프로브가 이름 없이 컨테이너를 만들어, 시간초과로 죽으면\n"
+             "Created 상태로 남고 --audit/--cleanup 이 찾지도 지우지도 못하는 버그.",
+)
+def test_image_probe_container_is_named_so_cleanup_can_find_it():
+    mod = load_module("run_af3_batch_improved.py")
+    import inspect
+    src = inspect.getsource(mod.probe_flags)
+    check_in("--name", src, "이미지 확인 프로브가 컨테이너에 이름을 붙이지 않는다")
+    check_in("probe_container_name", src, "프로브 이름을 정해진 규칙으로 만들지 않는다")
+    name = mod.probe_container_name()
+    check(
+        mod.CONTAINER_NAME_RE.match(name),
+        "프로브 이름이 정리 대상 규칙에 걸리지 않는다",
+        f"이름={name} 규칙={mod.CONTAINER_NAME_RE.pattern}",
+    )
