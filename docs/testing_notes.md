@@ -169,7 +169,7 @@ python3 tests/verify_tests_catch_bugs.py
 `scripts/` 를 임시 폴더에 복사해 문자열 치환으로 옛 버그를 되살린 뒤, 해당
 테스트만 돌려 실패하는지 확인한다. 원본 저장소는 건드리지 않는다.
 
-### 결과: 재주입 53건, 53건 모두 테스트가 잡았다
+### 결과: 재주입 54건, 54건 모두 테스트가 잡았다
 
 아래 표는 `tests/verify_tests_catch_bugs.py` 의 `INJECTIONS` 그대로다.
 건수가 어긋나면 `test_testing_notes_matches_the_registered_mutations` 가 잡는다.
@@ -229,6 +229,7 @@ python3 tests/verify_tests_catch_bugs.py
 | 사슬 여럿 + ipTM 없음을 다시 pTM 으로 그린다 | `test_scatter_does_not_treat_a_multichain_target_as_a_monomer` |
 | GPU 문턱을 다시 고정값으로 만든다 | `test_gpu_floor_scales_with_card_size` |
 | nvidia-smi 출력 형식 확인을 없앤다 | `test_gpu_memory_reading_is_ignored_when_the_output_is_not_what_we_asked_for` |
+| stage2 내보내기 전 스키마 검사를 없앤다 | `test_stage2_output_passes_the_runner_validation` |
 
 ### 역검증이 실제로 잡아낸 것 (이 트랙에서 고친 테스트 3건)
 
@@ -275,7 +276,7 @@ python3 tests/verify_tests_catch_bugs.py
 ## 현재 저장소 버전의 release gate
 
 등록된 테스트는 `--strict`에서 known failure 없이 전부 통과해야 한다. 별도 통합 suite와
-mutation 53건도 전부 통과해야 한다. `.github/workflows/tests.yml`은 Python 3.9, 3.12,
+mutation 54건도 전부 통과해야 한다. `.github/workflows/tests.yml`은 Python 3.9, 3.12,
 3.14에서 `tests/run_all.py`를 실행하고, 3.12 lane은 `requirements.txt`를 설치해
 matplotlib 그림 생성 경로도 실행한다. 실제 Docker/AF3/GPU smoke는 수동 gate다.
 

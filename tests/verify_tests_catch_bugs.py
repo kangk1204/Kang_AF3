@@ -511,6 +511,14 @@ INJECTIONS = [
         'new': '        numbers = [int(v) for v in re.findall(r"\\d+", line)]\n        if len(numbers) < 2:\n            continue\n        free, total = numbers[0], numbers[1]',
         'tests': ['test_gpu_memory_reading_is_ignored_when_the_output_is_not_what_we_asked_for'],
     },
+    {
+        'name': 'stage2 내보내기 전 스키마 검사를 없앤다',
+        'detail': 'stage2 가 성공이라 한 JSON 을 러너가 거부한다.',
+        'script': 'af3_stage2.py',
+        'old': '        problem = validate_fold_job(item["obj"])',
+        'new': '        problem = None',
+        'tests': ['test_stage2_output_passes_the_runner_validation'],
+    },
 ]
 
 

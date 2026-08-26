@@ -474,6 +474,118 @@ def parse_seeds(spec: str) -> list[int]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# 입력 검증 (run_af3_batch_improved.py 와 같은 규칙)
+#
+# 여기서 통과시킨 JSON 을 러너가 거부하면 사용자는 어느 쪽 말을 믿어야 할지
+# 알 수 없다. 그래서 러너와 같은 검증을 쓴다. 두 곳이 갈라지면
+# test_stage2_output_passes_the_runner_validation 이 잡는다.
+# ---------------------------------------------------------------------------
+TOP_LEVEL_KEYS = frozenset(
+    {
+        "name",
+        "modelSeeds",
+        "sequences",
+        "dialect",
+        "version",
+        "bondedAtomPairs",
+        "userCCD",
+        "userCCDPath",
+    }
+)
+KNOWN_FLAGS = frozenset(
+    {
+        "json_path",
+        "input_dir",
+        "output_dir",
+        "model_dir",
+        "db_dir",
+        "run_data_pipeline",
+        "run_inference",
+        "jax_compilation_cache_dir",
+    }
+)
+INFRASTRUCTURE_EXIT_CODES = frozenset({125, 126, 127})
+# 컨테이너 이름 규칙: <접두사><러너 PID>_<순번>.
+# `docker run` 으로 띄운 컨테이너는 러너가 죽어도 데몬이 계속 돌린다 (Ctrl-C, SIGTERM,
+# SSH 끊김 모두에서 확인). 이름에 PID 를 박아 두어야 나중에 "이 컨테이너를 띄운 실행이
+# 이미 끝났는가" 를 판정하고 --audit/--cleanup 이 안전하게 정리할 수 있다.
+CONTAINER_PREFIX = "af3run_"
+
+
+def _valid_seed(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 0 <= value <= 2**32 - 1
+    )
+
+
+def validate_fold_job(obj: object) -> str | None:
+    """Validate the AF3 job fields that can otherwise abort a whole directory run."""
+
+    if not isinstance(obj, dict):
+        return (
+            "최상위가 객체(dict)가 아닙니다. AlphaFold Server의 list 형식은 "
+            "이 재개형 배치 스크립트에서 지원하지 않습니다"
+        )
+    unknown_top = sorted(set(obj) - TOP_LEVEL_KEYS)
+    if unknown_top:
+        return "AF3 가 모르는 최상위 키가 있습니다: " + ", ".join(unknown_top)
+    if obj.get("dialect") != "alphafold3":
+        return "dialect 는 'alphafold3' 이어야 합니다"
+    version = obj.get("version")
+    if not isinstance(version, int) or isinstance(version, bool) or version not in {1, 2, 3, 4}:
+        return "version 은 1, 2, 3, 4 중 하나여야 합니다"
+    seeds = obj.get("modelSeeds")
+    if not isinstance(seeds, list) or not seeds or not all(_valid_seed(seed) for seed in seeds):
+        return "modelSeeds 는 비어 있지 않은 32-bit unsigned integer 목록이어야 합니다"
+    sequences = obj.get("sequences")
+    if not isinstance(sequences, list) or not sequences:
+        return "sequences 는 비어 있지 않은 목록이어야 합니다"
+    allowed_kinds = {"protein", "rna", "dna", "ligand"}
+    seen_ids: set[str] = set()
+    for index, entry in enumerate(sequences, 1):
+        if not isinstance(entry, dict):
+            return f"sequences {index}번째 항목은 객체여야 합니다"
+        kinds = [key for key in entry if key in allowed_kinds]
+        if len(kinds) != 1:
+            return f"sequences {index}번째 항목은 protein/rna/dna/ligand 중 정확히 하나여야 합니다"
+        unknown_entry = sorted(set(entry) - allowed_kinds)
+        if unknown_entry:
+            return f"sequences {index}번째 항목에 모르는 키가 있습니다: {', '.join(unknown_entry)}"
+        body = entry[kinds[0]]
+        if not isinstance(body, dict):
+            return f"sequences {index}번째 {kinds[0]} 값은 객체여야 합니다"
+        ids = body.get("id")
+        valid_ids = (
+            isinstance(ids, str)
+            and bool(ids)
+            or isinstance(ids, list)
+            and bool(ids)
+            and all(isinstance(value, str) and value for value in ids)
+        )
+        if not valid_ids:
+            return f"sequences {index}번째 id 는 비어 있지 않은 문자열 또는 문자열 목록이어야 합니다"
+        id_values = [ids] if isinstance(ids, str) else ids
+        for chain_id in id_values:
+            if not chain_id.isalpha() or not chain_id.isascii() or chain_id.upper() != chain_id:
+                return f"sequences {index}번째 id={chain_id!r} 는 대문자 영문자만 허용됩니다"
+            if chain_id in seen_ids:
+                return f"중복 chain id 가 있습니다: {chain_id}"
+            seen_ids.add(chain_id)
+        if kinds[0] in {"protein", "rna", "dna"}:
+            sequence = body.get("sequence")
+            if not isinstance(sequence, str) or not sequence:
+                return f"sequences {index}번째 {kinds[0]} sequence 가 비어 있습니다"
+        else:
+            has_ccd = isinstance(body.get("ccdCodes"), list) and bool(body.get("ccdCodes"))
+            has_smiles = isinstance(body.get("smiles"), str) and bool(body.get("smiles"))
+            if has_ccd == has_smiles:
+                return f"sequences {index}번째 ligand 는 ccdCodes 또는 smiles 중 정확히 하나가 필요합니다"
+    return None
+
+
 def build_one(src_json: Path, *, seeds, name_suffix, do_strip, json_version):
     """원본 JSON 을 읽어 2단계용으로 고친 dict 와 진단 정보를 돌려준다."""
     try:
@@ -832,6 +944,10 @@ def main(argv=None) -> int:
         if os.path.lexists(path) and not args.overwrite:
             collisions.append(fname)
             continue
+        problem = validate_fold_job(item["obj"])
+        if problem:
+            die("2단계로 만든 JSON 이 AF3 스키마를 어긴다 (%s): %s"
+                % (path.name, problem))
         if not atomic_write_json(path, item["obj"], overwrite=args.overwrite):
             collisions.append(fname)
             continue

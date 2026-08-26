@@ -1595,3 +1595,27 @@ def test_environment_check_fails_when_nvidia_smi_cannot_run():
         )
     finally:
         workspace.cleanup()
+
+
+@regression(
+    item="docs",
+    prevents="AF3 로 만든 결과물을 저장소에 함께 배포하면서 Output Terms 고지와\n"
+             "원본 출력에 가한 수정 내역을 붙이지 않는 버그.\n"
+             "약관 5항이 눈에 띄는 고지를 요구한다.",
+)
+def test_distributed_af3_output_carries_its_notice():
+    notice = REPO_ROOT / "OUTPUT_NOTICE.md"
+    check(notice.is_file(), "OUTPUT_NOTICE.md 가 없다")
+    text = notice.read_text(encoding="utf-8")
+    check_in("OUTPUT_TERMS_OF_USE.md", text, "약관 원문을 가리키지 않는다")
+    check_in("수정", text, "원본 출력에 가한 수정 내역이 없다")
+
+    # 산출물 폴더와 함께 움직이도록 폴더 안에도 둔다.
+    for folder in ("results_example", "figures"):
+        side = REPO_ROOT / folder / "OUTPUT_NOTICE.txt"
+        check(side.is_file(), f"{folder}/ 에 고지가 없다")
+        check_in("Output Terms", side.read_text(encoding="utf-8"),
+                 f"{folder}/ 고지가 약관을 언급하지 않는다")
+
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    check_in("OUTPUT_NOTICE.md", readme, "README 가 고지를 연결하지 않는다")

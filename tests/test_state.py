@@ -1092,3 +1092,43 @@ def test_gpu_memory_reading_is_ignored_when_the_output_is_not_what_we_asked_for(
                     "형식이 다른 출력을 값으로 받아들였다")
         check_equal(mod.gpu_busy_reason([], free, total), None,
                     "GPU 상태를 못 읽었는데 실행을 막았다")
+
+
+@regression(
+    item="stage2",
+    prevents="stage2 의 검증이 러너보다 약해, stage2 가 성공했다고 보고한 JSON 을\n"
+             "다음 단계에서 러너가 스키마 오류로 거부하는 버그.\n"
+             "사용자는 어느 쪽 말을 믿어야 할지 알 수 없다.",
+)
+def test_stage2_output_passes_the_runner_validation():
+    stage2 = load_module("af3_stage2.py")
+    runner = load_module("run_af3_batch_improved.py")
+    check(hasattr(stage2, "validate_fold_job"), "stage2 가 러너와 같은 검증을 쓰지 않는다")
+    check(
+        stage2.validate_fold_job is runner.validate_fold_job
+        or stage2.validate_fold_job.__doc__ == runner.validate_fold_job.__doc__,
+        "stage2 와 러너의 검증이 서로 다른 구현이다",
+    )
+
+    bad = {
+        "name": "x", "modelSeeds": [1],
+        "sequences": [{"protein": {"id": "A", "sequence": "ACDE"}}],
+        "dialect": "not-alphafold3", "version": 1,
+    }
+    check(
+        stage2.validate_fold_job(bad),
+        "러너가 거부하는 dialect 를 stage2 가 통과시켰다",
+    )
+
+    # 함수를 갖고 있는 것과 실제로 쓰는 것은 다르다. 내보내기 직전에 부르는지 본다.
+    import inspect
+
+    source = inspect.getsource(stage2.main)
+    write_pos = source.find("atomic_write_json(")
+    check(write_pos >= 0, "stage2 가 JSON 을 쓰는 지점을 찾지 못했다")
+    before = source[max(0, write_pos - 400) : write_pos]
+    check_in(
+        "validate_fold_job(",
+        before,
+        "JSON 을 내보내기 전에 스키마를 확인하지 않는다",
+    )

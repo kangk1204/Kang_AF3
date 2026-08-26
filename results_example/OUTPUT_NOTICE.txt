@@ -1,0 +1,4 @@
+이 폴더의 파일은 AlphaFold 3 로 만든 결과물이다.
+AlphaFold 3 Output Terms of Use 가 적용되며, 이 저장소가 원본 출력에 가한
+수정 사항은 최상위 OUTPUT_NOTICE.md 에 적혀 있다.
+약관 원문: https://github.com/google-deepmind/alphafold3/blob/main/OUTPUT_TERMS_OF_USE.md
