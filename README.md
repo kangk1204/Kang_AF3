@@ -3,6 +3,9 @@
 VHH/나노바디처럼 짧은 단백질 수백에서 수천 건을 AlphaFold 3로 한 번에 돌리기 위한
 스크립트와 한국어 문서다. 설치, 입력 준비, 배치 실행, 결과 해석, 시각화 순서로 정리했다.
 
+실험을 하는 사람이라면 [docs/researcher_guide.md](docs/researcher_guide.md) 를 먼저 읽어도 된다.
+후보를 고르는 데 필요한 것만 추린 요약이다.
+
 성능 수치는 실제로 측정한 값이다. 측정하지 않은 것은 `(미측정)` 또는 `(추정)` 으로
 표시했다. 측정 환경과 한계는 [12절](#12-측정-조건과-한계)에 있다.
 
@@ -605,6 +608,16 @@ cd ~/af3_work/Kang_AF3                                  # 이후 명령은 항�
 가중치는 반드시 Google에서 직접 받고
 [현재 이용약관](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)을
 준수한다. 동료에게 복사하거나 이 저장소에 커밋하지 않는다.
+
+**신청서를 내거나 승인을 기다릴 필요는 없다.** 아래 URL 은 바로 받아진다. 대신 약관이
+**받아서 쓰는 행위 자체를 동의로 본다.** 그래서 받기 전에 약관을 한 번 읽고, 아래 세
+가지를 확인한다. ① 비영리 목적인가 ② 재배포하지 않을 것인가(사내 스토리지·공유 폴더·깃
+저장소 모두 해당한다) ③ 출력물로 다른 구조예측 모델을 학습시키지 않을 것인가.
+내려받은 날짜를 적어 두면 나중에 근거가 된다. 자세한 것은
+[11절](#11-라이선스와-인용)과 [docs/license_notes.md](docs/license_notes.md) 에 있다.
+
+설치기를 `--full` 로 돌리면 아래 과정을 대신 해 준다. `--accept-weights-terms` 를 붙이는
+것이 약관을 확인했다는 표시다. 손으로 받으려면 이렇게 한다.
 
 ```bash
 mkdir -p ~/af3_models
@@ -1646,8 +1659,12 @@ Apache 2.0(별도 저장소)이지만, **AF3 모델 가중치는 비영리 한�
 AF3 가중치 제약은 네 가지다. **비영리 목적으로만** 쓸 수 있고, **재배포가 금지**돼
 있으며(클라우드 공유 폴더, 사내 스토리지, 깃 저장소, 어디에도 올리면 안 된다),
 **출력물로 유사 구조예측 모델을 학습시키는 것이 금지**돼 있고, 약관은 **구글로부터 직접
-받은 경우만** 사용을 허용한다. 동료에게 복사해 받으면 위반이므로 **공식 접근 요청 절차를
-밟아 승인 기록을 남겨 두라.** 나중에 논문 심사나 기관 감사에서 근거가 된다.
+받은 경우만** 사용을 허용한다. 동료에게 복사해 받으면 위반이다.
+
+신청서나 승인 절차는 없다. 약관 원문(97d2023 기준)은 **가중치를 사용하는 행위 자체가
+동의**라고 정한다. 그러므로 절차는 이렇게 된다. **본인이 직접 위 URL 에서 내려받고,
+받기 전에 약관을 읽는다.** 내려받은 날짜와 그때의 약관 판본을 기록해 두면 나중에 논문
+심사나 기관 감사에서 근거가 된다.
 
 정확한 조건은 Google DeepMind가 배포하는 약관 원문을 기준으로 한다. 위 내용은 요약이며
 법적 효력은 원문에 있다. 더 자세한 정리는
@@ -1780,12 +1797,14 @@ sample 5/recycle 10 측정치와 직접 비교하지 않는다.
 
 ## 문서 목록
 
-README와 `docs/operations_guide.md`, `docs/commands.md`, `docs/reduced_db.md`는 현재 사용 문서다.
+README와 `docs/researcher_guide.md`, `docs/operations_guide.md`, `docs/commands.md`,
+`docs/reduced_db.md`는 현재 사용 문서다.
 이름이 `*_notes.md`, `*_log.md`인 파일은 당시 판단과 원자료를 보존한 역사 기록이며 현재
 설치 명령보다 우선하지 않는다.
 
 | 문서 | 내용 |
 |------|------|
+| [docs/researcher_guide.md](docs/researcher_guide.md) | **실험 연구자용 요약.** 후보를 고르는 데 필요한 것만 추렸다 |
 | [docs/operations_guide.md](docs/operations_guide.md) | 운영 가이드: 설정, 실행, 모니터링, 트러블슈팅 전체 |
 | [docs/commands.md](docs/commands.md) | 복사해 붙이는 단일 명령 모음 |
 | [docs/diagnosis_report.md](docs/diagnosis_report.md), [docs/diagnosis_notes.md](docs/diagnosis_notes.md) | 진단: 건당 341초가 어느 단계에 얼마나 갔는지, 원자료 |
