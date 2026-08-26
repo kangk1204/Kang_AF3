@@ -122,6 +122,7 @@ L = {
     "rank":      ("ranking score (클수록 좋다)", "ranking score (higher = better)"),
     "ptm":       ("pTM (0-1)", "pTM (0-1)"),
     "iptm":      ("ipTM (계면, 0-1)", "ipTM (interface, 0-1)"),
+    "ptm_or_iptm": ("pTM / 복합체는 ipTM (0-1)", "pTM, or ipTM for complexes (0-1)"),
     "meanpl":    ("원자 가중 평균 pLDDT", "atom-weighted mean pLDDT"),
     "target":    ("타깃", "Target"),
     "sum_l":     ("어느 후보가 앞서는가: 오른쪽에 있을수록 좋다",
@@ -937,6 +938,38 @@ def plot_pae(conf, name, outpath):
     return max(max(r) for r in pae)
 
 
+def scatter_metric(rows):
+    """요약 산점도의 x 값을 고른다: 복합체는 ipTM, 단량체는 pTM.
+
+    복합체에서 pTM 을 그리면 계면이 무너진 건이 '오른쪽 위 = 좋은 후보' 자리에
+    찍힌다. 실측 예: nb_1kxv 는 pTM 0.81 / pLDDT 90.7 인데 ipTM 은 0.18 이고
+    등급은 C_계면실패다. 등급이 쓰는 지표와 그림이 쓰는 지표를 맞춘다.
+    """
+    xs, ys, names = [], [], []
+    saw_iptm = saw_ptm = False
+    for r in rows:
+        y = r.get("mean_atom_plddt")
+        if y is None:
+            continue
+        iptm, ptm = r.get("iptm"), r.get("ptm")
+        if iptm is not None:
+            x, saw_iptm = iptm, True
+        elif ptm is not None:
+            x, saw_ptm = ptm, True
+        else:
+            continue
+        xs.append(x)
+        ys.append(y)
+        names.append(r.get("name"))
+    if saw_iptm and saw_ptm:
+        key = "ptm_or_iptm"
+    elif saw_iptm:
+        key = "iptm"
+    else:
+        key = "ptm"
+    return xs, ys, names, key
+
+
 def plot_summary(rows, outpath):
     """타깃 여러 개를 비교한다. 오른쪽 pLDDT는 집계 CSV와 같은 원자 평균이다."""
     import matplotlib.pyplot as plt
@@ -981,12 +1014,7 @@ def plot_summary(rows, outpath):
                         else ["AF3 top model", "other samples, same input"])
 
     # --- 오른쪽: pTM 대 원자 가중 평균 pLDDT 산점 ---
-    xs = [r["ptm"] for r in rows
-          if r["ptm"] is not None and r["mean_atom_plddt"] is not None]
-    ys2 = [r["mean_atom_plddt"] for r in rows
-           if r["ptm"] is not None and r["mean_atom_plddt"] is not None]
-    nm = [r["name"] for r in rows
-          if r["ptm"] is not None and r["mean_atom_plddt"] is not None]
+    xs, ys2, nm, _metric_key = scatter_metric(rows)
     if xs:
         for lo, hi, color, _ko, _en in PLDDT_BANDS:
             ax2.axhspan(lo, hi, color=color, alpha=0.16, lw=0, zorder=0)
@@ -1004,7 +1032,7 @@ def plot_summary(rows, outpath):
                          va="center", ha="right", zorder=6,
                          arrowprops=dict(arrowstyle="-", lw=0.5, color="0.35",
                                          shrinkA=1, shrinkB=4))
-        ax2.set_xlabel(t("ptm"))
+        ax2.set_xlabel(t(_metric_key))
         ax2.set_ylabel(t("meanpl"))
         ax2.set_ylim(0, 100)
         # 90 과 100 이 붙어 보이지 않게 100 은 눈금에서 뺀다 (배경 구간이 상한을 보여준다)

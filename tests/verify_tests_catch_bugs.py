@@ -399,6 +399,14 @@ INJECTIONS = [
         'new': '    if False:',
         'tests': ['test_busy_gpu_is_refused_before_starting_a_container'],
     },
+    {
+        'name': '요약 산점도를 다시 pTM 으로 되돌린다',
+        'detail': '계면이 실패한 복합체가 오른쪽 위(좋은 후보) 자리에 찍힌다.',
+        'script': 'af3_visualize.py',
+        'old': '        if iptm is not None:\n            x, saw_iptm = iptm, True',
+        'new': '        if False:\n            x, saw_iptm = iptm, True',
+        'tests': ['test_summary_scatter_uses_the_interface_metric_for_complexes'],
+    },
 ]
 
 

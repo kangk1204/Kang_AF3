@@ -595,3 +595,38 @@ def test_library_mode_changes_only_how_the_library_is_loaded():
             "lib_mode" not in engine_js and "__LIBBODY__" not in engine_js,
             "%s 엔진 코드가 라이브러리 적재 방식에 따라 갈린다" % engine,
         )
+
+
+@regression(
+    item="reporting",
+    prevents="요약 그림의 산점도가 복합체에서도 pTM 을 그려,\n"
+             "계면이 실패한 건(ipTM 0.18)이 '오른쪽 위 = 좋은 후보' 자리에 찍히는 버그.\n"
+             "등급은 C_계면실패인데 그림만 보면 상위 후보로 읽힌다.",
+)
+def test_summary_scatter_uses_the_interface_metric_for_complexes():
+    mod = load_module("af3_visualize.py")
+    check(hasattr(mod, "scatter_metric"), "산점도 지표를 고르는 함수가 없다")
+
+    # 실측에서 나온 형태: pTM 은 높은데 ipTM 이 무너진 복합체.
+    complexes = [
+        {"name": "nb_1kxv", "ptm": 0.81, "iptm": 0.18, "mean_atom_plddt": 90.7},
+        {"name": "nb_1kxq", "ptm": 0.96, "iptm": 0.92, "mean_atom_plddt": 96.2},
+    ]
+    xs, ys, names, key = mod.scatter_metric(complexes)
+    check_equal(key, "iptm", "복합체인데 계면 지표를 쓰지 않았다")
+    check_equal(xs[names.index("nb_1kxv")], 0.18,
+                "계면이 실패한 건을 pTM 으로 그려 좋은 후보처럼 보이게 했다")
+
+    # 단량체만 있으면 pTM 이 맞다 (ipTM 이 없다).
+    monomers = [{"name": "vhh", "ptm": 0.9, "iptm": None, "mean_atom_plddt": 92.4}]
+    xs, ys, names, key = mod.scatter_metric(monomers)
+    check_equal(key, "ptm", "단량체인데 pTM 을 쓰지 않았다")
+    check_equal(xs, [0.9], "단량체의 pTM 을 그리지 않았다")
+
+    # 섞여 있으면 각자 자기 지표를 쓰되 축 이름이 그 사실을 밝혀야 한다.
+    mixed = monomers + complexes
+    xs, ys, names, key = mod.scatter_metric(mixed)
+    check_equal(key, "ptm_or_iptm", "섞인 경우를 축 이름으로 밝히지 않았다")
+    check_equal(xs[names.index("nb_1kxv")], 0.18, "섞인 경우에도 복합체는 ipTM 이어야 한다")
+    check_equal(xs[names.index("vhh")], 0.9, "섞인 경우 단량체는 pTM 이어야 한다")
+    check_in("ipTM", mod.L[key][0], "축 이름이 ipTM 을 언급하지 않는다")
