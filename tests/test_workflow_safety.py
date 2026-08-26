@@ -110,7 +110,17 @@ def test_markdown_local_links_resolve():
     ):
         check_in(snippet, readme, "README의 자립형 설치/시각화 흐름이 끊겼다")
 
-    check_in("비공개 연구 협업 저장소", readme, "현재 저장소 공개 범위를 설명하지 않았다")
+    # 공개/비공개는 바뀔 수 있으므로 그 상태를 문서에 박아 두지 않는다. 대신 어느
+    # 쪽이든 항상 참인 규칙을 요구한다: 무엇을 커밋하면 안 되는지, 그리고 한 번
+    # 커밋하면 되돌릴 수 없다는 것.
+    check_in("저장소 공개 여부와 관계없이 Git에 추가하지", readme,
+             "커밋하면 안 되는 것을 공개 여부와 무관하게 못박지 않았다")
+    check_in("이력에 남는다", readme,
+             "한 번 커밋하면 되돌릴 수 없다는 점을 말하지 않았다")
+    check(
+        "비공개 연구 협업 저장소" not in readme,
+        "공개 여부를 문서에 박아 두면 전환할 때 거짓이 된다",
+    )
     for stale_tone in ("이 저장소는 공개다", "읽어라", " 보라", "마라", "함정", "급히"):
         check(stale_tone not in readme, "README에 과도한 지시체가 남았다", stale_tone)
 
