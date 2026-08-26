@@ -407,6 +407,22 @@ INJECTIONS = [
         'new': '        if False:\n            x, saw_iptm = iptm, True',
         'tests': ['test_summary_scatter_uses_the_interface_metric_for_complexes'],
     },
+    {
+        'name': '래퍼의 스레드 설정 검증을 없앤다',
+        'detail': "AF3_MSA_WORKERS='CORES[$(명령)]' 로 임의 명령이 실행된다.",
+        'script': 'af3run.sh',
+        'old': 'WORKERS="${AF3_MSA_WORKERS:-1}"\nrequire_positive_int AF3_MSA_WORKERS "$WORKERS"',
+        'new': 'WORKERS="${AF3_MSA_WORKERS:-1}"',
+        'tests': ['test_wrapper_rejects_non_numeric_thread_settings'],
+    },
+    {
+        'name': '래퍼의 작업 이름 검증을 없앤다',
+        'detail': '../ 를 받아 입력·결과·로그가 작업 폴더 밖으로 나간다.',
+        'script': 'af3run.sh',
+        'old': '  */*|*[!A-Za-z0-9._-]*)',
+        'new': '  __never_matches__)',
+        'tests': ['test_wrapper_rejects_names_that_escape_the_work_directory'],
+    },
 ]
 
 

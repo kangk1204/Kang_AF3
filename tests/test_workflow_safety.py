@@ -1463,3 +1463,91 @@ def test_legacy_runner_writes_results_as_the_invoking_user():
             check_equal(call.get("user"), expected, "legacy 러너가 --user 를 넘기지 않았다")
     finally:
         workspace.cleanup()
+
+
+@regression(
+    item="security",
+    prevents="af3run.sh 가 AF3_MSA_WORKERS/NCPU 를 검증 없이 $((...)) 에 넣어,\n"
+             "값 안의 명령 치환이 그대로 실행되는 버그.\n"
+             "AF3_MSA_WORKERS='CORES[$(touch /tmp/x)]' 로 재현했다.",
+)
+def test_wrapper_rejects_non_numeric_thread_settings():
+    import shutil
+
+    script = SCRIPTS_DIR / "af3run.sh"
+    with tempfile.TemporaryDirectory(prefix="af3_inject_") as td:
+        root = Path(td)
+        (root / "probe_in").mkdir()
+        (root / "probe_in" / "a.json").write_text(json.dumps({
+            "name": "a", "modelSeeds": [1],
+            "sequences": [{"protein": {"id": "A", "sequence": "ACDE"}}],
+            "dialect": "alphafold3", "version": 1,
+        }), encoding="utf-8")
+        marker = root / "pwned"
+
+        for payload in (f"CORES[$(touch {marker})]", f"NCPU[$(touch {marker})]"):
+            for var in ("AF3_MSA_WORKERS", "AF3_MSA_NCPU"):
+                env = dict(os.environ)
+                env[var] = payload
+                env["PATH"] = f"{make_stub_bin(root)}{os.pathsep}{env.get('PATH', '')}"
+                proc = subprocess.run(
+                    ["bash", str(script), "probe"],
+                    cwd=root, env=env, capture_output=True, text=True, timeout=120,
+                )
+                check(
+                    not marker.exists(),
+                    f"{var} 의 명령 치환이 실행됐다",
+                    f"payload={payload}\n{proc.stdout[-400:]}",
+                )
+                check(
+                    proc.returncode != 0,
+                    f"{var} 에 숫자가 아닌 값을 주었는데 실행을 계속했다",
+                    f"payload={payload}",
+                )
+                check_in(
+                    var,
+                    proc.stdout + proc.stderr,
+                    f"{var} 가 잘못됐다는 것을 이름으로 알려주지 않는다",
+                )
+
+
+@regression(
+    item="security",
+    prevents="af3run.sh 의 작업 이름이 ../ 나 슬래시를 허용해,\n"
+             "입력·결과·로그가 작업 폴더 밖으로 나가는 버그.",
+)
+def test_wrapper_rejects_names_that_escape_the_work_directory():
+    script = SCRIPTS_DIR / "af3run.sh"
+    with tempfile.TemporaryDirectory(prefix="af3_name_") as td:
+        root = Path(td)
+        work = root / "work"
+        work.mkdir()
+        job = json.dumps({
+            "name": "a", "modelSeeds": [1],
+            "sequences": [{"protein": {"id": "A", "sequence": "ACDE"}}],
+            "dialect": "alphafold3", "version": 1,
+        })
+        for bad in ("../escape", "a/b", "..", "/abs"):
+            # 폴더가 없어서 멈추는 것으로는 검증이 안 된다. 이탈 경로에 입력 폴더를
+            # 실제로 만들어 두고, 그래도 거부하는지 본다.
+            # (절대경로는 만들 수 없는 위치라 폴더 없이 이름 검증만 본다.)
+            target = (work / f"{bad}_in").resolve()
+            try:
+                target.mkdir(parents=True, exist_ok=True)
+                (target / "a.json").write_text(job, encoding="utf-8")
+            except OSError:
+                pass
+            proc = subprocess.run(
+                ["bash", str(script), bad],
+                cwd=work, capture_output=True, text=True, timeout=60,
+            )
+            check(
+                proc.returncode != 0,
+                "작업 폴더를 벗어나는 이름을 받아들였다",
+                f"이름={bad!r} 종료코드={proc.returncode}\n{proc.stdout[-300:]}",
+            )
+            check_in(
+                "작업 이름",
+                proc.stdout + proc.stderr,
+                f"이름이 왜 거부됐는지 알려주지 않는다 (이름={bad!r})",
+            )

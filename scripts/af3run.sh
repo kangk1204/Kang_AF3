@@ -27,6 +27,16 @@
 set -uo pipefail
 
 NAME="${1:-}"
+# 작업 이름은 폴더 이름이 된다. 슬래시나 .. 를 허용하면 입력·결과·로그가 작업 폴더
+# 밖으로 나간다. 영문/숫자/밑줄/하이픈/점만 받고, 점으로 시작하는 이름도 막는다.
+case "$NAME" in
+  ''|.|..) echo "오류: 작업 이름이 비었거나 사용할 수 없다: '${NAME}'" >&2; exit 2 ;;
+  .*)      echo "오류: 작업 이름은 점으로 시작할 수 없다: '${NAME}'" >&2; exit 2 ;;
+  */*|*[!A-Za-z0-9._-]*)
+    echo "오류: 작업 이름에는 영문, 숫자, . _ - 만 쓸 수 있다: '${NAME}'" >&2
+    echo "      폴더 이름이 되므로 슬래시나 .. 는 받지 않는다." >&2
+    exit 2 ;;
+esac
 MODE="${2:-screen}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -41,12 +51,27 @@ CHECK="${SCRIPT_DIR}/af3_check.sh"
 # 처리율은 총 스레드가 코어 수의 약 1.3배인 지점에서 0.895 타깃/분으로 포화한다.
 # (이 스윕은 전체 DB 급 = 4종 각 4GB 슬라이스 기준이다. 축소 DB 약 2GB 는
 #  데이터 파이프라인이 건당 1.98초로, 포화점이 문제되지 않는다.)
+# 숫자만 받는다. 이 값들은 아래에서 $(( )) 안으로 들어가는데, bash 의 산술 확장은
+# 값 안의 $( ) 를 실행한다. 검증 없이 넣으면 AF3_MSA_WORKERS='CORES[$(명령)]' 같은
+# 값으로 임의 명령이 돈다 (실제로 재현했다). set -u 는 일부 형태만 막는다.
+require_positive_int() {
+  local name="$1" value="$2"
+  case "$value" in
+    ''|*[!0-9]*) echo "오류: ${name} 는 양의 정수여야 한다: '${value}'" >&2; exit 2 ;;
+  esac
+  [ "$value" -ge 1 ] 2>/dev/null || {
+    echo "오류: ${name} 는 1 이상이어야 한다: '${value}'" >&2; exit 2
+  }
+}
+
 WORKERS="${AF3_MSA_WORKERS:-1}"
+require_positive_int AF3_MSA_WORKERS "$WORKERS"
 
 # DB 검색 스레드: min(코어수/2, 8). AF3 기본값 min(코어수,8) 과 거의 같아서
 # 8코어 이상이면 손대지 않아도 최적에 가깝다.
 CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
 NCPU="${AF3_MSA_NCPU:-$(( CORES / 2 ))}"
+require_positive_int AF3_MSA_NCPU "$NCPU"
 [ "$NCPU" -lt 1 ] && NCPU=1
 [ "$NCPU" -gt 8 ] && NCPU=8
 
