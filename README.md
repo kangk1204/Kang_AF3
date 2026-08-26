@@ -82,6 +82,21 @@ bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
 full 설치는 시작 시 약 1TB의 빈 공간을 확인하고, DB 다운로드와 전체 해시 검증에 수 시간이
 걸릴 수 있다. 다시 실행하면 이미 완료되어 검증된 항목은 재사용한다.
 
+> **1TB 가 계속 필요한 것은 아니다.** 1TB 는 설치 도중의 최대치를 기준으로 한 문턱이다.
+> 압축본과 해제본이 잠시 같이 존재하기 때문이다 (이 장비 실측 849GiB).
+> 설치가 끝나면 압축본 폴더를 지워 **약 627GiB** 로 줄일 수 있다.
+>
+> ```bash
+> du -sh ~/public_databases_full/_zst      # 이 장비에서 223GiB
+> rm -rf ~/public_databases_full/_zst
+> python3 scripts/af3_db.py verify --db-dir ~/public_databases_full   # 여전히 통과한다
+> ```
+>
+> 지운 뒤에도 러너와 `af3_db.py verify` 는 그대로 동작한다(실측 확인). 설치기를 다시
+> 돌리면 압축본 대신 `mmcif_files` 트리 전체를 해시해서 검증하므로 시간이 더 걸린다.
+> RNA 전용 DB 3종(약 89GB)은 단백질만 다뤄도 지우면 안 된다. 러너의 사전 점검이 공식
+> 9항목을 모두 요구한다.
+
 full DB를 아직 받지 않을 때는 `bash scripts/install_af3_ubuntu.sh`만 실행한다. 이 core
 모드는 Docker/GPU, AF3 이미지와 그림 환경까지만 설치한다. 새로 docker 그룹에 들어간
 경우 설치가 끝난 뒤 한 번 로그아웃·로그인한다.
