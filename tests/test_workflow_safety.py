@@ -116,8 +116,15 @@ def test_markdown_local_links_resolve():
 
     quick_summary = readme.partition("## Quick Start")[2].partition("\n---\n")[0]
     check(quick_summary, "README 상단 Quick Start가 없다")
-    for quick_heading in ("### 1. 설치", "### 2. 예제로 배치 실행", "### 3. 본인 입력 준비"):
-        check_in(quick_heading, quick_summary, "Quick Start의 설치·실행 순서가 불완전하다")
+    # Quick Start 하나로 설치 -> 실행 -> 해석 -> 본인 입력까지 끝나야 한다.
+    # 결과 읽는 법이 빠지면 사용자는 표를 받고도 무엇을 골라야 할지 모른다.
+    for quick_heading in ("### 1. 설치", "### 2. 예제로 배치 실행",
+                          "### 3. 결과 읽기", "### 4. 본인 입력 준비"):
+        check_in(quick_heading, quick_summary, "Quick Start의 설치·실행·해석 순서가 불완전하다")
+    # 해석 절은 글로만 설명하지 말고 실제 산출물을 보여 준다.
+    for shown in ("figures/example_complex_plddt.png", "figures/example_complex_pae.png",
+                  "figures/view3d_screenshot.png"):
+        check_in(shown, quick_summary, "Quick Start가 실제 결과 그림을 보여 주지 않는다")
     for input_step in (
         "cp examples/vhh_monomer.json quick_in/",
         "--fasta my_sequences.fasta",
