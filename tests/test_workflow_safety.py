@@ -1619,3 +1619,38 @@ def test_distributed_af3_output_carries_its_notice():
 
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     check_in("OUTPUT_NOTICE.md", readme, "README 가 고지를 연결하지 않는다")
+
+
+@regression(
+    item="check",
+    prevents="컨테이너가 GPU 를 못 봐도 환경 점검이 통과하는 버그.\n"
+             "nvidia-smi 가 호스트에서 도는 것과 컨테이너 안에서 GPU 를 쓰는 것은 다르다.\n"
+             "docker run --gpus 의 종료코드가 파이프 뒤 head/sed 에 묻힌다.",
+)
+def test_environment_check_fails_when_container_cannot_see_the_gpu():
+    workspace = Workspace()
+    try:
+        env = dict(os.environ)
+        env["PATH"] = str(make_stub_bin(workspace.root)) + os.pathsep + env.get("PATH", "")
+        env["AF3_DOCKER"] = "docker"
+        env["AF3_DB_DIR"] = str(workspace.db_dir)
+        env["AF3_MODEL_DIR"] = str(workspace.model_dir)
+        env["AF3_MODEL_SHA256"] = (
+            "121b85224e4474eb6de00bf17f0acde299569ac8ed4e13220c7b88c01192ad8d")
+        env["AF3_STUB_GPU_FAIL"] = "1"
+        proc = subprocess.run(
+            ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
+            cwd=workspace.root, env=env, capture_output=True, text=True, timeout=300,
+        )
+        check(
+            proc.returncode != 0,
+            "컨테이너가 GPU 를 못 보는데 환경 점검이 통과했다",
+            (proc.stdout + proc.stderr)[-700:],
+        )
+        check_in(
+            "컨테이너",
+            proc.stdout,
+            "컨테이너에서 GPU 를 못 쓴다는 것을 이유로 들지 않았다",
+        )
+    finally:
+        workspace.cleanup()

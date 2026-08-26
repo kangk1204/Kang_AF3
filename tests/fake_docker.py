@@ -54,6 +54,7 @@ MSA 검색, 실제 추론, VRAM 사용량, ranking score 의 물리적 의미. �
 환경변수 (테스트가 스텁 동작을 조종하는 손잡이)
 ------------------------------------------------
 AF3_STUB_LOG        호출 내역을 JSON Lines 로 기록할 경로
+AF3_STUB_GPU_FAIL   --gpus 를 붙인 run 을 실패시킨다 (컨테이너가 GPU 를 못 보는 상황)
 AF3_STUB_FAIL_AT    N번째 작업에서 _data.json 만 쓰고 중단 (추론 중 끊김 재현)
 AF3_STUB_FAIL_NAMES 이 정규화 이름들에서 중단 (쉼표 구분)
 AF3_STUB_EXIT       중단 시 종료코드 (기본 1)
@@ -343,6 +344,11 @@ def main(argv: list[str]) -> int:
 
     # Environment-check probes that do not invoke run_alphafold.py.
     if "nvidia-smi" in argv:
+        if os.environ.get("AF3_STUB_GPU_FAIL") and parsed["gpus"]:
+            # 컨테이너가 GPU 를 못 보는 상황. 실제 docker 도 0 이 아닌 코드로 끝난다.
+            print("docker: Error response from daemon: could not select device "
+                  "driver \"nvidia\" with capabilities: [[gpu]].", file=sys.stderr)
+            return 125
         print("Stub NVIDIA GPU, 16384 MiB, 999.0")
         return 0
     if "jackhmmer" in argv and "-h" in argv:

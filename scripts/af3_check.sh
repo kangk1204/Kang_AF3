@@ -149,9 +149,16 @@ if [ -n "$DOCKER" ]; then
       | grep -E 'XLA|TF_FORCE|CUDA|JAX' | sed 's/^/         /' || echo "         (해당 항목 없음)"
     echo
     echo "[측정] 컨테이너 안에서 GPU가 보이는가 (--gpus all 로 확인):"
-    $DOCKER run --rm --gpus all "$IMAGE" \
-      nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>&1 \
-      | head -5 | sed 's/^/         /'
+    # 호스트에서 nvidia-smi 가 도는 것과 컨테이너 안에서 GPU 를 쓰는 것은 다르다.
+    # 그 사이에 nvidia-container-toolkit, 런타임 설정, 드라이버/CUDA 조합이 있다.
+    # 파이프로 넘기면 head/sed 가 성공해서 docker 의 종료코드가 묻히므로 먼저 받는다.
+    if ! GPU_IN_CONTAINER="$($DOCKER run --rm --gpus all "$IMAGE" \
+          nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>&1)"; then
+      fail "컨테이너 안에서 GPU 를 쓸 수 없다. 호스트의 nvidia-smi 가 돌아도 이럴 수 있다 (nvidia-container-toolkit/런타임 설정)."
+      printf '%s\n' "$GPU_IN_CONTAINER" | head -5 | sed 's/^/         /'
+    else
+      printf '%s\n' "$GPU_IN_CONTAINER" | head -5 | sed 's/^/         /'
+    fi
     echo
     echo "[측정] 이 이미지의 run_alphafold.py 가 지원하는 주요 플래그 (실제 --help 에서 추출):"
     HELP_TXT="$($DOCKER run --rm "$IMAGE" python run_alphafold.py --help 2>&1)"

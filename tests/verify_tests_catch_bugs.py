@@ -519,6 +519,14 @@ INJECTIONS = [
         'new': '        problem = None',
         'tests': ['test_stage2_output_passes_the_runner_validation'],
     },
+    {
+        'name': '컨테이너 GPU 프로브의 종료코드 검사를 없앤다',
+        'detail': '호스트 nvidia-smi 는 돌지만 컨테이너가 GPU 를 못 써도 통과한다.',
+        'script': 'af3_check.sh',
+        'old': '      fail "컨테이너 안에서 GPU 를 쓸 수 없다. 호스트의 nvidia-smi 가 돌아도 이럴 수 있다 (nvidia-container-toolkit/런타임 설정)."',
+        'new': '      : "컨테이너 GPU 실패를 무시한다"',
+        'tests': ['test_environment_check_fails_when_container_cannot_see_the_gpu'],
+    },
 ]
 
 
