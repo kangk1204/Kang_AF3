@@ -463,6 +463,30 @@ INJECTIONS = [
         'new': '  if false; then',
         'tests': ['test_environment_check_fails_when_nvidia_smi_cannot_run'],
     },
+    {
+        'name': 'stage2 가 폴더 안 첫 _data.json 을 그냥 고르게 한다',
+        'detail': '다른 타깃의 MSA 가 이 타깃 추론에 붙는다.',
+        'script': 'af3_stage2.py',
+        'old': '            and p.name[: -len("_data.json")].lower() in wanted',
+        'new': '            and True',
+        'tests': ['test_stage2_does_not_borrow_another_targets_msa'],
+    },
+    {
+        'name': '선정내역 CSV 의 symlink 방어를 없앤다',
+        'detail': '결과 폴더에 링크를 심어 두면 바깥 파일이 덮어써진다.',
+        'script': 'af3_stage2.py',
+        'old': '        flags |= os.O_NOFOLLOW',
+        'new': '        pass',
+        'tests': ['test_stage2_manifest_does_not_follow_a_symlink'],
+    },
+    {
+        'name': '빈 리간드 목록을 다시 통과시킨다',
+        'detail': '요청한 리간드가 사라진 채 protein-only 작업이 만들어진다.',
+        'script': 'af3_prepare.py',
+        'old': '            die("--ligand-ccd 에 쓸 만한 CCD 코드가 없다: %r" % args.ligand_ccd)',
+        'new': '            pass',
+        'tests': ['test_prepare_refuses_an_empty_ligand_list'],
+    },
 ]
 
 

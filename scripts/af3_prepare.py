@@ -763,6 +763,10 @@ def main(argv=None):
     ligand_ccd = None
     if args.ligand_ccd:
         ligand_ccd = [c.strip().upper() for c in args.ligand_ccd.split(",") if c.strip()]
+        if not ligand_ccd:
+            # 쉼표나 공백만 준 경우다. 조용히 빈 목록으로 넘어가면 요청한 리간드가
+            # 사라진 채 protein-only 작업이 만들어지고, 사용자는 알 방법이 없다.
+            die("--ligand-ccd 에 쓸 만한 CCD 코드가 없다: %r" % args.ligand_ccd)
         for c in ligand_ccd:
             if c.startswith("CCD_"):
                 die("--ligand-ccd 에는 'CCD_' 접두어를 붙이지 않는다. "

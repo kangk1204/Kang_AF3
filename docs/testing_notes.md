@@ -169,7 +169,7 @@ python3 tests/verify_tests_catch_bugs.py
 `scripts/` 를 임시 폴더에 복사해 문자열 치환으로 옛 버그를 되살린 뒤, 해당
 테스트만 돌려 실패하는지 확인한다. 원본 저장소는 건드리지 않는다.
 
-### 결과: 재주입 47건, 47건 모두 테스트가 잡았다
+### 결과: 재주입 50건, 50건 모두 테스트가 잡았다
 
 아래 표는 `tests/verify_tests_catch_bugs.py` 의 `INJECTIONS` 그대로다.
 건수가 어긋나면 `test_testing_notes_matches_the_registered_mutations` 가 잡는다.
@@ -223,6 +223,9 @@ python3 tests/verify_tests_catch_bugs.py
 | legacy MSA 보관소를 크기 비교로 되돌린다 | `test_legacy_msa_store_does_not_keep_a_stale_result` |
 | legacy 잠금을 work-dir 로 되돌린다 | `test_legacy_lock_protects_the_output_directory` |
 | nvidia-smi 종료코드 검사를 없앤다 | `test_environment_check_fails_when_nvidia_smi_cannot_run` |
+| stage2 가 폴더 안 첫 _data.json 을 그냥 고르게 한다 | `test_stage2_does_not_borrow_another_targets_msa` |
+| 선정내역 CSV 의 symlink 방어를 없앤다 | `test_stage2_manifest_does_not_follow_a_symlink` |
+| 빈 리간드 목록을 다시 통과시킨다 | `test_prepare_refuses_an_empty_ligand_list` |
 
 ### 역검증이 실제로 잡아낸 것 (이 트랙에서 고친 테스트 3건)
 
@@ -269,7 +272,7 @@ python3 tests/verify_tests_catch_bugs.py
 ## 현재 저장소 버전의 release gate
 
 등록된 테스트는 `--strict`에서 known failure 없이 전부 통과해야 한다. 별도 통합 suite와
-mutation 47건도 전부 통과해야 한다. `.github/workflows/tests.yml`은 Python 3.9, 3.12,
+mutation 50건도 전부 통과해야 한다. `.github/workflows/tests.yml`은 Python 3.9, 3.12,
 3.14에서 `tests/run_all.py`를 실행하고, 3.12 lane은 `requirements.txt`를 설치해
 matplotlib 그림 생성 경로도 실행한다. 실제 Docker/AF3/GPU smoke는 수동 gate다.
 

@@ -1005,3 +1005,34 @@ def test_legacy_lock_protects_the_output_directory():
         "잠금이 공유 대상인 output-dir 을 보호하지 않는다",
         window[:160],
     )
+
+
+@regression(
+    item="provenance",
+    prevents="stage2 가 정확한 이름의 _data.json 이 없으면 폴더 안 첫 파일을 그냥 골라,\n"
+             "다른 타깃의 MSA 가 이 타깃의 추론에 붙는 버그.",
+)
+def test_stage2_does_not_borrow_another_targets_msa():
+    mod = load_module("af3_stage2.py")
+    with tempfile.TemporaryDirectory(prefix="af3_stage2_pick_") as td:
+        out_root = Path(td)
+        tdir = out_root / "vhh_a"
+        tdir.mkdir()
+        # 이 폴더에는 이 타깃의 _data.json 이 없고, 다른 타깃 것만 들어 있다.
+        (tdir / "vhh_zzz_data.json").write_text('{"msa": "other target"}', encoding="utf-8")
+
+        picked = mod.find_data_json("vhh_a", out_root, None)
+        check(
+            picked is None,
+            "다른 타깃의 _data.json 을 이 타깃 것으로 골랐다",
+            f"고른 파일={picked}",
+        )
+
+        # 이름이 맞으면 당연히 골라야 한다.
+        good = tdir / "vhh_a_data.json"
+        good.write_text('{"msa": "mine"}', encoding="utf-8")
+        check_equal(
+            mod.find_data_json("vhh_a", out_root, None),
+            good,
+            "이름이 맞는 _data.json 을 고르지 못했다",
+        )

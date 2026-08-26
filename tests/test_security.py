@@ -454,3 +454,35 @@ def test_prepare_rejects_a_non_directory_output_path_with_a_readable_error():
             "not a directory",
             "출력 경로에 있던 파일을 건드렸다",
         )
+
+
+@regression(
+    item="security",
+    prevents="stage2 의 선정내역 CSV 가 symlink 를 따라가 바깥 파일을 덮어쓰는 버그.\n"
+             "결과 폴더 안에 링크만 심어 두면 임의 경로가 지워진다.",
+)
+def test_stage2_manifest_does_not_follow_a_symlink():
+    mod = load_module("af3_stage2.py")
+    check(hasattr(mod, "open_manifest"), "선정내역 CSV 를 여는 지점이 분리돼 있지 않다")
+    with tempfile.TemporaryDirectory(prefix="af3_manifest_") as td:
+        root = Path(td)
+        outside = root / "outside.txt"
+        outside.write_text("건드리면 안 되는 내용", encoding="utf-8")
+        outdir = root / "out"
+        outdir.mkdir()
+        link = outdir / "manifest.csv"
+        link.symlink_to(outside)
+
+        try:
+            with mod.open_manifest(link) as handle:
+                handle.write("덮어쓰기 시도")
+        except OSError:
+            pass
+        else:
+            check(False, "symlink 대상에 그대로 썼다")
+
+        check_equal(
+            outside.read_text(encoding="utf-8"),
+            "건드리면 안 되는 내용",
+            "symlink 를 따라가 바깥 파일을 덮어썼다",
+        )

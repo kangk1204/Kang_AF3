@@ -494,3 +494,34 @@ def test_container_mounts_are_reachable_by_a_non_root_user():
                         "HOME 을 non-root 가 쓸 수 있는 곳으로 고정하지 않았다")
     finally:
         workspace.cleanup()
+
+
+@regression(
+    item="prepare",
+    prevents="--ligand-ccd 에 쉼표만 주면 빈 목록이 되어, 요청한 리간드가 경고 없이\n"
+             "사라지고 protein-only 작업이 만들어지는 버그.",
+)
+def test_prepare_refuses_an_empty_ligand_list():
+    workspace = Workspace()
+    try:
+        fasta = workspace.root / "in.fasta"
+        fasta.write_text(">t1\nQVQLVESGGGLVQAGGSLRLSCAAS\n", encoding="utf-8")
+        outdir = workspace.root / "out"
+        for bad in (",", " ", ",,"):
+            proc = run_script(
+                "af3_prepare.py",
+                ["--fasta", str(fasta), "-o", str(outdir), "--ligand-ccd", bad],
+                workspace,
+            )
+            check(
+                proc.returncode != 0,
+                "리간드를 요청했는데 빈 목록으로 조용히 넘어갔다",
+                f"--ligand-ccd {bad!r} 종료코드={proc.returncode}",
+            )
+            check_in(
+                "--ligand-ccd",
+                proc.stdout + proc.stderr,
+                f"무엇이 잘못됐는지 알려주지 않는다 (--ligand-ccd {bad!r})",
+            )
+    finally:
+        workspace.cleanup()

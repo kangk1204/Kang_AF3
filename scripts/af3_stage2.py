@@ -83,6 +83,19 @@ def csv_safe_cell(value):
     return value
 
 
+def open_manifest(path):
+    """선정내역 CSV 를 연다. symlink 는 따라가지 않는다.
+
+    결과 폴더 안에 링크만 심어 두면 임의 경로가 덮어써진다. 실제로 재현했다.
+    O_NOFOLLOW 는 대상이 symlink 이면 열기 자체를 거부한다.
+    """
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags, 0o644)
+    return os.fdopen(fd, "w", encoding="utf-8-sig", newline="")
+
+
 def atomic_write_json(path, obj, overwrite=False):
     """Publish JSON without fixed temp names or destination-symlink traversal."""
     destination = Path(path)
@@ -330,8 +343,15 @@ def find_data_json(target: str, out_root: Path | None, hint: str | None):
         exact = tdir / ("%s_data.json" % tdir.name)
         if nonempty(exact):
             return exact
+        # 폴더 안 아무 _data.json 이나 고르면 안 된다. 그 폴더에 다른 타깃의 파일이
+        # 섞여 있으면 남의 MSA 와 템플릿이 이 타깃의 추론에 들어간다. 그래서 접두어가
+        # 이 타깃의 이름과 맞는 것만 받는다 (대소문자/정규화 차이는 허용한다).
+        wanted = {target.lower(), sanitised_name(target).lower(), tdir.name.lower()}
         found = sorted(
-            p for p in tdir.glob("*_data.json") if nonempty(p) and not p.name.startswith("._")
+            p for p in tdir.glob("*_data.json")
+            if nonempty(p)
+            and not p.name.startswith("._")
+            and p.name[: -len("_data.json")].lower() in wanted
         )
         if found:
             return found[0]
@@ -828,7 +848,7 @@ def main(argv=None) -> int:
 
     manifest = Path(args.manifest) if args.manifest else outdir / "2단계_선정내역.csv"
     manifest.parent.mkdir(parents=True, exist_ok=True)
-    with open(manifest, "w", encoding="utf-8-sig", newline="") as fh:
+    with open_manifest(manifest) as fh:
         w = csv.writer(fh)
         w.writerow(
             [
