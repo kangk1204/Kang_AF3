@@ -5,7 +5,7 @@ FASTA나 CSV에 서열을 준비하면 입력 JSON 생성부터 AlphaFold 3 실�
 건 비교할 때 사용하기 좋습니다.
 
 처음 사용한다면 바로 아래 [Quick Start](#quick-start)만 순서대로 따라가세요. 후보를 고르는
-방법만 먼저 보고 싶다면 [wet-lab 연구자용 요약](docs/researcher_guide.md)을 읽으세요.
+방법만 먼저 보고 싶다면 [wet-lab 연구자용 요약](docs/researcher_guide.md)을 먼저 보세요.
 
 이 저장소는 AlphaFold 3로 만든 예제 결과물(집계 CSV, 그림, 뷰어)도 함께 제공합니다.
 그 결과물에는 AF3 Output Terms 가 적용되고, 이 저장소가 원본 출력에 무엇을 더했는지는
@@ -18,13 +18,167 @@ FASTA나 CSV에 서열을 준비하면 입력 JSON 생성부터 AlphaFold 3 실�
 
 ## Quick Start
 
-처음 한 번은 아래 순서대로만 따라가면 된다. 설치, 예제 실행, 결과 확인 순서로 되어 있고, 각 단계는 다음 단계로 넘어가기 전에 바로 확인할 수 있게 묶어 두었다.
+처음이라면 이 절만 따라가면 됩니다. 순서는 **설치 → 예제 1건 → 내 서열 → 결과 확인**입니다.
 
-Kang_AF3는 여러 AlphaFold 3 입력을 한 컨테이너에서 연속 실행하는 연구용 작업 흐름이다.
-입력 JSON 생성, 중단 작업 재개, 결과 CSV 집계, 2D 그림과 3D 뷰어 생성을 함께 제공한다.
-AF3 소스, Google 이용약관이 적용되는 모델 가중치, 공식 DB root는 별도로 준비한다
-([3-1 다운로드 목록](#3-1-다운로드-목록)). 성능 측정값은 [7절](#7-속도-개선의-근거)에
-정리했다.
+### 시작 전에 확인하세요
+
+| 필요한 것 | 확인 방법 |
+|---|---|
+| Ubuntu PC와 NVIDIA GPU | 터미널에서 `nvidia-smi`를 실행하면 GPU 표가 나옵니다 |
+| 설치 중 여유 디스크 약 1TB | `df -h ~`로 확인합니다. 설치 후 압축본을 정리하면 약 627GiB까지 줄일 수 있습니다 |
+| 모델 가중치 이용약관 동의 | [Google DeepMind 원문](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)을 먼저 읽습니다 |
+| 공개 가능한 작업 폴더 | 미공개 서열, 모델 가중치, DB는 Git에 올리지 않습니다 |
+
+이 도구는 구조와 confidence를 예측합니다. **점수가 높아도 실제 결합, affinity/Kd, epitope를
+증명하지는 않습니다.** 후보를 정리한 뒤 실험으로 확인하는 용도로 사용하세요.
+
+### 설치 전에 결과 화면부터 보기
+
+아래 파일은 DB와 모델 없이 바로 열 수 있습니다.
+
+| 보고 싶은 것 | 파일 | 여는 방법 |
+|---|---|---|
+| 회전하는 3D 구조 | `examples/view3d_example.html` | 브라우저로 엽니다 |
+| 결과 요약표 | `results_example/af3_summary.csv` | Excel이나 스프레드시트로 엽니다 |
+| 잔기별 pLDDT | `figures/example_complex_plddt.png` | 이미지로 엽니다 |
+| 사슬 간 PAE | `figures/example_complex_pae.png` | 이미지로 엽니다 |
+| 여러 타깃 비교 | `figures/example_summary_6targets.png` | 이미지로 엽니다 |
+
+### 1. 한 번만 설치합니다
+
+```bash
+sudo apt update && sudo apt install -y git
+mkdir -p ~/af3_work
+git clone https://github.com/kangk1204/Kang_AF3.git ~/af3_work/Kang_AF3
+cd ~/af3_work/Kang_AF3
+nvidia-smi
+```
+
+GPU 표가 보이면 약관을 읽고 full 설치를 시작합니다. `--accept-weights-terms`는 원문을 읽고
+조건에 동의했다는 표시입니다.
+
+```bash
+bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
+```
+
+가중치, full DB, Docker image를 준비하므로 수 시간이 걸릴 수 있습니다. 중간에 끊겨도 같은
+명령을 다시 실행하면 installer-owned staging을 점검하고 이어서 처리합니다. core 설치나 수동
+설치가 필요하면 [3절](#3-설치)을 참고하세요.
+
+### 2. 예제 1건으로 설치를 확인합니다
+
+먼저 약 2GB의 reduced-MSA overlay를 만듭니다. overlay는 서열 검색을 빠르게 하지만 템플릿은
+full DB에서 가져옵니다. overlay는 full DB를 **대체하지 않습니다.**
+
+```bash
+python3 scripts/af3_db.py reduce \
+  --source ~/public_databases_full \
+  --output ~/public_databases_reduced
+
+AF3_DB_DIR=~/public_databases_full bash scripts/af3_check.sh
+```
+
+`af3_check.sh` 마지막에 `[OK] 필수 환경 점검을 모두 통과했습니다.`가 나오면 예제를 실행합니다.
+
+```bash
+mkdir -p quick_in
+cp examples/vhh_monomer.json quick_in/
+
+python3 scripts/run_af3_batch_improved.py \
+  --input-dir quick_in --output-dir quick_out \
+  --db-dir ~/public_databases_reduced --db-dir ~/public_databases_full \
+  --yes
+```
+
+이 PC의 VHH 예제는 overlay 경로에서 **53초** 정도 걸립니다. full DB만 사용하면 MSA 검색 때문에
+**35분 이상** 걸릴 수 있습니다. jackhmmer가 DB를 읽는 동안 로그가 **멈춘 것처럼 보여도 정상**입니다.
+다른 터미널에서 `docker ps`를 실행해 컨테이너가 살아 있는지 확인하세요.
+
+정상 종료 시 다음 문구가 보입니다.
+
+```text
+[결과] 이번 대상 1/1건 완료
+```
+
+### 3. 표와 구조를 만듭니다
+
+```bash
+python3 scripts/af3_collect.py quick_out -o quick_summary.csv
+~/af3_plot_env/bin/python scripts/af3_visualize.py quick_out -o quick_figures
+python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
+```
+
+| 위치 | 무엇이 들어 있나요? | 무엇으로 여나요? |
+|---|---|---|
+| `quick_summary.csv` | 모든 타깃의 confidence와 경고 | Excel·스프레드시트 |
+| `quick_out/vhh_7mfv_1/` | 구조, confidence JSON, MSA, provenance | 후속 분석용 원본 |
+| `quick_figures/` | pLDDT·PAE 그림 | 이미지 뷰어 |
+| `quick_viewer/index.html` | 타깃 목록과 회전 가능한 3D 구조 | 브라우저 |
+
+### 4. 내 서열을 실행합니다
+
+아래 예시는 FASTA의 각 서열을 **서로 독립된 단량체**로 예측합니다. FASTA 파일에 `>이름`과
+아미노산 서열을 적습니다.
+
+```text
+>sample_01
+QVQLVESGGGLVQAGGSLRLSCAASGFPVAYKTMWWYRQAPGKEREWVAAIESYGIKWTRYADSVKGRFTISRDNAKNTVYLQMNSLKPEDTAVYYCIVWVGAQYHGQGTQVTVSA
+```
+
+먼저 `--dry-run`으로 이름과 서열을 확인한 뒤 JSON을 만듭니다.
+
+```bash
+python3 scripts/af3_prepare.py --fasta my_sequences.fasta -o my_project_in --dry-run
+python3 scripts/af3_prepare.py --fasta my_sequences.fasta -o my_project_in
+
+python3 scripts/run_af3_batch_improved.py \
+  --input-dir my_project_in --output-dir my_project_out \
+  --db-dir ~/public_databases_reduced --db-dir ~/public_databases_full \
+  --yes
+
+python3 scripts/af3_collect.py my_project_out -o my_project_summary.csv
+```
+
+CSV/TSV, homomer, 공통 항원, ligand, 3개 이상 사슬 입력은
+[5-3절](#5-3-af3_preparepy-fastacsv-에서-json-만들기)을 참고하세요. 복합체 후보를 줄일 때는
+reduced overlay의 score 보존이 검증되지 않았으므로 full DB 결과를 기준으로 판단하세요.
+
+### 5. 결과는 이 순서로 읽습니다
+
+| 입력 | 먼저 볼 값 | 읽는 방법 |
+|---|---|---|
+| 단량체 | pLDDT → pTM | 각 잔기의 접힘과 전체 fold confidence를 봅니다 |
+| 복합체 | ipTM → PAE → pLDDT | 사슬 사이 배치가 일관적인지 먼저 봅니다 |
+| 모든 입력 | `경고`와 MSA 깊이 | 충돌·무질서·얕은 MSA·샘플 불안정성을 확인합니다 |
+
+1. 프로젝트 CSV를 `ranking_score` 순으로 정렬합니다.
+2. `경고`가 있는 행을 확인하되 자동으로 삭제하지는 않습니다.
+3. 상위 후보의 pLDDT/PAE 그림과 3D 구조를 함께 봅니다.
+4. 단량체는 pTM, 복합체는 ipTM을 사용합니다. ipTM이 없는 복합체는 낮은 신뢰로 따로 봅니다.
+5. 최종 후보는 binding assay나 기능 실험으로 확인합니다.
+
+`등급`은 이 저장소가 후보 정리를 돕기 위해 붙이는 local heuristic입니다. 진단, 결합 판정,
+독립 검증을 뜻하지 않습니다. 즉, 이 단계는 검증된 screening이 아니라 미검증
+`exploratory prioritization`입니다. 지표의 정확한 정의는 [8절](#8-결과-해석)을 참고하세요.
+
+## 목차
+
+- [처음부터 자세히 따라하기](#처음부터-자세히-따라하기)
+- [저장소 범위와 공식 upstream 관계](#1-이-저장소의-범위)
+- [설치 상세](#3-설치)
+- [입력 JSON과 FASTA/CSV 준비](#5-입력-파일-준비)
+- [배치 실행·재개·정리](#6-배치-실행)
+- [결과 지표 해석](#8-결과-해석)
+- [그림과 3D 구조 보기](#9-결과-보기)
+- [자주 겪는 오류](#10-자주-겪는-문제)
+
+## 처음부터 자세히 따라하기
+
+<details>
+<summary><strong>전체 설치 과정과 입력 유형별 예제를 펼쳐 보세요</strong></summary>
+
+아래 내용은 Quick Start보다 자세합니다. 설치 이유와 여러 입력 유형이 필요할 때만 펼쳐서
+참고하세요.
 
 ### 0. 설치 전에 예시 결과부터 보기
 
@@ -206,7 +360,7 @@ full DB의 confidence 순위 보존을 score-blind representative panel에서 �
 
 ### 3. 결과를 읽는 법 보기
 
-배치가 끝나면 타깃마다 폴더 하나가 생긴다. 안에 들어 있는 것은 이렇다.
+배치가 끝나면 타깃마다 폴더 하나가 생깁니다. 안에는 아래 파일이 들어 있습니다.
 
 ```text
 quick_out/vhh_7mfv_1/
@@ -217,14 +371,14 @@ quick_out/vhh_7mfv_1/
   seed-1_sample-0 ... sample-4/        # 확산 샘플 5개
 ```
 
-`af3_collect.py` 가 이것을 표 한 장으로 모은다. 먼저 볼 열은 넷이다.
+`af3_collect.py`가 이것을 표 한 장으로 모읍니다. 처음 볼 열은 네 개입니다.
 
 | 열 | 뜻 |
 |---|---|
-| `등급` | 아래 기준으로 자동 분류한 값 |
+| `등급` | 이 저장소가 자동으로 붙인 분류값 |
 | `경고` | `충돌`, `무질서`, `MSA얕음`, `샘플불안` |
-| `ranking_score` | AF3 가 후보를 세우는 값. 클수록 좋다 |
-| `MSA_unpaired깊이` | 찾은 서열 수. 이 값이 작으면 계면 지표를 믿을 수 없다 |
+| `ranking_score` | AF3가 후보를 세울 때 쓰는 값입니다. 클수록 좋습니다 |
+| `MSA_unpaired깊이` | 찾은 서열 수입니다. 값이 작으면 계면 지표를 더 조심해서 봐야 합니다 |
 
 | 입력 | 등급 | 조건 |
 |---|---|---|
@@ -431,22 +585,25 @@ CSV의 `등급` 열로 1차 선별하고, 단량체는 pTM과 pLDDT평균, 복�
 (판정 기준은 [8절](#8-결과-해석)). 처음 사용하는 경우에는 2절 요구 사양부터
 8절 결과 해석까지 순서대로 확인한다.
 
+</details>
+
 ---
 
-## 목차
+## 전체 문서 목차
 
 [1. 저장소 범위](#1-이-저장소의-범위) ·
 [2. 요구 사양](#2-요구-사양) · [3. 설치](#3-설치) · [4. 동작 확인](#4-동작-확인) ·
 [5. 입력 파일 준비](#5-입력-파일-준비) · [6. 배치 실행](#6-배치-실행) ·
 [7. 속도 개선 근거](#7-속도-개선의-근거) · [8. 결과 해석](#8-결과-해석) ·
-[9. 결과 보기](#9-결과-보기) · [10. 자주 만나는 문제](#10-자주-만나는-문제) ·
+[9. 결과 보기](#9-결과-보기) · [10. 자주 겪는 문제](#10-자주-겪는-문제) ·
 [11. 라이선스와 인용](#11-라이선스와-인용) · [12. 측정 조건과 한계](#12-측정-조건과-한계)
 
 ---
 
 ## 1. 이 저장소의 범위
 
-이 저장소는 AF3를 여러 타깃에 안정적으로 돌리고, 입력을 만들고, 결과를 모으고, 다시 확인하는 데 필요한 스크립트 모음이다. 처음 보는 분은 Quick Start만 따라가도 전체 흐름을 잡을 수 있다.
+이 저장소는 AF3를 여러 타깃에 안정적으로 실행하고, 입력 준비부터 결과 확인까지 이어 주는
+스크립트 모음입니다. 처음이라면 Quick Start만 따라가도 전체 흐름을 파악할 수 있습니다.
 
 | 스크립트 | 하는 일 |
 |----------|---------|
@@ -547,18 +704,20 @@ tokamax 0.0.12 조합이었다. 두 경로 모두 시스템 `nvcc`를 따로 설
 
 ## 3. 설치
 
-설치 경로는 두 갈래다. 차이는 데이터베이스를 지금 같이 받을지, 나중에 따로 받을지다.
+설치 방법은 두 가지입니다. 차이는 full DB를 지금 함께 받을지, 나중에 준비할지입니다.
 
 | 경로 | 실작업 시간 | 디스크 | 어떤 경우에 |
 |------|-------------|--------|-------------|
 | **A. reduced-MSA overlay + full fallback** | full 다운로드 후 1분 안팎 추가 (실측 16.7초) | full 해제본 627GiB + overlay 약 2GB | MSA 속도 실험·단량체 스크리닝 |
 | **B. full DB** | 회선에 따라 수 시간 | 해제본 약 **627GiB**; 압축본 보존 시 peak 약 850GiB | 공식에 가장 가까운 기본 경로·복합체 예측 |
 
-모델 가중치는 Google이 제공하는 URL에서 직접 받아야 하며 현재 약관을 먼저 확인한다.
-배치 러너는 Docker 전용이다. Ubuntu 설치 명령은 아래에 있고, 다른 배포판은
+모델 가중치는 Google 공식 URL에서 직접 받아야 합니다. 다운로드 전에 현재 약관을
+확인하세요. 배치 러너는 Docker에서 실행합니다. Ubuntu에서는 아래 설치기를 사용하고,
+다른 배포판에서는
 [Docker Engine 설치 문서](https://docs.docker.com/engine/install/)와
 [NVIDIA Container Toolkit 설치 문서](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)를
-따른다. native 설치는 [3-7](#3-7-native-설치-러너와-별도)의 별도 경로다.
+공식 문서를 따르세요. native 설치는 [3-7절](#3-7-native-설치-러너와-별도)에 별도로
+정리되어 있습니다.
 
 ### 3-1. 다운로드 목록
 
@@ -574,71 +733,70 @@ tokamax 0.0.12 조합이었다. 두 경로 모두 시스템 `nvcc`를 따로 설
 | ⑦ | 첫 실행 컴파일 | | | **최대 406~497초 (실측)**, 이후 웜 6.55~8.5초 |
 | | **이 저장소** | 수 MB | https://github.com/kangk1204/Kang_AF3 | 스크립트와 문서만 |
 
-가중치는 **비영리 목적으로만 쓸 수 있고 재배포가 금지**돼 있다. 약관은 구글로부터 직접
-받은 경우만 사용을 허용하므로 동료에게 복사해 받으면 위반이다. `ccd.pickle` 과 DB 파일도
-저장소에 커밋하면 안 된다 ([11절](#11-라이선스와-인용),
+가중치는 **비영리 목적으로만 사용할 수 있고 재배포할 수 없습니다.** Google에서 직접
+받아야 하며, 동료에게 복사해 받거나 전달하면 안 됩니다. `ccd.pickle`과 DB 파일도
+저장소에 커밋하지 마세요 ([11절](#11-라이선스와-인용),
 [docs/license_notes.md](docs/license_notes.md)).
 
 ### 3-2. Ubuntu 단일 설치기
 
-지원 범위는 Ubuntu 22.04/24.04/26.04 amd64와 이미 동작하는 NVIDIA 드라이버다.
-드라이버 설치·업그레이드는 재부팅과 장비별 판단이 필요하므로 이 스크립트가 대신 건드리지 않는다. 먼저 `nvidia-smi`가 성공하는지 확인한다. 설치기는 이 저장소 안의 진단·DB 검증 도구를 함께 쓰므로 스크립트 파일 하나만 따로 받지 말고 저장소 전체를 clone한다.
+지원 범위는 Ubuntu 22.04/24.04/26.04 amd64와 정상 동작하는 NVIDIA 드라이버입니다.
+드라이버 설치·업그레이드는 이 스크립트가 대신하지 않습니다. 먼저 `nvidia-smi`를 실행해
+GPU가 보이는지 확인하세요. 설치기는 저장소 안의 진단·DB 검증 도구를 함께 사용하므로,
+스크립트 하나만 받지 말고 저장소 전체를 clone하세요.
 
-full 설치는 약 1TB의 빈 공간과 수 시간의 다운로드가 필요하다. Google의
+full 설치에는 약 1TB의 빈 공간과 수 시간이 필요합니다. Google의
 [현재 가중치 약관](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)을
-직접 읽고 수락한 경우에만 다음 명령을 실행한다.
+원문을 직접 읽고 수락한 경우에만 다음 명령을 실행하세요.
 
 ```bash
 cd ~/af3_work/Kang_AF3
 bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
 ```
 
-`--accept-weights-terms`는 사용자가 원문을 직접 확인했다는 명시적 표시일 뿐, 스크립트가
-법적 판단을 대신한다는 뜻이 아니다. 이 플래그가 없으면 full 설치는 `sudo`, 네트워크,
-파일 쓰기 전에 중단한다.
+`--accept-weights-terms`는 원문 확인과 동의를 표시하는 옵션입니다. 스크립트가 법적 판단을
+대신한다는 뜻은 아닙니다. 이 옵션이 없으면 full 설치는 `sudo`, 네트워크, 파일 쓰기 전에
+중단됩니다.
 
-가중치와 DB를 나중에 받을 경우 core 설치만 한다.
+가중치와 DB를 나중에 준비하려면 core 설치만 실행하세요.
 
 ```bash
 bash scripts/install_af3_ubuntu.sh
 ```
 
-core는 Docker CE, NVIDIA Container Toolkit, 고정 AF3 이미지와 `~/af3_plot_env`를
-설치한다. full은 여기에 검증된 가중치와 full DB를 추가한다. 기존 항목이 정확하면
-재사용하고, 잘못된 가중치·불완전한 최종 DB·출처 label 없는 이미지·설치기가 만들지 않은
-plot venv·충돌하는 소스는 덮어쓰거나 지우지 않고 이유를 표시한 뒤 멈춘다. DB는
-`<DB경로>.partial`에서 받은 뒤 검증을 통과해야 최종 경로로 옮긴다. 검증은 파일 존재뿐
-아니라 고정 v3.0 FASTA 8개의 정확한 byte 크기와 SHA-256을 확인한다. mmCIF는 보존된 공식
-압축본의 SHA-256을 우선 확인하고, 압축본이 없으면 195,858개 파일의 정렬된 content-tree
-SHA-256을 계산한다. 이 deep 검증은 약 480~650GB를 읽으므로 저장장치에 따라 수십 분에서
-수 시간이 걸릴 수 있다.
+core 설치는 Docker CE, NVIDIA Container Toolkit, 고정 AF3 이미지와 `~/af3_plot_env`를
+준비합니다. full 설치는 여기에 검증된 가중치와 full DB를 추가합니다. 이미 올바르게 설치된
+항목은 재사용합니다. 잘못된 가중치나 불완전한 DB는 자동으로 덮어쓰지 않고 이유를 보여 준 뒤
+멈춥니다. DB는 `<DB경로>.partial`에 받은 뒤 크기와 SHA-256 검증을 통과해야 최종 경로로
+이동합니다. mmCIF 압축본이 없으면 195,858개 파일의 content-tree SHA-256을 계산하므로,
+저장장치에 따라 수십 분에서 수 시간이 걸릴 수 있습니다.
 
-실행 전에 계획과 경로만 보려면 다음처럼 한다. `--dry-run`은 `sudo`, 네트워크, 파일 쓰기를
-하지 않는다.
+실제 설치 전에 계획과 경로만 보려면 `--dry-run`을 사용하세요. 이 모드에서는 `sudo`,
+네트워크, 파일 쓰기를 실행하지 않습니다.
 
 ```bash
 bash scripts/install_af3_ubuntu.sh --dry-run --full --accept-weights-terms
 ```
 
 기본 경로는 `~/af3_work`, `~/af3_models`, `~/public_databases_full`,
-`~/af3_plot_env`다. 다른 디스크를 쓸 때는 절대경로 환경변수로 바꾼다.
+`~/af3_plot_env`입니다. 다른 디스크를 사용하려면 절대경로 환경변수로 바꾸세요.
 
 ```bash
 AF3_DB_DIR=/data/af3/public_databases_full \
   bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
 ```
 
-설치 중에는 현재 로그인 세션에 새 그룹이 아직 반영되지 않아도 임시 docker-group shell로
-검증을 끝낸다. 설치가 끝난 뒤 로그아웃·로그인해야 일반 배치 명령이 `sudo` 없이 동작한다.
-docker 그룹은 호스트 root 권한에 준하므로 신뢰하는 사용자만 넣는다.
+설치기는 임시 docker-group shell에서 검증을 마칩니다. 설치가 끝나면 한 번 로그아웃하고 다시
+로그인하세요. 그래야 일반 배치 명령이 `sudo` 없이 동작합니다. docker 그룹은 host root에
+가까운 권한을 가지므로 신뢰하는 사용자만 추가하세요.
 
 #### 수동 설치 fallback
 
-자동 설치기가 기존 APT 설정과 충돌해 멈췄다면 그 파일을 임의로 덮어쓰지 않는다. 배포판과
+자동 설치기가 기존 APT 설정과 충돌해 멈춘다면 관련 파일을 임의로 덮어쓰지 마세요. 배포판과
 기존 설정에 맞춰 [Docker Engine 공식 Ubuntu 절차](https://docs.docker.com/engine/install/ubuntu/)와
 [NVIDIA Container Toolkit 공식 절차](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)를
-적용한 뒤 아래 두 명령으로 확인한다. 서명 키와 저장소 형식은 바뀔 수 있으므로 오래된
-복사 명령을 README에 중복해 두지 않는다.
+적용한 뒤 아래 두 명령으로 확인하세요. 서명 키와 저장소 형식은 바뀔 수 있으므로 공식 문서를
+우선하세요.
 
 ```bash
 docker run --rm \
@@ -648,11 +806,11 @@ docker run --rm --runtime=nvidia --gpus all \
   nvidia-smi
 ```
 
-두 번째 명령에 자신의 GPU 이름과 드라이버 버전이 나오면 Docker GPU 경로가 준비된 것이다.
+두 번째 명령에 자신의 GPU 이름과 드라이버 버전이 나오면 Docker GPU 경로가 준비된 상태입니다.
 2026-08-21 검증 호스트에서는 Docker Engine 29.7.2, NVIDIA Container Toolkit 1.20.0,
 driver 595.84, RTX 3080 Ti가 확인됐다.
 
-AF3 소스를 고정한 커밋으로 받은 뒤 공식 Dockerfile을 빌드한다.
+AF3 소스를 확인된 commit으로 고정한 뒤 공식 Dockerfile을 빌드하세요.
 
 ```bash
 mkdir -p ~/af3_work && cd ~/af3_work
@@ -665,25 +823,24 @@ docker image ls | grep alphafold3                       # 빌드 확인
 cd ~/af3_work/Kang_AF3                                  # 이후 명령은 항상 여기서
 ```
 
-이미지 이름을 `alphafold3` 로 두면 이 저장소의 스크립트가 기본값으로 찾는다. 다른 이름은
-`--image` 또는 환경변수 `AF3_IMAGE` 로 알려준다. 첫 빌드에서는 HMMER와 CUDA Python
-패키지를 내려받고 컴파일하므로 로그가 한동안 뜸할 수 있다.
+이미지 이름을 `alphafold3`로 두면 스크립트가 기본값으로 찾습니다. 다른 이름을 사용한다면
+`--image` 또는 `AF3_IMAGE`로 알려 주세요. 첫 빌드에서는 HMMER와 CUDA Python 패키지를
+설치하고 컴파일하므로 로그가 한동안 뜸할 수 있습니다.
 
 ### 3-3. 모델 가중치 확보
 
 가중치는 반드시 Google에서 직접 받고
 [현재 이용약관](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)을
-준수한다. 동료에게 복사하거나 이 저장소에 커밋하지 않는다.
+준수하세요. 동료에게 복사하거나 이 저장소에 커밋하면 안 됩니다.
 
-**신청서를 내거나 승인을 기다릴 필요는 없다.** 아래 URL 은 바로 받아진다. 대신 약관이
-**받아서 쓰는 행위 자체를 동의로 본다.** 그래서 받기 전에 약관을 한 번 읽고, 아래 세
-가지를 확인한다. ① 비영리 목적인가 ② 재배포하지 않을 것인가(사내 스토리지·공유 폴더·깃
-저장소 모두 해당한다) ③ 출력물로 다른 구조예측 모델을 학습시키지 않을 것인가.
-내려받은 날짜를 적어 두면 나중에 근거가 된다. 자세한 것은
-[11절](#11-라이선스와-인용)과 [docs/license_notes.md](docs/license_notes.md) 에 있다.
+**신청서를 내거나 승인을 기다릴 필요는 없습니다.** 공식 URL에서 직접 받을 수 있습니다.
+다만 다운로드와 사용은 약관 동의를 전제로 합니다. 받기 전에 ① 비영리 목적인지 ② 가중치를
+재배포하지 않을지 ③ 출력물로 다른 구조예측 모델을 학습시키지 않을지 확인하세요. 다운로드
+날짜도 기록해 두는 것이 좋습니다. 자세한 내용은 [11절](#11-라이선스와-인용)과
+[docs/license_notes.md](docs/license_notes.md)를 참고하세요.
 
-설치기를 `--full` 로 돌리면 아래 과정이 자동으로 실행된다. `--accept-weights-terms` 를 붙이는
-것이 약관을 확인했다는 표시다. 손으로 받으려면 이렇게 한다.
+설치기를 `--full`로 실행하면 아래 과정이 자동으로 처리됩니다. 수동으로 설치해야 한다면
+다음 명령을 사용하세요.
 
 ```bash
 set -euo pipefail
@@ -708,12 +865,12 @@ mv -T --no-clobber -- "$staged_model" ~/af3_models/af3.bin
 trap - EXIT
 ```
 
-해제·크기·SHA-256 검증이 모두 끝난 같은 디렉터리의 임시 파일만 최종 이름으로 원자
-게시한다. 기존 `af3.bin`은 자동으로 덮지 않는다.
+해제·크기·SHA-256 검증을 모두 통과한 임시 파일만 최종 이름으로 이동합니다. 기존
+`af3.bin`은 자동으로 덮어쓰지 않습니다.
 
 `af3.bin.zst` 는 1,020,545,840 B 이고 가중치 안에는 파라미터가 368,384,602개 있다.
-이 저장소는 pinned AF3 commit과 함께 위 크기를 엄격히 검사한다. 다른 모델 release를
-의도했다면 코드·가중치·출력 계약을 함께 다시 검증해야 한다.
+이 저장소는 pinned AF3 commit과 함께 위 크기를 엄격히 검사합니다. 다른 model release를
+사용하려면 코드·가중치·출력 계약을 함께 다시 검증해야 합니다.
 
 검증을 끝내고 다른 release 를 의도적으로 쓸 때만, 배치 러너의 크기 검사를
 `AF3_MODEL_BYTES` 로 바꿀 수 있다. 조용히 넘어가지 않고 실행할 때마다 경고를 찍는다.
@@ -971,7 +1128,7 @@ AF3_PYTHON=~/af3_plot_env/bin/python \
 
 출력 형식은 스크립트 버전에 따라 다르다. 항목별 판정 표시(OK/실패)를 기준으로 읽는다.
 `--seq_limit` 이 안 보이면 AF3 패치가 적용되지 않은 HMMER 다(도커 이미지를 쓰면 보통
-문제되지 않는다). 실패 항목은 [10절](#10-자주-만나는-문제)에 정리해 두었다.
+문제되지 않습니다). 실패 항목은 [10절](#10-자주-겪는-문제)에서 확인할 수 있습니다.
 
 ### 스모크 테스트: 1건 실제로 돌려 보기
 
@@ -995,7 +1152,8 @@ raw JSON과 full DB를 쓴 현재 Docker 실측은 35.5분이었다. 그중 MSA�
 
 ## 5. 입력 파일 준비
 
-AF3 는 **타깃 하나당 JSON 파일 하나**를 입력으로 받는다. 많은 서열을 한 번에 처리할 때는 `af3_prepare.py` 로 JSON을 만들고, 만들어진 파일은 `<이름>_in/` 에 두면 된다
+AF3는 **타깃 하나당 JSON 파일 하나**를 입력으로 받습니다. 서열이 많다면 `af3_prepare.py`로
+JSON을 만들고, 생성된 파일을 `<이름>_in/` 폴더에 넣으세요
 ([3-6](#3-6-폴더-관례)).
 
 ### 5-1. 입력 JSON 의 구조
@@ -1124,7 +1282,7 @@ find vhh_001_in -name '._*' -delete    # macOS 유래 사이드카를 지운다
 ```
 
 `._`로 시작하는 파일은 입력 해석 오류를 일으킨다. 이 문제로 3시간 측정이 실패한 사례가
-있다. 원인과 예방은 [10절](#10-자주-만나는-문제) 첫 항목에 있다.
+있습니다. 원인과 예방은 [10절](#10-자주-겪는-문제) 첫 항목에서 확인할 수 있습니다.
 
 ---
 
@@ -1409,28 +1567,33 @@ GPU 추론 단계의 **5.93배**다. 189시간과 서로 다른 조건의 4~40�
 
 ### 8-0. 이 수치로 말할 수 있는 것과 없는 것
 
-결과를 실험에 쓰기 전에 먼저 이 구분부터 보면 된다.
+결과를 실험에 사용하기 전에 아래 구분부터 확인하세요.
 
 | 질문 | 이 파이프라인이 답하는가 |
 |---|---|
-| 이 서열이 어떤 3차 구조로 접히는가 | **예측한다.** pLDDT 로 부위별 확신도까지 나온다 |
-| 두 사슬이 **어떤 자세로** 붙을 수 있는가 | **예측한다.** ipTM 과 PAE 로 계면 확신도가 나온다 |
-| 두 단백질이 **실제로 결합하는가** | **아니다.** ipTM 이 높아도 결합의 증거가 아니다 |
-| 결합 세기(Kd, IC50)는 얼마인가 | **아니다.** AF3 에 그런 출력이 없다 |
-| 어느 잔기가 에피토프인가 | 계면에 닿는 잔기는 구조에서 읽을 수 있으나, **예측된 자세가 맞다는 전제**가 붙는다 |
-| 돌연변이가 결합을 얼마나 바꾸는가 | **아니다.** 두 예측의 점수 차이는 결합 변화량이 아니다 |
+| 이 서열이 어떤 3차 구조로 접히는가 | **예측합니다.** pLDDT로 부위별 confidence도 함께 봅니다 |
+| 두 사슬이 **어떤 자세로** 붙을 수 있는가 | **예측합니다.** ipTM과 PAE로 계면 confidence를 봅니다 |
+| 두 단백질이 **실제로 결합하는가** | **답하지 못합니다.** 높은 ipTM은 결합 증거가 아닙니다 |
+| 결합 세기(Kd, IC50)는 얼마인가 | **답하지 못합니다.** AF3에는 해당 출력이 없습니다 |
+| 어느 잔기가 에피토프인가 | 접촉 잔기는 볼 수 있지만, **예측 자세가 맞다는 전제**가 필요합니다 |
+| 돌연변이가 결합을 얼마나 바꾸는가 | **답하지 못합니다.** 두 예측의 점수 차이는 결합 변화량이 아닙니다 |
 
-**높은 ipTM 은 "AF3 가 이 자세에 확신한다" 는 뜻이지 "결합한다" 는 뜻이 아니다.**
-AF3 는 주어진 사슬을 어떻게든 배치하며, 실제로는 결합하지 않는 쌍에도 자세를 만든다.
-이 저장소가 확인한 사례로, 서로 무관한 단백질 3종을 넣은
-`examples/three_protein_complex.json` 은 ipTM 0.15 로 낮게 나왔지만
-(`C_계면실패`), 낮게 나오는 것이 항상 보장되지는 않는다.
+**높은 ipTM은 “AF3가 이 자세에 확신한다”는 뜻이지 “실제로 결합한다”는 뜻이 아닙니다.**
+AF3는 입력한 사슬을 배치하므로, 실제로 결합하지 않는 쌍에도 자세를 만들 수 있습니다.
+서로 무관한 단백질 3종을 넣은 `examples/three_protein_complex.json`에서는 ipTM 0.15가
+나오지만, 무관한 조합이 항상 낮은 점수를 받는 것은 아닙니다.
 
-그래서 이 도구는 **먼저 볼 후보를 고르는 용도**로만 쓰고, 최종 결론은 실험 검증이 있어야 한다. 현재 관찰 단위와 추론 단위는 각각 하나의 target(입력 분자 조합)이다. diffusion sample은 target 안의 stochastic measurement이지 독립 biological replicate가 아니다. 현재 비교의 estimand는 같은 target의 두 AF3 계산 설정 사이 confidence/rank 차이이며, binder recovery, Kd/IC50, native interface accuracy, epitope truth 또는 mutation effect가 아니다. 예측을 근거로 논문에 쓸 때는 [11절](#11-라이선스와-인용)의 출력물 약관과 [OUTPUT_NOTICE.md](OUTPUT_NOTICE.md) 도 함께 확인한다.
+따라서 이 도구는 **먼저 실험할 후보를 고르는 용도**로 사용하세요. 비교 단위는 하나의
+target(입력 분자 조합)입니다. diffusion sample은 같은 target 안에서 반복되는 stochastic
+measurement이며, 독립 biological replicate가 아닙니다. 이 분석이 비교하는 값은 같은 target을
+두 AF3 설정으로 계산했을 때의 confidence/rank 차이입니다. binder recovery, Kd/IC50,
+native interface accuracy, epitope truth, mutation effect를 측정하지는 않습니다. 논문에 사용할 때는
+[11절](#11-라이선스와-인용)과 [OUTPUT_NOTICE.md](OUTPUT_NOTICE.md)도 확인하세요.
 
 ### 8-1. 지표 읽는 순서
 
-신뢰도 수치만으로 구조 정확도를 확정할 수는 없다. 먼저 수치를 보고, 그다음 [구조 확인](#9-결과-보기)으로 넘어가면 된다.
+confidence만으로 구조 정확도를 확정할 수는 없습니다. 수치를 먼저 확인하고, 이어서
+[구조를 직접 확인하세요](#9-결과-보기).
 
 ### 8-2. 출력 폴더의 구성
 
@@ -1626,7 +1789,12 @@ parameter/data uncertainty 또는 correctness calibration이 아니다. 단량�
 
 ### 9-1. `af3_visualize.py`: 그림 만들기
 
-먼저 [3-9절](#3-9-결과-그림용-python-환경)의 분리 환경이 준비됐는지 확인한다. 단일 설치기를 사용했다면 이미 설치돼 있다. 세부 옵션은 `~/af3_plot_env/bin/python scripts/af3_visualize.py --help`로 확인한다.
+먼저 [3-9절](#3-9-결과-그림용-python-환경)의 그림 환경을 확인하세요. 단일 설치기를
+사용하면 이 환경도 함께 준비됩니다. 세부 옵션은 아래 명령으로 볼 수 있습니다.
+
+```bash
+~/af3_plot_env/bin/python scripts/af3_visualize.py --help
+```
 
 ```bash
 ~/af3_plot_env/bin/python scripts/af3_visualize.py vhh_001_out/vhh_A01 -o figs  # 타깃 하나
@@ -1644,7 +1812,8 @@ parameter/data uncertainty 또는 correctness calibration이 아니다. 단량�
 
 ### 9-2. `af3_view3d.py`: 브라우저 3D 뷰어
 
-AF3 출력 폴더를 HTML로 바꾸면 브라우저에서 바로 볼 수 있다. 파일을 열면 구조를 회전·확대할 수 있고, 파이썬 표준 라이브러리만 쓰므로 추가 설치는 필요 없다.
+AF3 출력 폴더를 HTML로 바꾸면 브라우저에서 바로 볼 수 있습니다. 구조를 회전하거나 확대할
+수 있고, Python 표준 라이브러리만 사용하므로 추가 패키지는 필요하지 않습니다.
 
 ```bash
 # 타깃 하나만 본다
