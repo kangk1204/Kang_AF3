@@ -545,7 +545,7 @@ def find_targets(root, only, all_runs=False, include_partial=False):
     (예전 사용법을 깨지 않기 위해서다).
     """
     root = Path(root)
-    if not root.is_dir():
+    if root.is_symlink() or not root.is_dir():
         die("'%s' 는 폴더가 아니다. AF3 --output_dir 로 준 폴더를 지정해라." % root)
     picks = set(x.strip() for x in only.split(",")) if only else None
 
@@ -560,7 +560,7 @@ def find_targets(root, only, all_runs=False, include_partial=False):
             if child.name.startswith("._"):
                 sidecars += 1
             continue
-        if not child.is_dir():
+        if child.is_symlink() or not child.is_dir():
             continue
         info = resolve_result_dir(child, mode="full")
         if info["note"]:

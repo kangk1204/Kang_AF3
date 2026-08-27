@@ -149,6 +149,50 @@ def test_postprocessors_reject_symlinked_result_artifacts():
 
 @regression(
     item="security",
+    prevents="symlink 결과 폴더를 따라 외부 AF3 tree를 CSV, 그림, HTML로 내보내는 버그.",
+)
+def test_postprocessors_reject_symlinked_result_directories():
+    collect = load_module("af3_collect.py", "af3_collect_result_dir_links")
+    view = load_module("af3_view3d.py", "af3_view_result_dir_links")
+    vis = load_module("af3_visualize.py", "af3_visualize_result_dir_links")
+    workspace = Workspace()
+    try:
+        workspace.make_result("safe_target")
+        scan_root = workspace.root / "scan"
+        scan_root.mkdir()
+        (scan_root / "linked_target").symlink_to(
+            workspace.result_dir("safe_target"), target_is_directory=True
+        )
+
+        rows, incomplete = collect.walk_output_dir(scan_root, "linked")
+        check_equal(rows, [], "collect가 symlink 결과 폴더를 집계했다")
+        check_equal(incomplete, [], "collect가 symlink 결과 폴더를 불완료 결과로 읽었다")
+        for mod in (view, vis):
+            try:
+                mod.find_targets(scan_root, None)
+            except SystemExit:
+                pass
+            else:
+                check(False, f"{mod.__name__}가 symlink 결과 폴더를 처리했다")
+
+        root_link = workspace.root / "linked_root"
+        root_link.symlink_to(workspace.output_dir, target_is_directory=True)
+        rows, incomplete = collect.walk_output_dir(root_link, "linked-root")
+        check_equal(rows, [], "collect가 symlink output root를 집계했다")
+        check_equal(incomplete, [], "collect가 symlink output root를 읽었다")
+        for mod in (view, vis):
+            try:
+                mod.find_targets(root_link, None)
+            except SystemExit:
+                pass
+            else:
+                check(False, f"{mod.__name__}가 symlink output root를 처리했다")
+    finally:
+        workspace.cleanup()
+
+
+@regression(
+    item="security",
     prevents="고정 버전 CDN/캐시 파일이 변조돼도 크기만 보고 신뢰해 연구 구조를 읽는 JavaScript로 실행하는 버그.",
 )
 def test_embedded_library_integrity_is_enforced():

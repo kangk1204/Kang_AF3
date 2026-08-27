@@ -409,6 +409,73 @@ class ProvenanceTests(unittest.TestCase):
         finally:
             workspace.cleanup()
 
+    def test_current_result_accepts_official_grouping_of_identical_chains(self):
+        runner = load_module(RUNNER, "current_result_grouped_chains_runner")
+        workspace = Workspace()
+        try:
+            requested = workspace.monomer("vhh_dimer", sequence="AAAA")
+            requested["sequences"] = [
+                {"protein": {"id": "A", "sequence": "AAAA"}},
+                {"protein": {"id": "B", "sequence": "AAAA"}},
+            ]
+            input_path = workspace.write_json("dimer.json", requested)
+            job, error = runner.read_job(input_path, workspace.input_dir)
+            self.assertIsNone(error)
+            workspace.make_result("vhh_dimer", stage="full")
+
+            emitted = dict(requested)
+            emitted["sequences"] = [
+                {"protein": {"id": ["A", "B"], "sequence": "AAAA"}}
+            ]
+            data_path = workspace.result_dir("vhh_dimer") / "vhh_dimer_data.json"
+            data_path.write_text(json.dumps(emitted), encoding="utf-8")
+            self.assertIsNone(
+                runner.current_result_problem(
+                    workspace.result_dir("vhh_dimer"), job, "full"
+                )
+            )
+
+            emitted["sequences"][0]["protein"]["id"] = ["A", "B", "C"]
+            data_path.write_text(json.dumps(emitted), encoding="utf-8")
+            self.assertIn(
+                "core",
+                runner.current_result_problem(
+                    workspace.result_dir("vhh_dimer"), job, "full"
+                ),
+            )
+        finally:
+            workspace.cleanup()
+
+    def test_current_result_accepts_official_materialized_defaults(self):
+        runner = load_module(RUNNER, "current_result_materialized_defaults_runner")
+        workspace = Workspace()
+        try:
+            requested = workspace.monomer("vhh_defaults", sequence="AAAA")
+            protein = requested["sequences"][0]["protein"]
+            protein.update({"unpairedMsa": "", "pairedMsa": "", "templates": []})
+            requested["bondedAtomPairs"] = []
+            input_path = workspace.write_json("defaults.json", requested)
+            job, error = runner.read_job(input_path, workspace.input_dir)
+            self.assertIsNone(error)
+            workspace.make_result("vhh_defaults", stage="full")
+
+            emitted = json.loads(json.dumps(requested))
+            emitted_protein = emitted["sequences"][0]["protein"]
+            emitted_protein["unpairedMsa"] = ">query\nAAAA\n"
+            emitted_protein["pairedMsa"] = ">query\nAAAA\n"
+            emitted["bondedAtomPairs"] = None
+            data_path = (
+                workspace.result_dir("vhh_defaults") / "vhh_defaults_data.json"
+            )
+            data_path.write_text(json.dumps(emitted), encoding="utf-8")
+            self.assertIsNone(
+                runner.current_result_problem(
+                    workspace.result_dir("vhh_defaults"), job, "full"
+                )
+            )
+        finally:
+            workspace.cleanup()
+
     def test_tampered_final_artifact_invalidates_provenance(self):
         workspace = Workspace()
         try:
@@ -738,6 +805,14 @@ def registered_unsealed_full_db_policy():
 )
 def registered_current_result_core_identity():
     _run_case(ProvenanceTests, "test_current_result_core_must_match_staged_input")
+    _run_case(
+        ProvenanceTests,
+        "test_current_result_accepts_official_grouping_of_identical_chains",
+    )
+    _run_case(
+        ProvenanceTests,
+        "test_current_result_accepts_official_materialized_defaults",
+    )
 
 
 @regression(

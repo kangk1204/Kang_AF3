@@ -19,6 +19,8 @@ Examples::
 from __future__ import annotations
 
 import argparse
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -104,7 +106,11 @@ def _atomic_write_json(path: Path, value: object) -> None:
             handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        try:
+            os.link(temporary, path, follow_symlinks=False)
+        except FileExistsError as exc:
+            raise ValueError(f"refusing to replace existing seal path: {path}") from exc
+        temporary.unlink()
         directory_fd = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory_fd)
@@ -113,6 +119,43 @@ def _atomic_write_json(path: Path, value: object) -> None:
     except BaseException:
         temporary.unlink(missing_ok=True)
         raise
+
+
+def _rename_directory_noreplace(source: Path, destination: Path) -> None:
+    """Atomically publish a directory without replacing a concurrent target.
+
+    Python's ``os.replace`` and POSIX ``rename`` may replace an empty target
+    directory.  Kang_AF3 supports Linux/Ubuntu, where ``renameat2`` with
+    ``RENAME_NOREPLACE`` provides the required create-if-absent transaction.
+    """
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise OSError(errno.ENOSYS, "renameat2 is required for no-clobber publication")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    at_fdcwd = -100
+    rename_noreplace = 1
+    result = renameat2(
+        at_fdcwd,
+        os.fsencode(source),
+        at_fdcwd,
+        os.fsencode(destination),
+        rename_noreplace,
+    )
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number == errno.EEXIST:
+            raise FileExistsError(
+                error_number, os.strerror(error_number), str(destination)
+            )
+        raise OSError(error_number, os.strerror(error_number), str(destination))
 
 
 def _regular_file_binding(path: Path) -> dict[str, object]:
@@ -496,7 +539,17 @@ def create_reduced_overlay(
             json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
-        os.replace(staging, output)
+        try:
+            _rename_directory_noreplace(staging, output)
+        except FileExistsError as exc:
+            raise ValueError(
+                f"output appeared during creation; refusing to replace it: {output}"
+            ) from exc
+        directory_fd = os.open(output.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
         return manifest
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)

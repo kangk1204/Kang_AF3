@@ -999,6 +999,75 @@ def _is_subset(expected: object, actual: object) -> bool:
     return expected == actual
 
 
+def _sequences_by_chain(value: object) -> dict[str, object] | None:
+    """Expand AF3 sequence records into one material record per chain ID.
+
+    ``Input.to_json()`` groups otherwise identical chains by replacing their
+    scalar ``id`` values with one ID list.  A user input may instead contain
+    one record per chain.  Both forms describe the same job, so result
+    ownership must be checked by chain identity rather than list shape.
+    """
+    if not isinstance(value, list):
+        return None
+    records: dict[str, object] = {}
+    for entry in value:
+        if not isinstance(entry, dict) or len(entry) != 1:
+            return None
+        sequence_type, raw_record = next(iter(entry.items()))
+        if not isinstance(raw_record, dict):
+            return None
+        record = _material_input_subset(raw_record)
+        if not isinstance(record, dict):
+            return None
+        # The AF3 data pipeline fills or normalizes these fields before writing
+        # *_data.json.  Their requested bytes remain bound by the effective
+        # input provenance; they are not stable result-ownership fields.
+        record.pop("unpairedMsa", None)
+        record.pop("pairedMsa", None)
+        raw_ids = record.get("id")
+        if isinstance(raw_ids, str):
+            chain_ids = [raw_ids]
+        elif (
+            isinstance(raw_ids, list)
+            and raw_ids
+            and all(isinstance(chain_id, str) for chain_id in raw_ids)
+        ):
+            chain_ids = raw_ids
+        else:
+            return None
+        for chain_id in chain_ids:
+            if not chain_id or chain_id in records:
+                return None
+            expanded = dict(record)
+            expanded["id"] = chain_id
+            records[chain_id] = {sequence_type: expanded}
+    return records
+
+
+def _input_core_matches(expected: object, actual: object) -> bool:
+    """Compare requested and emitted AF3 input cores after chain expansion."""
+    expected_core = _material_input_subset(expected)
+    actual_core = _material_input_subset(actual)
+    if not isinstance(expected_core, dict) or not isinstance(actual_core, dict):
+        return False
+
+    expected_sequences = _sequences_by_chain(expected_core.pop("sequences", None))
+    actual_sequences = _sequences_by_chain(actual_core.pop("sequences", None))
+    if expected_sequences is None or actual_sequences is None:
+        return False
+    if set(expected_sequences) != set(actual_sequences):
+        return False
+    if not all(
+        _is_subset(expected_sequences[chain_id], actual_sequences[chain_id])
+        for chain_id in expected_sequences
+    ):
+        return False
+    for core in (expected_core, actual_core):
+        if core.get("bondedAtomPairs") in (None, []):
+            core["bondedAtomPairs"] = None
+    return _is_subset(expected_core, actual_core)
+
+
 def current_result_problem(result_dir: Path, job: Job, mode: str) -> str | None:
     """Validate that the canonical result belongs to the job just executed."""
     if not is_complete(result_dir, job.output_name, mode):
@@ -1023,9 +1092,7 @@ def current_result_problem(result_dir: Path, job: Job, mode: str) -> str | None:
         requested = json.loads(_read_snapshot(snapshot).decode("utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         return f"staged input JSON을 다시 읽을 수 없음 ({exc})"
-    expected_core = _material_input_subset(requested)
-    actual_core = _material_input_subset(payload)
-    if not _is_subset(expected_core, actual_core):
+    if not _input_core_matches(requested, payload):
         return "current-run data JSON의 sequence/seed/ligand core가 staged input과 다름"
     return None
 

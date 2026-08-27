@@ -749,7 +749,7 @@ def walk_output_dir(root, label, want_msa=True, all_runs=False):
     """
     root = Path(root).expanduser()
     rows, incomplete = [], []
-    if not root.is_dir():
+    if root.is_symlink() or not root.is_dir():
         log("오류: 출력 폴더가 없다: %s" % root)
         return rows, incomplete
 
@@ -758,7 +758,8 @@ def walk_output_dir(root, label, want_msa=True, all_runs=False):
     #    여기서 통째로 배제한다. 격리된 미완료 결과가 집계에 섞이면 안 된다.
     resolved = []
     for tdir in sorted(p for p in root.iterdir()
-                       if p.is_dir() and not is_sidecar(p.name)):
+                       if (not p.is_symlink() and p.is_dir()
+                           and not is_sidecar(p.name))):
         info = resolve_result_dir(tdir, mode="full")
         if not safe_target_name(info["target"]):
             log("  경고: 안전하지 않은 타깃 이름을 건너뜀: %r (%s)" % (info["target"], tdir))

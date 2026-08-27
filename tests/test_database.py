@@ -97,6 +97,84 @@ def test_reduce_creates_atomic_sequence_overlay_without_symlinks():
 
 @regression(
     item="db",
+    prevents="overlay 생성 도중 다른 process가 만든 빈 destination을 atomic publish가 덮어쓰는 race.",
+)
+def test_reduce_publish_does_not_replace_concurrent_empty_directory():
+    mod = load_module(DB_TOOL, "af3_db_overlay_noreplace")
+    with tempfile.TemporaryDirectory(prefix="af3_db_overlay_race_") as td:
+        root = Path(td)
+        source = make_full_db(root / "full")
+        output = root / "overlay"
+        original_copy = mod.copy_fasta_prefix
+        injected = False
+
+        def copy_and_create_destination(*args, **kwargs):
+            nonlocal injected
+            result = original_copy(*args, **kwargs)
+            if not injected:
+                injected = True
+                output.mkdir()
+                (output / "collaborator.txt").write_text("keep\n", encoding="utf-8")
+            return result
+
+        mod.copy_fasta_prefix = copy_and_create_destination
+        try:
+            mod.create_reduced_overlay(
+                source, output, limits={name: 9 for name in FASTA_NAMES}
+            )
+        except ValueError as exc:
+            check_in("refusing to replace", str(exc), "동시 destination 거부 원인이 불명확하다")
+        else:
+            check(False, "동시에 생긴 overlay destination을 덮어썼다")
+        finally:
+            mod.copy_fasta_prefix = original_copy
+        check_equal(
+            (output / "collaborator.txt").read_text(encoding="utf-8"),
+            "keep\n",
+            "동시에 만들어진 destination 내용을 바꿨다",
+        )
+        check(
+            not (output / mod.MANIFEST_NAME).exists(),
+            "실패한 staging manifest를 collaborator destination에 섞었다",
+        )
+
+
+@regression(
+    item="db-seal",
+    prevents="seal 임시 파일을 쓰는 동안 다른 process가 게시한 seal을 os.replace가 덮어쓰는 race.",
+)
+def test_seal_publish_does_not_replace_concurrent_file():
+    mod = load_module(DB_TOOL, "af3_db_seal_noreplace")
+    with tempfile.TemporaryDirectory(prefix="af3_db_seal_race_") as td:
+        destination = Path(td) / mod.FULL_MANIFEST_NAME
+        original_dump = mod.json.dump
+        injected = False
+
+        def dump_and_create_destination(*args, **kwargs):
+            nonlocal injected
+            if not injected:
+                injected = True
+                destination.write_text("collaborator seal\n", encoding="utf-8")
+            return original_dump(*args, **kwargs)
+
+        mod.json.dump = dump_and_create_destination
+        try:
+            mod._atomic_write_json(destination, {"kind": "ours"})
+        except ValueError as exc:
+            check_in("refusing to replace", str(exc), "동시 seal 거부 원인이 불명확하다")
+        else:
+            check(False, "동시에 게시된 seal을 덮어썼다")
+        finally:
+            mod.json.dump = original_dump
+        check_equal(
+            destination.read_text(encoding="utf-8"),
+            "collaborator seal\n",
+            "동시에 게시된 seal 내용을 바꿨다",
+        )
+
+
+@regression(
+    item="db",
     prevents="overlay 단독을 완전 DB로 오인하거나 fallback 순서를 잃어 AF3가 필요한 파일을 못 찾는 버그.",
 )
 def test_verify_ordered_roots_resolves_overlay_then_full():

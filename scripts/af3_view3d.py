@@ -838,7 +838,7 @@ def find_targets(root, only=None, all_runs=False, include_partial=False):
     --only 는 타깃명으로 고르고 폴더명도 받아준다 (af3_visualize.py 와 같다).
     """
     root = Path(root)
-    if not root.is_dir():
+    if root.is_symlink() or not root.is_dir():
         die("'%s' 는 폴더가 아니다. AF3 --output_dir 로 준 폴더를 지정해라." % root)
     picks = set(x.strip() for x in only.split(",")) if only else None
 
@@ -853,7 +853,7 @@ def find_targets(root, only=None, all_runs=False, include_partial=False):
             if child.name.startswith("._"):
                 sidecars += 1
             continue
-        if not child.is_dir():
+        if child.is_symlink() or not child.is_dir():
             continue
         info = resolve_result_dir(child, mode="full")
         if info["note"]:
