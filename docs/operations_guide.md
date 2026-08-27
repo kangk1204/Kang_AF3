@@ -46,7 +46,27 @@ python3 scripts/af3_db.py verify --db-dir ~/public_databases_full
 python3 scripts/af3_db.py verify \
   --db-dir ~/public_databases_reduced \
   --db-dir ~/public_databases_full
+python3 scripts/af3_db.py validate-full-seal \
+  --db-dir ~/public_databases_full
 ```
+
+full 설치기는 기존 deep checksum pass 직후 `af3_full_db_manifest.json`을 원자적으로 만든다.
+기존 수동 설치에는 `python3 scripts/af3_db.py seal-full --db-dir
+~/public_databases_full`을 한 번 실행한다. 이후 runner는 수백 GB payload를 재hash하지 않고
+seal schema와 local inode/mtime/size binding을 검사한다. seal 누락은 기본 실패이며
+`--allow-unsealed-db`는 content 동일성을 증명하지 못하는 metadata-only 호환 경로다. 이미 있는
+seal이 malformed/stale이면 이 옵션으로 우회할 수 없다.
+
+### 기존 결과를 처음 새 manifest 계약으로 옮길 때
+
+현재 preferred/legacy runner는 입력·sidecar·DB·model·image identity manifest가 없는 과거
+결과를 기본으로 신뢰하지 않는다. upgrade 직후에는 `--audit`/`--dry-run`으로 재계산 대상을
+먼저 확인하고, 가능한 경우 새 runner로 다시 계산해 canonical manifest를 만든다.
+
+과거 실행 당시의 입력과 환경을 별도 archive/checksum으로 확인했으며 비용 때문에 재계산하지
+않겠다는 명시적 결정이 있을 때만 preferred의 `--trust-unverified-results` 또는 legacy의
+`--trust-unverified-legacy`를 사용한다. 두 옵션은 과거 결과를 검증하거나 새 manifest로
+승격하지 않고, 확인 불가능성을 감수하고 skip하는 compatibility opt-in이다.
 
 ## 3. 입력 준비
 
@@ -110,6 +130,12 @@ python3 scripts/run_af3_batch_improved.py \
 미완료 결과는 `.af3_incomplete` 아래에 제한 보존한다. `--cleanup`은 유효한 소유 marker가
 있는 snapshot만 삭제하며 marker 없는 사용자 파일은 보존한다. 같은 output root의 동시 실행은
 nofollow lock으로 거부한다.
+
+preferred runner와 legacy `af3_batch.py`는 무기한 정지를 피하기 위해 기본 7200초
+no-progress watchdog을 둔다. legacy의 `infer`/`oneshot`은 stdout/log 또는 output artifact,
+병렬 MSA는 각 갈래의 log 또는 해당 target artifact 변화를 진행으로 본다. 단순히 GPU 사용률이
+낮다는 이유로 중단하지 않는다. 정상 단계가 2시간 넘게 완전히 무출력이라는 운영 근거가 있으면
+`--no-progress-timeout SECONDS`를 늘리고, `0`은 감시를 끈다. 음수는 거부된다.
 
 ## 6. 2단계 실행
 

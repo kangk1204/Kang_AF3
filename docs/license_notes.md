@@ -81,7 +81,8 @@
 - [ ] 예측 결과를 자체 구조예측/폴딩 모델 학습 데이터로 쓸 계획이 있는가? → 금지
 - [ ] af3.bin 을 랩 외부(공개 저장소, 협력 기업)로 전달할 계획이 없는가? → 전달 금지
 - [ ] 결과 공개(논문·발표·특허 명세)시 Abramson et al. 2024 인용을 넣었는가?
-- [ ] 결과물 공개 시 Output Terms 고지와 수정 내역 고지를 포함했는가?
+- [ ] 결과물 공개 시 `OUTPUT_NOTICE.md`, pinned `OUTPUT_TERMS_OF_USE.md`, exact
+  `LEGALLY_BINDING_TERMS_OF_USE.txt`와 수정 내역을 함께 배포했는가?
 - [ ] Google 공식 URL에서 직접 받았고 다운로드 시점의 약관과 기관 검토 기록을 남겼는가?
 
 ## 6. 원문 위치
@@ -93,3 +94,7 @@
 ~/af3_work/alphafold3/WEIGHTS_PROHIBITED_USE_POLICY.md
 ~/af3_work/alphafold3/OUTPUT_TERMS_OF_USE.md
 ```
+
+이 저장소가 배포하는 고정 사본과 필수 고지는 최상위
+`OUTPUT_TERMS_OF_USE.md`, `LEGALLY_BINDING_TERMS_OF_USE.txt`, `OUTPUT_NOTICE.md`다.
+AF3-derived artifact를 다시 생성하면 시각화/3D generator가 세 파일을 출력 폴더에 복사한다.

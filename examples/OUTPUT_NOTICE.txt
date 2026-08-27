@@ -1,0 +1,17 @@
+ALPHAFOLD 3 OUTPUT NOTICE
+
+The AF3-derived HTML and structural examples in this directory are provided
+under and subject to the AlphaFold 3 Output Terms of Use. They modify AF3
+Output by embedding coordinates in a local viewer and adding computed
+summaries, labels, colours, and explanatory text. These representations are
+unvalidated exploratory aids; they are not evidence of binding or affinity.
+
+By using this information, you agree to AlphaFold 3 Output Terms of Use found at
+https://github.com/google-deepmind/alphafold3/blob/main/OUTPUT_TERMS_OF_USE.md.
+
+The pinned terms copy and the full legally binding notice are distributed at:
+../OUTPUT_TERMS_OF_USE.md and ../LEGALLY_BINDING_TERMS_OF_USE.txt
+
+Required citation:
+Abramson J, et al. Accurate structure prediction of biomolecular interactions
+with AlphaFold 3. Nature. 2024. doi:10.1038/s41586-024-07487-w.

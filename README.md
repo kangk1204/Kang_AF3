@@ -178,24 +178,28 @@ python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 > 실측으로 한 실행이 12,288MiB 중 **11,692MiB(95%)** 를 잡았고, 겹쳐 띄운 쪽은
 > `CUDA_ERROR_OUT_OF_MEMORY` 로 CUDA 초기화조차 못 하고 죽었다. 러너가 시작 전에
 > 이 상황을 감지해 종료코드 2 로 멈추고 어느 실행이 GPU 를 쓰는지 알려준다.
-> 큰 GPU 라 정말 겹쳐 돌리려면 `--allow-busy-gpu` 를 붙인다.
+> `--allow-busy-gpu`는 외부 프로세스/메모리 admission만 우회한다. 서로 다른 Kang_AF3
+> 실행끼리는 결과 손상과 OOM을 막기 위해 같은 GPU의 exclusive lease를 계속 지키므로,
+> 이 옵션으로 Kang_AF3 실행 두 개를 같은 device에 겹쳐 띄울 수는 없다.
 
 > **입력을 고치면 다시 계산한다.** 결과 폴더마다
 > `<타깃>_af3run_provenance.json` 이 함께 생기고, 거기에 입력 JSON 의 SHA-256,
 > 실행 모드, DB 경로, 모델 폴더, 도커 이미지가 적힌다. 다음 실행에서 이 값이 하나라도
 > 다르면 그 건은 완료로 보지 않고 다시 돌린다. 무엇이 달라졌는지도 알려 준다.
 > 2026-08-26 이전에 만든 결과에는 이 기록이 없어 지난 입력과 같은지 확인할 수 없다.
-> 그런 건은 완료로 보고 건너뛰되 실행할 때마다 몇 건인지 알려 준다.
+> 안전한 기본값은 그런 결과를 **미확인으로 보고 다시 계산**하는 것이다. archive된 입력·DB·모델·
+> image가 당시 실행과 같다는 것을 별도로 확인했고 재계산 비용을 의도적으로 피할 때만
+> `--trust-unverified-results`를 명시한다. 이 opt-in은 과거 결과를 검증해 주지 않는다.
 
 배치 실행이 끝나면 `quick_out/vhh_7mfv_1/`에 구조와 신뢰도 파일이 생긴다.
 정상 완료되면 `quick_summary.csv`에 `vhh_7mfv_1` 한 줄이 들어가고,
 `quick_figures/`에는 pLDDT/PAE 그림이, `quick_viewer/index.html`에는 회전할 수 있는
 3D 구조가 표시된다.
 
-않는다. 남긴 후보는 full DB 로 다시 돌린다. `경고` 열의 `MSA얕음` 은 unpaired
-깊이 100 미만에 자동으로 붙으므로 결과만 보고도 어느 쪽인지 알 수 있다.
-전수 스크리닝은 overlay, 상위 후보만 full DB로 재계산하는 조합을
-[3-5절](#3-5-데이터베이스-선택)에 정리했다.
+축소 DB 결과는 빠른 실행 경로의 탐색 자료일 뿐, 후보를 제거할 검증된 분류기가 아니다.
+`경고` 열의 `MSA얕음`은 unpaired 깊이 100 미만에 붙는 local heuristic이다. 축소 DB와
+full DB의 confidence 순위 보존을 score-blind representative panel에서 검증하기 전에는
+축소 DB만으로 후보를 제외하지 않는다. 비교와 한계는 [3-5절](#3-5-데이터베이스-선택)에 있다.
 
 ### 3. 결과 읽기
 
@@ -248,9 +252,9 @@ pLDDT 그림에서 파란 구간은 믿을 만하고, 주황으로 떨어지는 
 
 검토는 이 순서로 한다.
 
-1. `D_낮음` 과 `C_계면실패` 를 뺀다.
+1. 등급은 calibration되지 않은 local heuristic이므로 정렬·표시에만 쓰고 행을 제거하지 않는다.
 2. `경고` 에 `충돌` 이 있는 건은 구조를 직접 열어 본다.
-3. `샘플불안` 이 있는 건은 시드를 늘려 다시 돌린다.
+3. `샘플불안`은 within-run diffusion-sample range 표시다. 독립 seed/config 민감도를 따로 본다.
 4. 남은 것을 ipTM(복합체) 또는 pTM(단량체) 내림차순으로 정렬한다.
 5. 상위 수십 건만 3D 뷰어로 눈으로 본다.
 
@@ -439,15 +443,15 @@ CSV의 `등급` 열로 1차 선별하고, 단량체는 pTM과 pLDDT평균, 복�
 
 ## 1. 이 저장소의 범위
 
-AlphaFold 3 대량 실행을 위한 설치·입력·DB·후처리 스크립트 12개를 제공한다.
+AlphaFold 3 대량 실행을 위한 설치·입력·DB·후처리·artifact 스크립트 13개를 제공한다.
 
 | 스크립트 | 하는 일 |
 |----------|---------|
 | `scripts/install_af3_ubuntu.sh` | Ubuntu 단일 설치기. core 설치와 명시적 full 설치 |
 | `scripts/af3_check.sh` | 환경 진단. GPU, 드라이버, 가중치, DB, 도커, HMMER |
 | `scripts/af3_prepare.py` | FASTA/CSV 에서 AF3 입력 JSON 생성 |
-| `scripts/af3_db.py` | full DB 검증과 원자적 reduced-MSA overlay 생성 |
-| `scripts/run_af3_batch_improved.py` | 권장 배치 러너. 완료 판정을 최종 산출물로 하고 미완료 결과를 격리 보존하며 중복 실행을 차단한다 |
+| `scripts/af3_db.py` | pinned full DB deep seal/검증과 원자적 reduced-MSA overlay 생성 |
+| `scripts/run_af3_batch_improved.py` | 권장 배치 러너. provenance, 재개, 결과 격리, GPU lease, watchdog을 관리한다 |
 | `scripts/af3_batch.py` | 배치 러너. 컨테이너 1회 기동, MSA/추론 2단계 분리, 재시작, 재시도 |
 | `scripts/af3run.sh` | legacy `af3_batch.py` 래퍼. 작업 이름 하나로 실행 |
 | `scripts/af3_collect.py` | 출력 폴더의 신뢰도 지표를 CSV로 집계 |
@@ -455,6 +459,32 @@ AlphaFold 3 대량 실행을 위한 설치·입력·DB·후처리 스크립트 1
 | `scripts/af3_stage2.py` | `_data.json` 재사용으로 MSA 를 건너뛰는 2단계 입력 생성 |
 | `scripts/af3_rankcorr.py` | 두 설정의 순위 상관·top-N 보존 비교 |
 | `scripts/af3_view3d.py` | 무결성 검증된 Mol*/3Dmol 기반 로컬 HTML 뷰어 생성 |
+| `scripts/build_reference_artifacts.py` | 추적 CSV/문서에서 reference figure와 lineage manifest를 결정적으로 재생성·검증 |
+
+### 공식 upstream과의 관계 및 Kang_AF3의 추가 가치
+
+[Google DeepMind의 공식 AlphaFold 3 저장소](https://github.com/google-deepmind/alphafold3)는
+모델과 data/inference pipeline의 정본이다. 공식 `run_alphafold.py`는 이미 `--input_dir`,
+`--run_data_pipeline`/`--run_inference`, 반복 `--db_dir`와 여러 성능 플래그를 지원한다. Kang_AF3는
+이를 다시 구현하거나 모델을 변경하지 않고, pinned upstream 위에 연구실 운영·감사·후처리 계층을
+추가한다. Kang_AF3는 Google DeepMind가 유지보수하거나 지원하는 공식 저장소가 아니다. upstream
+설치·실행 기능의 정확한 범위는 [공식 설치 문서](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md)를
+우선한다.
+
+| 관점 | 공식 upstream | Kang_AF3가 추가하는 것 |
+|---|---|---|
+| 구조 예측 | 공식 AF3 모델·입력 schema·data pipeline·inference | 같은 pinned engine을 호출한다. 모델 architecture/weights는 바꾸지 않는다 |
+| 대량 실행 | 한 명령에서 단일/다중 JSON 실행 | target별 완료 판정, 실패만 재시도, partial 격리, canonical publish transaction, 실행 상태 요약 |
+| 결과 identity | AF3 표준 output 생성 | JSON·sidecar snapshot, model SHA-256, official full-DB seal, image ID, GPU 설정, 최종 artifact hash를 하나의 provenance로 결합 |
+| 동시성·장애 | GPU/성능 flag와 container 실행 | output/work lock, known/unknown GPU global gate와 UUID lease, memory admission, timeout·무진행 watchdog, bounded cleanup |
+| 설치·진단 | 공식 설치·DB download·Docker/Singularity 안내 | pinned checksum과 atomic publication, JAX GPU assertion, HMMER patch 검사, DB seal, fail-closed host 진단 |
+| 연구 분석 | pLDDT/pTM/ipTM 등 표준 output | MSA 재사용 2단계 실행, identity-safe selection, 동점 보존, complete-case 층화, Spearman/Kendall/top-N bootstrap CI, CSV·figure·viewer |
+| 배포 감사 | 공식 license/terms와 citation | exact Output Terms/notice 전달, deterministic figure builder, source-data lineage manifest, claim gate와 hermetic regression/mutation tests |
+
+따라서 이 저장소의 우위는 **예측 정확도 우위가 아니라 운영 신뢰성·재현성·감사 가능성**이다.
+Kang_AF3 결과만으로 binder 여부, affinity/Kd, epitope, 임상 유효성 또는 SOTA를 주장할 수 없다.
+또한 pinned revision은 재현성에는 유리하지만 최신 upstream 기능을 자동으로 따라가지는 않으므로,
+upstream update는 별도의 compatibility/수치 재검증 뒤에 반영한다.
 
 이 저장소는 AlphaFold 3 자체를 배포하지 않는다. AF3 코드, 가중치, 데이터베이스는 포함하지 않는다
 ([3-1](#3-1-다운로드-목록)).
@@ -491,8 +521,8 @@ AlphaFold 3 대량 실행을 위한 설치·입력·DB·후처리 스크립트 1
 원 측정값 (카드 총량 16,303 MiB): 선점 ON 15,157 MiB(**예약량이다. 수요가 아니다**),
 선점 OFF 스모크 1건 5,291 MiB, 선점 OFF 배치 23런 2,942~2,963 MiB. 뒤 두 값의 차이는
 계측 조건 차이(단발 실행 대 순회 정상상태)이고 어느 값이든 16GB 카드에 여유롭게 들어간다
-([docs/benchmark_report.md](docs/benchmark_report.md)). 위 그림 (c) 의 GB 표기는 환산
-기준(1024 대 1000)이 섞여 있으므로 **정확한 값이 필요하면 이 문단의 MiB 를 쓴다.**
+([docs/benchmark_report.md](docs/benchmark_report.md)). 그림은 모두 MiB로 다시 생성했으며
+선점량과 실제 수요량이 아니라 서로 다른 관측 조건임을 함께 표시한다.
 
 ### 동작이 확인된 버전 조합
 
@@ -655,19 +685,30 @@ cd ~/af3_work/Kang_AF3                                  # 이후 명령은 항�
 것이 약관을 확인했다는 표시다. 손으로 받으려면 이렇게 한다.
 
 ```bash
+set -euo pipefail
 mkdir -p ~/af3_models
 curl -L --fail --continue-at - \
   https://storage.googleapis.com/alphafold3/af3.bin.zst \
   -o ~/af3_models/af3.bin.zst
 zstd -t ~/af3_models/af3.bin.zst
-zstd -d -f ~/af3_models/af3.bin.zst -o ~/af3_models/af3.bin
-
-ls -l ~/af3_models/af3.bin
-sha256sum ~/af3_models/af3.bin
-# 검증값
-#   크기   : 1146811260  (약 1.15GB)
-#   sha256 : df8bbf2621f17dd3ee21c2a921e84a50bc2b80cdc0c7971cb915c2826fee1f9b
+staged_model="$(mktemp ~/af3_models/.af3.bin.XXXXXX)"
+trap 'rm -f -- "$staged_model"' EXIT
+zstd -d ~/af3_models/af3.bin.zst -o "$staged_model"
+test "$(stat -c '%s' "$staged_model")" = 1146811260
+printf '%s  %s\n' \
+  df8bbf2621f17dd3ee21c2a921e84a50bc2b80cdc0c7971cb915c2826fee1f9b \
+  "$staged_model" | sha256sum -c -
+chmod 0600 "$staged_model"
+test ! -e ~/af3_models/af3.bin || {
+  echo '기존 af3.bin을 덮지 않는다. 먼저 별도 경로로 옮기고 다시 검증하라.' >&2
+  exit 1
+}
+mv -T --no-clobber -- "$staged_model" ~/af3_models/af3.bin
+trap - EXIT
 ```
+
+해제·크기·SHA-256 검증이 모두 끝난 같은 디렉터리의 임시 파일만 최종 이름으로 원자
+게시한다. 기존 `af3.bin`은 자동으로 덮지 않는다.
 
 `af3.bin.zst` 는 1,020,545,840 B 이고 가중치 안에는 파라미터가 368,384,602개 있다.
 이 저장소는 pinned AF3 commit과 함께 위 크기를 엄격히 검사한다. 다른 모델 release를
@@ -713,9 +754,10 @@ AF3_MODEL_BYTES=$(stat -c %s ~/af3_models/af3.bin) \
 한 자리~열 자리 서열밖에 못 얻었고, 그 건들에서 계면 지표가 떨어졌다. Gβ1 은
 WD40 반복 계열이라 데이터베이스를 잘라도 동족체가 많이 남는다. VHH 는 그렇지 않다.
 
-**네 건 모두 집계기 등급은 같았다.** 지표는 움직여도 등급은 뒤집히지 않았다. 다만 형식 예시는 서로 무관한 단백질 3종이라 애초에 복합체가
-아니고, 양쪽 다 `C_계면실패` 로 옳게 버린 것이다. 진짜 복합체에서 등급이 같았던
-것은 1GOT 한 건이다. 네 건은 규칙을 세우기에 적은 수다.
+**네 건 모두 local heuristic 등급은 같았다.** 이것은 작은 조건부 사례의 기술적 관찰일
+뿐 grade stability나 올바른 후보 제거의 validation이 아니다. 세 건은 형식 예시로 만든
+서로 무관한 단백질 조합이고, known complex는 1GOT 한 건뿐이다. 이 네 건으로 cutoff나
+false-negative rate를 정할 수 없다.
 
 **overlay 의 ipTM 은 낮게도, 높게도 나온다.** 나노바디 복합체 10건을 overlay 로 훑고
 그중 경계 근처 3건을 full DB 로 다시 돌린 결과다.
@@ -730,12 +772,13 @@ WD40 반복 계열이라 데이터베이스를 잘라도 동족체가 많이 남
 앞의 VHH-항원 복합체에서는 반대로 overlay 가 0.05 낮았다. 즉 방향이 일정하지 않으므로
 **overlay 의 ipTM 은 크든 작든 그대로 믿을 수 없다.**
 
-한편 지금까지 대조한 복합체 7건에서 **집계기 등급이 뒤집힌 적은 없다.** 거르는
-용도로는 그래서 쓸 만하다.
+대조된 복합체에서 등급이 뒤집히지 않았다는 관찰은 validation이 아니다. full DB 재실행
+표본이 overlay 결과에 따라 선택됐고 사례 수가 작아 false-negative rate, sensitivity,
+enrichment, grade stability 또는 다른 panel로의 transportability를 추정할 수 없다.
 
-정리하면 이렇다. **집계 CSV 의 `MSA_unpaired깊이` 열을 본다.** overlay 로 돌렸는데
-수백 이상이면 full DB 와 거의 같은 답이 나왔고, 한 자리~열 자리면 계면 지표
-(ipTM, pLDDT)가 눈에 띄게 낮게 나왔다. 후자는 거르는 데만 쓰고 최종값으로 읽지
+정리하면 **집계 CSV의 `MSA_unpaired깊이` 열은 계산 조건을 설명하는 진단값**이다.
+현재의 조건부 표본에서 깊이와 confidence 변화가 함께 관찰됐지만, 깊이 cutoff를 후보 제거
+규칙으로 보정하지 않았다. 따라서 overlay ipTM/pLDDT를 최종값이나 배제 근거로 읽지 않는다.
 
 두 선택지의 실측 차이:
 
@@ -765,10 +808,12 @@ VHH 프레임워크는 그 신호 없이도 템플릿만으로 잡힌다.
 
 - 단량체 VHH 를 수백에서 수천 건 전수 스크리닝한다: **축소 DB.** 전체 DB 로 2000건은
   약 42일이 걸려 전수 스크리닝에는 적합하지 않다.
-- 항원-나노바디 복합체의 결합을 보고 싶다(ipTM 이 필요하다): **full DB를 기본으로 권한다.**
+- 항원-나노바디 복합체의 예측 배치 confidence를 탐색한다(ipTM이 필요하다): **full DB를 기본으로 권한다.**
   paired MSA 차이가 계면에 영향을 줄 가능성은 있지만, 비교 6종이 모두 단량체여서
   이 저장소는 ipTM 개선을 직접 측정하지 않았다 ([12절](#12-측정-조건과-한계)).
-- 실용적인 조합은 축소 DB 로 전수 스크리닝하고 상위 후보 수십 건만 전체 DB 로 재계산하는 것이다.
+- 축소 DB로 전체를 계산하고 일부를 full DB로 재계산하는 2단계 경로는 아직 미검증
+  exploratory workflow다. 사전 지정 metric, 동점 정책, intention-to-screen denominator,
+  held-out panel과 허용 miss-rate가 없으면 후보 제거에 사용하지 않는다.
 
 **이미 축소 DB로 돌린 결과는 6개 단량체 panel의 탐색 자료로는 남길 수 있다.** 다만
 외부 정답 구조, CDR geometry, 복합체 계면, 대규모 순위 보존을 검증한 결과는 아니다.
@@ -788,7 +833,21 @@ python3 scripts/af3_db.py verify --db-dir ~/public_databases_full
 
 `af3_db.py verify`는 8개 비어 있지 않은 FASTA와 실제 `.cif`가 든 `mmcif_files`를 확인하는
 빠른 구조·경로 사전점검이다. 수백 GB의 byte 단위 checksum 검증은 단일 설치기를
-`--full`로 실행할 때 수행한다.
+`--full`로 실행할 때 수행한다. 그 deep pass가 성공하면 설치기는
+`af3_full_db_manifest.json`을 원자적으로 게시한다. 이 seal은 8개 FASTA와 추출된 mmCIF
+tree의 경로 독립 content identity와 현재 파일의 inode/mtime/size binding을 분리해 기록한다.
+배치 러너는 매 실행 때 payload를 다시 읽지 않고 seal schema와 cheap binding만 확인한다.
+기존 full DB를 설치기 밖에서 검증했다면 다음 one-time deep pass로 seal한다.
+
+```bash
+python3 scripts/af3_db.py seal-full --db-dir ~/public_databases_full
+python3 scripts/af3_db.py validate-full-seal --db-dir ~/public_databases_full
+```
+
+seal이 없으면 preferred/legacy runner는 기본적으로 실행을 거부한다. 당장 deep pass를 할 수 없는
+구버전 설치만 `--allow-unsealed-db`로 명시할 수 있지만, provenance에는
+`unsealed-full-database-metadata-only`로 기록되어 content 동일성을 증명하지 못한다. seal 파일이
+존재하지만 malformed/stale이면 이 옵션으로도 downgrade하지 않는다.
 2026-08-21 재검증에서 해제본은 약 627GiB였고, 압축본 223GiB를 함께 보존했을 때
 디렉터리 peak가 약 850GiB였다. 회선과 파일시스템에 따라 시간은 크게 달라지므로 자신의
 환경 기록을 우선한다. 다운로드가 끊겼다면 반쪽 파일을 정상으로
@@ -1099,6 +1158,7 @@ tail -f af3.log
 | `--yes` | 확인 질문에 자동 응답. 백그라운드 실행에 필요 |
 | `--docker COMMAND` | 자동 탐지 대신 Docker 명령을 명시. 자동 경로는 암호를 묻는 sudo를 선택하지 않는다 |
 | `--db-dir PATH` | DB root. reduced overlay와 full fallback을 우선순서대로 반복 가능 |
+| `--allow-unsealed-db` | 호환성 전용 metadata-only full DB identity. seal 누락만 허용하며 malformed/stale seal은 거부 |
 
 이 러너는 완료 여부를 폴더가 아니라 최종 산출물로 판단한다. `_ranking_scores.csv`,
 `_model.cif`, `_summary_confidences.json` 세 파일이 모두 있고 크기가 0보다 커야 완료다.
@@ -1111,7 +1171,9 @@ tail -f af3.log
 권장 러너를 우선한다. 이 래퍼는 기존 2단계 작업과의 호환 경로다. 두 번째 인자가
 모드다: `check`(환경 진단), `dry`(실행 없이 명령만 확인), `screen`(경량 스크리닝
 sample 1 / recycle 3, 전수용), `full`(정밀 sample 5 / recycle 10, 상위 후보용),
-`msa`, `infer`, `oneshot`(MSA + 추론을 한 프로세스에서), `retry`(실패한 것만),
+`msa`, `infer`(보관 MSA + pinned AF3 기본 정밀 설정),
+`infer-screen`(보관 MSA + 명시적 sample 1 / recycle 3),
+`oneshot`(MSA + 경량 추론을 한 프로세스에서), `retry`(실패한 것만),
 `bench`(가장 짧은 20건의 경량 스모크), `collect`(CSV 집계).
 
 2000건을 처음 돌릴 때의 권장 순서:
@@ -1166,6 +1228,19 @@ python3 scripts/af3_batch.py --name vhh_001 --stage both --retry
 재실행은 `--retry` / `--no-skip` 로 준다. 전체 목록은 `--help`, 명령 모음은
 [docs/commands.md](docs/commands.md).
 
+legacy 러너는 기본적으로 `--no-progress-timeout 7200`을 적용한다. `infer`/`oneshot`은
+stdout 로그 또는 output artifact가, 병렬 MSA는 **각 갈래의** 로그 또는 그 갈래 target
+artifact가 2시간 동안 모두 변하지 않으면 해당 프로세스를 종료하고 실패로 기록한다. GPU
+사용률 0%만으로는 멈추지 않는다. 정상 작업이 2시간 넘게 아무 로그·파일도 만들지 않는다는
+근거가 있을 때만 값을 늘리고, 감시를 명시적으로 끄려면 `--no-progress-timeout 0`을 쓴다.
+음수는 잘못된 설정으로 거부한다.
+
+이 legacy 러너도 manifest가 없는 과거 MSA/result를 기본으로 재사용하지 않는다. upgrade 후에는
+먼저 `--dry-run`과 결과/입력 archive를 대조한다. 일치 여부를 외부 기록으로 확인한 경우에만
+`--trust-unverified-legacy`를 명시할 수 있으며, 이 옵션은 과거 cache의 정확성을 새로 검증하지 않는다.
+full DB seal 정책은 preferred runner와 동일하다. `--allow-unsealed-db`는 seal을 만들거나 검증하지
+않으며 metadata-only provenance를 남기는 제한적 호환 옵션이다.
+
 > ### 버킷 사다리에는 128을 포함한다
 >
 > AF3 의 기본 패딩 버킷 사다리는 128에서 시작한다 (`run_alphafold.py` 의 `_BUCKETS`
@@ -1198,6 +1273,12 @@ mkdir -p vhh_top_in
 while read n; do cp "vhh_001_in/${n}.json" vhh_top_in/ 2>/dev/null; done < top100.txt
 python3 scripts/af3_batch.py --name vhh_top --stage infer --diffusion-samples 5 --recycles 10
 ```
+
+`--stage infer`는 MSA/data pipeline을 건너뛴다는 뜻일 뿐 계산 fidelity를 뜻하지 않는다.
+`--diffusion-samples`/`--recycles`를 생략하면 pinned AF3 기본값을 사용한다. 경량 설정은
+항상 두 값을 명시하고 provenance에서 stage와 fidelity parameters를 따로 비교한다.
+top-N 경계 동점은 이름으로 자르지 않고 `af3_stage2.py` 기본 정책대로 전부 포함한다.
+정확히 N개가 필요하면 `--tie-policy error`로 중단해 cutoff를 재정의한다.
 
 `_data.json` 재사용의 절약폭은 1단계에 쓴 DB 구성이 정한다. 축소 DB 로 1단계를 돌렸으면
 건당 4~5초, 전체 DB 급으로 돌렸으면 건당 약 30초다 (실측, VHH 4건). 축소 DB 에서도
@@ -1345,8 +1426,13 @@ AF3 는 주어진 사슬을 어떻게든 배치하며, 실제로는 결합하지
 `examples/three_protein_complex.json` 은 ipTM 0.15 로 낮게 나왔지만
 (`C_계면실패`), 낮게 나오는 것이 항상 보장되지는 않는다.
 
-그래서 이 도구의 쓰임은 **수백~수천 건에서 실험할 수십 건을 고르는 것**이다.
-고른 뒤의 결합 여부와 세기는 실험이 판단한다. 예측을 근거로 삼아 논문에 쓸 때는
+그래서 이 도구는 **AF3 내부 confidence를 이용한 미검증 exploratory prioritization**에만
+쓴다. 현재 관찰 단위와 추론 단위는 각각 하나의 target(입력 분자 조합)이다. diffusion
+sample은 target 안의 stochastic measurement이지 독립 biological replicate가 아니다.
+현재 비교의 estimand는 같은 target의 두 AF3 계산 설정 사이 confidence/rank 차이이며,
+binder recovery, Kd/IC50, native interface accuracy, epitope truth 또는 mutation effect가 아니다.
+실험할 대상을 고르는 최종 규칙으로 사용하려면 독립 assay/native truth validation이 필요하다.
+예측을 근거로 삼아 논문에 쓸 때는
 [11절](#11-라이선스와-인용)의 출력물 약관과 [OUTPUT_NOTICE.md](OUTPUT_NOTICE.md)
 도 함께 확인한다.
 
@@ -1375,7 +1461,7 @@ vhh_001_out/vhh_4qgy_1/
 | `*_model.cif` | 1위 모델의 원자 좌표. mmCIF 의 `B_iso_or_equiv` 열이 원자별 pLDDT (0~100) | 구조를 눈으로 볼 때. 뷰어에 이 파일을 넣는다 ([9절](#9-결과-보기)) |
 | `*_summary_confidences.json` | ranking_score, ptm, iptm, fraction_disordered, has_clash, 체인별 지표 | 이 타깃을 통과시킬지 판단할 때 |
 | `*_confidences.json` | 원자별 pLDDT 배열, 토큰 쌍별 PAE 행렬, 토큰별 체인 ID | 어느 부위가 못 맞았는지 볼 때 |
-| `*_ranking_scores.csv` | `seed,sample,ranking_score` 한 줄씩 (sample 5면 5줄) | 결과가 우연인지, 샘플 간 산포를 볼 때 |
+| `*_ranking_scores.csv` | `seed,sample,ranking_score` 한 줄씩 (sample 5면 5줄) | 같은 실행의 within-run diffusion-sample range를 볼 때. 재현성/정확도 불확실성은 아님 |
 | `*_data.json` | MSA(`unpairedMsa`, `pairedMsa`)와 템플릿이 문자열로 담긴 **재사용 가능한 입력** | MSA 깊이를 볼 때. `--norun_data_pipeline` 재실행에 그대로 쓴다 ([6-4](#6-4-2단계-전략-msa-먼저-추론-나중)) |
 | `seed-*_sample-*/` | 샘플 하나의 `_model.cif` 와 신뢰도 2종 | 샘플 간 구조를 직접 비교할 때 |
 
@@ -1394,9 +1480,9 @@ vhh_001_out/vhh_4qgy_1/
 
 | 지표 | 범위 | 무엇 | 어디 |
 |------|------|------|------|
-| **pLDDT** | 0~100 | **잔기/원자 단위 국소 정확도** | `*_confidences.json`, `*_model.cif` 의 B-factor |
+| **pLDDT** | 0~100 | AF3의 원자별 국소 confidence. 실제 구조 정확도 자체가 아님 | `*_confidences.json`, `*_model.cif` 의 B-factor |
 | **pTM** | 0~1 | **예측된 TM-score.** 정답일 확률이 아니다 | `*_summary_confidences.json` |
-| **ipTM** | 0~1 | **계면 정확도.** 복합체에서만 산출 | 같음 |
+| **ipTM** | 0~1 | AF3의 예측 계면 confidence. 결합/affinity/native 정확도 증거가 아님 | 같음 |
 | **PAE** | Å | **토큰 쌍별 위치 오차 기댓값** | `*_confidences.json` |
 | **ranking_score** | 해당 없음 | AF3 가 모델을 줄 세울 때 쓰는 종합 점수 | `*_summary_confidences.json` |
 | **fraction_disordered**, **has_clash** | 0~1, 0/1 | 무질서 비율, 원자 충돌 발생 | 같음 |
@@ -1407,12 +1493,14 @@ pLDDT 평균은 집계 단위를 확인해야 한다. `af3_collect.py`의 `pLDDT
 원자 평균을 쓴다. 잔기별 꺾은선과 3D 뷰어는 각 잔기에 같은 가중치를 준 잔기 평균을 쓴다.
 현재 Docker 스모크에서는 두 값이 각각 92.67과 93.31이었다. 계산 오류가 아니라 가중치
 차이다. 시각화 표의 기존 `mean_plddt`와 `min_plddt` 열은 호환성을 위해 잔기 지표 별칭으로
-남아 있다.
+남아 있다. atom-weighted global mean은 큰 framework와 원자 수가 많은 잔기의 영향을 더
+받으므로 CDR/interface 정확도를 대표하지 않는다.
 
 ### 8-4. 판정 기준선
 
-`af3_collect.py` 가 CSV 의 `등급` 열에 쓰는 기준이고, AlphaFold 계열의 통상적 해석
-구간을 이 배치에 맞춰 적용한 것이다.
+`af3_collect.py`가 CSV의 `등급` 열에 쓰는 **calibration되지 않은 local heuristic**이다.
+pLDDT 색 구간과 달리 아래 whole-target 조합 등급과 cutoff는 AF3가 제공한 분류가 아니며,
+assay/native truth에 대해 sensitivity, specificity 또는 false-negative rate가 알려져 있지 않다.
 
 | 지표 | 구간 | 해석 |
 |------|------|------|
@@ -1433,8 +1521,9 @@ pLDDT 평균은 집계 단위를 확인해야 한다. `af3_collect.py`의 `pLDDT
 
 등급과 별개로 `경고` 열이 붙는다. `충돌`(has_clash > 0, 원자 중첩 구조 확인 필요),
 `무질서`(fraction_disordered ≥ 0.1), `MSA얕음`(unpaired 깊이 < 100.
-축소 DB 를 쓰면 정상적으로 붙는다), `샘플불안`(ranking 산포 ≥ 0.05. 샘플마다 결과가
-흔들려 재현성이 낮다), `버킷256`(패딩 버킷 ≥ 256. 더 큰 연산 구간이라는 표시)이다.
+축소 DB 를 쓰면 정상적으로 붙는다), `샘플불안`(within-run diffusion-sample ranking
+max-min range ≥ 0.05인 local heuristic; 재현성 또는 correctness calibration이 아님),
+`버킷256`(패딩 버킷 ≥ 256. 더 큰 연산 구간이라는 표시)이다.
 2.25배는 이 컴퓨터에서 버킷 128과 256을 비교한 값이며 다른 버킷이나 장비에 그대로
 적용하지 않는다.
 
@@ -1508,7 +1597,9 @@ ASCII로 만들려면 `--filename-lang en`을 준다. 이 옵션은 파일명만
 |------|---------------|-----|------------|-----------------------|-----------------|-----------|
 | A_높음 | 0.90 | 0.90 | 92.67 | 10,640 / 24,469 | 116 / 128 | 0.0023 |
 
-단량체 접힘에 대한 모델 신뢰도가 높고 다섯 샘플도 안정적이라는 뜻이다. 단량체라 ipTM은
+단량체 접힘에 대한 AF3 내부 confidence가 높고 같은 실행의 다섯 diffusion sample에서
+ranking score 범위가 작았다는 뜻이다. 이 within-run range는 run-to-run reproducibility,
+parameter/data uncertainty 또는 correctness calibration이 아니다. 단량체라 ipTM은
 없으며 0으로 해석하지 않는다. 이 값만으로 결합, 활성, 실험 구조 일치를 주장할 수는 없다.
 
 `ranking_score 검산`이 전건 일치인지 확인한다. 불일치는 서로 다른 실행의 파일이 섞였을
@@ -1519,12 +1610,13 @@ ASCII로 만들려면 `--filename-lang en`을 준다. 이 옵션은 파일명만
 
 ### 8-6. 검토 순서
 
-1. `등급` 열로 정렬한다. `D_낮음` 은 일단 제외한다.
+1. `등급` 열은 local heuristic으로 정렬에만 쓰고 행을 제거하지 않는다.
 2. `경고` 열에 `충돌` 이 있는 건은 구조를 직접 열어 확인한다.
-3. `경고` 열에 `샘플불안` 이 있는 건은 재현성이 낮으니 시드를 늘려 재실행한다.
+3. `샘플불안`은 같은 실행 diffusion-sample score range가 local cutoff를 넘었다는 뜻이다.
+   재현성 판정으로 부르지 말고, 필요하면 독립 seed/configuration으로 민감도를 확인한다.
 4. 남은 것을 pTM(또는 ipTM) 내림차순 + pLDDT평균 으로 정렬한다.
 5. 상위 수십 건만 구조를 실제로 눈으로 본다 ([9절](#9-결과-보기)).
-6. 그중에서 실험할 것을 고른다.
+6. 실제 후보 선택은 사전 지정 규칙과 assay/native validation design 안에서 수행한다.
 
 `MSA얕음` 경고는 축소 DB 를 썼으면 전량에 붙는다. 단량체 스크리닝에서는 정상이다
 ([3-5](#3-5-데이터베이스-선택) 의 6종 비교).
@@ -1615,7 +1707,7 @@ CDN URL은 version과 SRI가 고정돼 있고 embed 다운로드/cache는 SHA-25
 - **시점 초기화 버튼**: 처음 시점으로 복원한다
 
 왼쪽에 ranking score, pTM, ipTM, 평균 pLDDT, 최저 pLDDT, 무질서 비율,
-원자 충돌 여부, 사슬 수, 잔기/원자 수, 확산 샘플 수와 샘플 간 산포가 나온다.
+원자 충돌 여부, 사슬 수, 잔기/원자 수, 확산 샘플 수와 within-run sample range가 나온다.
 ipTM 은 단량체에 없는 값이므로 단량체 화면에는 그 줄이 아예 없다 (0 이 아니다).
 
 ### 9-5. 색 해석
@@ -1812,7 +1904,27 @@ AF3 가중치 제약은 네 가지다. **비영리 목적으로만** 쓸 수 있
 
 이 저장소가 함께 배포하는 AF3 결과물의 고지와 수정 내역은
 [OUTPUT_NOTICE.md](OUTPUT_NOTICE.md) 에 있다. 이 결과물을 다시 배포할 때는 그
-고지가 함께 가야 한다 (Output Terms 5항).
+고지, [pinned Output Terms 사본](OUTPUT_TERMS_OF_USE.md),
+[Legally Binding Terms of Use 고지](LEGALLY_BINDING_TERMS_OF_USE.txt)가 함께 가야 한다
+(Output Terms 5항). `af3_visualize.py`와 `af3_view3d.py`는 생성 폴더에 세 파일을 자동으로
+배치하고 viewer 안에도 눈에 띄는 고지와 필수 논문 인용을 넣는다.
+
+tracked reference artifact의 source SHA-256, generator, AF3 revision, terms 상태와
+재현 가능 여부는 [ARTIFACT_MANIFEST.json](ARTIFACT_MANIFEST.json)에 있다. tracked CSV에서
+재생성 가능한 benchmark 그림은 다음 명령으로 만든다.
+
+```bash
+python3 scripts/build_reference_artifacts.py --build
+python3 scripts/build_reference_artifacts.py --check   # hash/source/terms lineage 검증
+```
+
+manifest는 Python, matplotlib, FreeType와 DejaVu Sans font hash도 기록한다. source lineage는
+다른 환경에서도 확인할 수 있지만 PNG byte identity는 이 rendering environment가 같을 때만
+주장한다. 환경이 다르면 값·label·source hash를 우선 검증하고 byte 차이를 곧바로 데이터
+차이로 해석하지 않는다.
+
+원 AF3 JSON/mmCIF 또는 browser capture가 없는 역사적 그림은 manifest에
+`historical_not_reproducible`로 표시한다. 입력을 꾸며 byte 재현 가능하다고 주장하지 않는다.
 
 정확한 조건은 Google DeepMind가 배포하는 약관 원문을 기준으로 한다. 위 내용은 요약이며
 법적 효력은 원문에 있다. 더 자세한 정리는
@@ -1974,7 +2086,7 @@ A/B 벤치마크, 2000건 환산, MSA 스윕), [figures/](figures/) 에 README �
 스크립트를 수정했다면 `python3 tests/run_all.py`로 release 검증을 실행한다(Docker도
 `pip install`도 필요 없다). 빠른 등록 회귀만 보려면 `python3 tests/run_tests.py --strict`,
 목록은 `python3 tests/run_tests.py --list`를 사용한다. GitHub Actions도 Python
-3.9/3.12/3.14에서 같은 release entry point를 실행하며 3.12 lane은 matplotlib 그림
+3.8/3.9/3.12/3.14에서 같은 release entry point를 실행하며 3.12 lane은 matplotlib 그림
 생성 경로까지 검사한다.
 
 ---

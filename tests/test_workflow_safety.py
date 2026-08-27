@@ -30,6 +30,46 @@ from harness import (
 
 
 @regression(
+    item="tests",
+    prevents=(
+        "@regression 하나가 있는 모듈 안의 undecorated test_*가 자동 discovery에서 "
+        "조용히 빠지는 버그."
+    ),
+)
+def test_release_discovery_rejects_undecorated_test_in_registered_module():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "release_discovery_test", REPO_ROOT / "tests" / "run_all.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    with tempfile.TemporaryDirectory(prefix="af3_discovery_") as td:
+        root = Path(td)
+        tests_dir = root / "tests"
+        tests_dir.mkdir()
+        mixed = tests_dir / "test_mixed.py"
+        mixed.write_text(
+            "import unittest\n\n"
+            "@regression(item='x', prevents='x')\n"
+            "def test_registered(): pass\n\n"
+            "def test_silently_omitted(): pass\n\n"
+            "class Hidden(unittest.TestCase):\n"
+            "    def test_unwrapped_method(self): pass\n",
+            encoding="utf-8",
+        )
+        saved_root = module.ROOT
+        module.ROOT = root
+        try:
+            check(
+                module.test_discovery_check() != 0,
+                "registered module의 undecorated test를 discovery가 허용했다",
+            )
+        finally:
+            module.ROOT = saved_root
+
+
+@regression(
     item="docs",
     prevents="README/docs 정리 중 상대 링크 대상이 삭제·이동되거나 헤딩 제목이 바뀌어,\n"
              "초보 사용자가 설치 근거 문서를 열 수 없거나 목차 링크가 아무 데도 가지 않는 버그.",
@@ -629,6 +669,7 @@ def test_installer_help_dry_run_and_safety_gates():
         check_in("full DB installation requires", disk_report, "용량 부족 원인을 설명하지 않았다")
 
     source = installer.read_text(encoding="utf-8")
+    db_source = (SCRIPTS_DIR / "af3_db.py").read_text(encoding="utf-8")
     check('DB_PARTIAL="${DB_DIR}.partial"' in source, "DB를 sibling partial에 stage하지 않는다")
     check('EXPECTED_CIF_COUNT="195858"' in source, "고정 DB의 CIF 개수를 검증하지 않는다")
     check(
@@ -636,11 +677,12 @@ def test_installer_help_dry_run_and_safety_gates():
         "non-empty 검사를 넘어 고정 DB byte 크기를 검증하지 않는다",
     )
     check(
-        "9e7f50956c19cbcd8181dc5e9d7d6eebc08257cc858fc07d3ec88fd6b48dbbc9" in source,
+        'seal-full --db-dir "$root"' in source
+        and "9e7f50956c19cbcd8181dc5e9d7d6eebc08257cc858fc07d3ec88fd6b48dbbc9" in db_source,
         "고정 DB FASTA의 SHA-256을 검증하지 않는다",
     )
     check(
-        "c5512426e160df6dfa9533175f4eef3ec31539faa9aa14b2127d0f8d22cf3458" in source,
+        "c5512426e160df6dfa9533175f4eef3ec31539faa9aa14b2127d0f8d22cf3458" in db_source,
         "고정 mmCIF content-tree SHA-256을 검증하지 않는다",
     )
     check(
@@ -662,10 +704,15 @@ def test_installer_help_dry_run_and_safety_gates():
     check("sudo -S" not in source and "pwd.txt" not in source, "비밀번호 입력을 파일/인자로 받는다")
     check("rm -rf" not in source, "installer가 사용자 경로를 재귀 삭제한다")
     check(
-        "run_with_docker_group env" in source,
-        "최종 진단이 새 docker 그룹을 적용한 사용자 프로세스에서 돌지 않는다",
+        "run_with_docker_group env -i" in source,
+        "최종 진단이 inherited AF3/shell 환경을 비운 새 docker-group 경계에서 돌지 않는다",
     )
     check("sg docker -c" in source and "DOCKER=(sudo" not in source, "오래 걸리는 설치가 sudo timestamp에 의존한다")
+    check("run_installer_probe hello" in source and "run_installer_probe jax" in source,
+          "설치기 container probe에 공통 timeout/name 계약이 없다")
+    publish = source[source.index('mv -T --no-clobber -- "$DB_PARTIAL" "$DB_DIR"'):]
+    check('DB_VALIDATED_ID=""' in publish.split('db_valid "$DB_DIR"', 1)[0],
+          "DB rename 뒤 inode cache를 비우지 않아 final deep verification을 생략한다")
 
 
 @regression(
@@ -1044,6 +1091,25 @@ def test_environment_check_exits_nonzero_on_critical_missing_components():
         check_in("실패", proc.stdout + proc.stderr, "종합 실패 수를 출력하지 않았다")
 
 
+def _fast_environment_check_env(workspace: Workspace) -> dict:
+    """GPU/control-flow tests must not hash the 1.1 GB sparse integration fixture."""
+    model = workspace.model_dir / "af3.bin"
+    with model.open("wb") as handle:
+        handle.truncate(4096)
+    env = dict(os.environ)
+    env["PATH"] = str(make_stub_bin(workspace.root)) + os.pathsep + env.get("PATH", "")
+    env["AF3_DOCKER"] = "docker"
+    env["AF3_DB_DIR"] = str(workspace.db_dir)
+    env["AF3_MODEL_DIR"] = str(workspace.model_dir)
+    env["AF3_MODEL_BYTES"] = "4096"
+    env["AF3_MODEL_SHA256"] = (
+        "ad7facb2586fc6e966c004d7d1d16b024f5805ff7cb47c7a85dabd8b48892ca7"
+    )
+    env["AF3_STUB_LOG"] = str(workspace.stub_log)
+    env["AF3_STUB_CONTAINERS"] = str(workspace.root / "probe_containers.txt")
+    return env
+
+
 @regression(
     item="check",
     prevents="환경 진단 성공 경로가 image 내부 HMMER와 DB/model을 실제로 확인하지 못하는 버그.",
@@ -1051,14 +1117,7 @@ def test_environment_check_exits_nonzero_on_critical_missing_components():
 def test_environment_check_passes_complete_stub_environment():
     workspace = Workspace()
     try:
-        env = dict(os.environ)
-        env["PATH"] = str(make_stub_bin(workspace.root)) + os.pathsep + env.get("PATH", "")
-        env["AF3_DOCKER"] = "docker"
-        env["AF3_DB_DIR"] = str(workspace.db_dir)
-        env["AF3_MODEL_DIR"] = str(workspace.model_dir)
-        # Workspace의 sparse fixture는 동일 크기의 all-zero 파일이다. 실제 배포 기본값은
-        # README에 기록한 공식 af3.bin SHA-256이고, 테스트에서만 fixture hash로 바꾼다.
-        env["AF3_MODEL_SHA256"] = "121b85224e4474eb6de00bf17f0acde299569ac8ed4e13220c7b88c01192ad8d"
+        env = _fast_environment_check_env(workspace)
         proc = subprocess.run(
             ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
             cwd=workspace.root,
@@ -1070,9 +1129,40 @@ def test_environment_check_passes_complete_stub_environment():
         check_equal(proc.returncode, 0, "완전한 stub 환경을 진단이 거부했다", (proc.stdout + proc.stderr)[-2000:])
         check_in("--seq_limit 패치 확인", proc.stdout, "image 내부 patched HMMER를 확인하지 않았다")
         check_in("SHA-256", proc.stdout, "모델 가중치 hash를 확인하지 않았다")
+        check_in("full DB seal", proc.stdout, "runner의 필수 full DB seal을 진단하지 않았다")
         check_in("지원   --run_data_pipeline", proc.stdout, "boolean data-pipeline 플래그를 놓쳤다")
         check_in("지원   --run_inference", proc.stdout, "boolean inference 플래그를 놓쳤다")
         check_in("(CIF ", proc.stdout, "mmcif_files의 보조 파일을 구조 파일 수에 섞었다")
+        calls = workspace.stub_calls()
+        probes = [call for call in calls if call.get("call") == "probe"]
+        check({call.get("kind") for call in probes} >= {"gpu", "jax", "help", "hmmer"},
+              "모든 container probe를 수행하지 않았다")
+        check(all(call.get("name", "").startswith("kang-af3-check-") for call in probes),
+              "이름 없는 container probe가 있다")
+    finally:
+        workspace.cleanup()
+
+
+@regression(
+    item="check",
+    prevents="af3_check.sh는 성공하지만 두 runner는 seal 없는 full DB를 기본 거부하는 진단/실행 계약 불일치.",
+)
+def test_environment_check_fails_when_full_db_seal_is_missing():
+    workspace = Workspace()
+    try:
+        env = _fast_environment_check_env(workspace)
+        (workspace.db_dir / "af3_full_db_manifest.json").unlink()
+        proc = subprocess.run(
+            ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
+            cwd=workspace.root,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+        check(proc.returncode != 0, "seal 없는 full DB인데 환경 진단이 성공했다")
+        check_in("seal", proc.stdout + proc.stderr, "실패 원인을 full DB seal로 설명하지 않았다")
+        check_in("seal-full", proc.stdout + proc.stderr, "one-time 복구 명령을 안내하지 않았다")
     finally:
         workspace.cleanup()
 
@@ -1183,6 +1273,7 @@ def test_installer_image_capability_gate_fails_on_every_check():
             "IMAGE=stub-image\n"
             "AF3_VERSION=3.0.4\n"
             "DOCKER=(stub_docker)\n"
+            "run_installer_probe() { shift; stub_docker \"$@\"; }\n"
             "stub_docker() {\n"
             "  local text=\"$*\"\n"
             "  case \"$text\" in\n"
@@ -1233,6 +1324,104 @@ def test_installer_image_capability_gate_fails_on_every_check():
                 "CAPABILITY_GATE_PASSED" not in broken.stdout,
                 "%s 검사 실패 뒤에도 능력 검증을 통과로 보고했다" % what,
             )
+
+
+@regression(
+    item="install",
+    prevents=(
+        "installer probe가 Bash 함수 run_docker를 GNU timeout의 executable로 넘겨 "
+        "모든 실제 Docker probe가 command-not-found로 실패하는 버그."
+    ),
+)
+def test_installer_probe_times_out_the_real_docker_executable():
+    source = (SCRIPTS_DIR / "install_af3_ubuntu.sh").read_text(encoding="utf-8")
+    probe = _extract_shell_function(source, "run_installer_probe")
+    dispatch = _extract_shell_function(source, "run_with_docker_group")
+    with tempfile.TemporaryDirectory(prefix="af3_installer_probe_") as td:
+        root = Path(td)
+        fake_bin = root / "bin"
+        fake_bin.mkdir()
+        log = root / "docker.log"
+        docker = fake_bin / "docker"
+        docker.write_text(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$AF3_PROBE_LOG\"\n",
+            encoding="utf-8",
+        )
+        docker.chmod(0o755)
+        driver = root / "driver.sh"
+        driver.write_text(
+            "set -Eeuo pipefail\n"
+            "DOCKER_MODE=direct\nPROBE_PREFIX=test-probe\nPROBE_TIMEOUT_SECONDS=5\n"
+            "quote_posix() { printf \"'%s'\" \"$1\"; }\n"
+            + dispatch
+            + probe
+            + "\nrun_installer_probe smoke stub-image true\n",
+            encoding="utf-8",
+        )
+        env = dict(os.environ)
+        env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+        env["AF3_PROBE_LOG"] = str(log)
+        proc = subprocess.run(
+            ["bash", str(driver)],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        check_equal(proc.returncode, 0, "installer probe 실행이 실패했다", proc.stdout + proc.stderr)
+        check(log.is_file(), "timeout 경로가 실제 docker executable을 호출하지 않았다")
+        call = log.read_text(encoding="utf-8")
+        check_in("run --name test-probe-smoke --rm stub-image true", call,
+                 "installer probe docker argv가 틀렸다")
+
+
+@regression(
+    item="install",
+    prevents=(
+        "검증된 DB staging directory를 final path로 rename하면 device/inode가 같아서 "
+        "installer의 deep-verification cache가 최종 publish 검사를 생략하는 버그."
+    ),
+)
+def test_installer_revalidates_database_after_atomic_rename():
+    source = (SCRIPTS_DIR / "install_af3_ubuntu.sh").read_text(encoding="utf-8")
+    function_text = _extract_shell_function(source, "install_database")
+    with tempfile.TemporaryDirectory(prefix="af3_db_publish_verify_") as td:
+        root = Path(td)
+        driver = root / "driver.sh"
+        driver.write_text(
+            "set -Eeuo pipefail\n"
+            "DB_DIR=\"$1/db\"\n"
+            "DB_PARTIAL=\"$1/db.partial\"\n"
+            "DB_PARTIAL_MARKER_NAME=.installer-marker\n"
+            "DB_VALIDATED_ID=\n"
+            "mkdir -p \"$DB_PARTIAL\"\n"
+            "touch \"$DB_PARTIAL/$DB_PARTIAL_MARKER_NAME\"\n"
+            "db_valid() {\n"
+            "  local root=\"$1\" id\n"
+            "  [[ -d \"$root\" ]] || return 1\n"
+            "  id=$(stat -c '%d:%i' \"$root\")\n"
+            "  [[ -z $DB_VALIDATED_ID || $id != $DB_VALIDATED_ID ]] || return 0\n"
+            "  printf '%s\\n' \"$root\" >> \"$1.deep-log\"\n"
+            "  DB_VALIDATED_ID=$id\n"
+            "}\n"
+            "validate_path() { :; }\n"
+            "check_database_capacity() { :; }\n"
+            "validate_db_partial() { :; }\n"
+            "log() { :; }\n"
+            "warn() { :; }\n"
+            "die() { printf '%s\\n' \"$1\" >&2; exit 1; }\n"
+            + function_text
+            + "\ninstall_database\n"
+            "cat \"$DB_PARTIAL.deep-log\" \"$DB_DIR.deep-log\"\n",
+            encoding="utf-8",
+        )
+        proc = subprocess.run(
+            ["bash", str(driver), str(root)], capture_output=True, text=True, timeout=30
+        )
+        check_equal(proc.returncode, 0, "DB publish simulation이 실패했다", proc.stderr)
+        lines = [line for line in proc.stdout.splitlines() if line.strip()]
+        check_equal(lines, [str(root / "db.partial"), str(root / "db")],
+                    "rename 전 staging과 rename 후 final을 각각 deep verify하지 않았다")
 
 
 @regression(
@@ -1562,6 +1751,7 @@ def test_wrapper_rejects_names_that_escape_the_work_directory():
 def test_environment_check_fails_when_nvidia_smi_cannot_run():
     workspace = Workspace()
     try:
+        env = _fast_environment_check_env(workspace)
         bin_dir = make_stub_bin(workspace.root)
         # 존재하지만 항상 실패하는 nvidia-smi (드라이버 고장). 나머지는 완전한 stub
         # 환경이므로, 진단이 실패한다면 원인은 이것 하나뿐이다.
@@ -1572,13 +1762,7 @@ def test_environment_check_fails_when_nvidia_smi_cannot_run():
         )
         broken.chmod(0o755)
 
-        env = dict(os.environ)
-        env["PATH"] = str(bin_dir) + os.pathsep + env.get("PATH", "")
-        env["AF3_DOCKER"] = "docker"
-        env["AF3_DB_DIR"] = str(workspace.db_dir)
-        env["AF3_MODEL_DIR"] = str(workspace.model_dir)
-        env["AF3_MODEL_SHA256"] = (
-            "121b85224e4474eb6de00bf17f0acde299569ac8ed4e13220c7b88c01192ad8d")
+        env["PATH"] = str(bin_dir) + os.pathsep + os.environ.get("PATH", "")
         proc = subprocess.run(
             ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
             cwd=workspace.root, env=env, capture_output=True, text=True, timeout=300,
@@ -1630,13 +1814,7 @@ def test_distributed_af3_output_carries_its_notice():
 def test_environment_check_fails_when_container_cannot_see_the_gpu():
     workspace = Workspace()
     try:
-        env = dict(os.environ)
-        env["PATH"] = str(make_stub_bin(workspace.root)) + os.pathsep + env.get("PATH", "")
-        env["AF3_DOCKER"] = "docker"
-        env["AF3_DB_DIR"] = str(workspace.db_dir)
-        env["AF3_MODEL_DIR"] = str(workspace.model_dir)
-        env["AF3_MODEL_SHA256"] = (
-            "121b85224e4474eb6de00bf17f0acde299569ac8ed4e13220c7b88c01192ad8d")
+        env = _fast_environment_check_env(workspace)
         env["AF3_STUB_GPU_FAIL"] = "1"
         proc = subprocess.run(
             ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
@@ -1664,16 +1842,11 @@ def test_environment_check_fails_when_container_cannot_see_the_gpu():
 )
 def test_environment_check_fails_when_jax_does_not_reach_the_gpu():
     for mode, label in (("AF3_STUB_JAX_CPU", "CPU 로 떨어진 경우"),
+                        ("AF3_STUB_JAX_MIXED", "경고에 gpu 문자열만 있는 경우"),
                         ("AF3_STUB_JAX_FAIL", "초기화가 실패한 경우")):
         workspace = Workspace()
         try:
-            env = dict(os.environ)
-            env["PATH"] = str(make_stub_bin(workspace.root)) + os.pathsep + env.get("PATH", "")
-            env["AF3_DOCKER"] = "docker"
-            env["AF3_DB_DIR"] = str(workspace.db_dir)
-            env["AF3_MODEL_DIR"] = str(workspace.model_dir)
-            env["AF3_MODEL_SHA256"] = (
-                "121b85224e4474eb6de00bf17f0acde299569ac8ed4e13220c7b88c01192ad8d")
+            env = _fast_environment_check_env(workspace)
             env[mode] = "1"
             proc = subprocess.run(
                 ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
@@ -1687,3 +1860,92 @@ def test_environment_check_fails_when_jax_does_not_reach_the_gpu():
             check_in("JAX", proc.stdout, f"JAX 를 이유로 들지 않았다 ({label})")
         finally:
             workspace.cleanup()
+
+
+@regression(
+    item="check",
+    prevents=(
+        "AF3_DOCKER를 unquoted scalar로 실행해 공백/glob에 따라 argv가 바뀌거나, "
+        "설치기가 쓰는 'sudo -n docker' 호환 경로를 배열 전환 중 깨뜨리는 버그."
+    ),
+)
+def test_environment_check_uses_limited_docker_command_array():
+    workspace = Workspace()
+    try:
+        env = _fast_environment_check_env(workspace)
+        env["AF3_DOCKER"] = "sudo -n docker"
+        env["AF3_TEST_ALLOW_SUDO"] = "1"
+        accepted = subprocess.run(
+            ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
+            cwd=workspace.root, env=env, capture_output=True, text=True, timeout=60,
+        )
+        check_equal(accepted.returncode, 0, "sudo -n docker 배열 형식을 거부했다",
+                    (accepted.stdout + accepted.stderr)[-800:])
+
+        marker = workspace.root / "should-not-exist"
+        rejected_env = dict(env)
+        rejected_env["AF3_DOCKER"] = "docker touch %s" % marker
+        rejected = subprocess.run(
+            ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
+            cwd=workspace.root, env=rejected_env, capture_output=True, text=True, timeout=60,
+        )
+        check(rejected.returncode != 0, "제한 밖의 AF3_DOCKER argv를 허용했다")
+        check(not marker.exists(), "AF3_DOCKER의 추가 토큰을 명령으로 실행했다")
+        check_in("단일 실행 파일", rejected.stdout, "허용 command contract를 설명하지 않았다")
+    finally:
+        workspace.cleanup()
+
+
+@regression(
+    item="check",
+    prevents=(
+        "GPU/JAX/help probe가 무기한 멈추거나 이름 없는 컨테이너를 남기고, "
+        "run_alphafold.py --help 실패·빈 출력을 정상 capability로 오인하는 버그."
+    ),
+)
+def test_environment_check_bounds_cleans_and_validates_probes():
+    check_in(
+        "timeout --signal=TERM --kill-after=5s 30s",
+        (SCRIPTS_DIR / "af3_check.sh").read_text(encoding="utf-8"),
+        "환경 진단기의 probe cleanup이 Docker daemon 장애에 무기한 대기한다",
+    )
+    installer_source = (SCRIPTS_DIR / "install_af3_ubuntu.sh").read_text(
+        encoding="utf-8"
+    )
+    cleanup_source = installer_source.split("cleanup() {", 1)[1].split(
+        "trap cleanup EXIT", 1
+    )[0]
+    check_in(
+        "timeout --signal=TERM --kill-after=5s 30s",
+        cleanup_source,
+        "설치기의 probe cleanup이 Docker daemon 장애에 무기한 대기한다",
+    )
+    for mode in ("AF3_STUB_HELP_FAIL", "AF3_STUB_HELP_EMPTY"):
+        workspace = Workspace()
+        try:
+            env = _fast_environment_check_env(workspace)
+            env[mode] = "1"
+            proc = subprocess.run(
+                ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
+                cwd=workspace.root, env=env, capture_output=True, text=True, timeout=30,
+            )
+            check(proc.returncode != 0, "%s help probe를 허용했다" % mode)
+            check_in("--help", proc.stdout, "help probe 실패 원인을 출력하지 않았다")
+        finally:
+            workspace.cleanup()
+
+    workspace = Workspace()
+    try:
+        env = _fast_environment_check_env(workspace)
+        env["AF3_STUB_PROBE_HANG"] = "gpu"
+        env["AF3_CHECK_PROBE_TIMEOUT"] = "1"
+        proc = subprocess.run(
+            ["bash", str(SCRIPTS_DIR / "af3_check.sh")],
+            cwd=workspace.root, env=env, capture_output=True, text=True, timeout=20,
+        )
+        check(proc.returncode != 0, "멈춘 container probe를 성공으로 처리했다")
+        registry = Path(env["AF3_STUB_CONTAINERS"])
+        names = registry.read_text(encoding="utf-8").splitlines() if registry.exists() else []
+        check_equal(names, [], "timeout 뒤 probe 컨테이너를 정리하지 않았다")
+    finally:
+        workspace.cleanup()

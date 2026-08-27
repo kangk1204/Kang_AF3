@@ -23,19 +23,19 @@ readonly EXPECTED_CIF_COUNT="195858"
 readonly MMCIF_ARCHIVE_RELATIVE="_zst/pdb_2022_09_28_mmcif_files.tar.zst"
 readonly EXPECTED_MMCIF_ARCHIVE_SIZE="56979074571"
 readonly EXPECTED_MMCIF_ARCHIVE_SHA256="4706ec0d948ed7a005b30eea21f5a7f9362b067e48d8bea2605671a49bd43c24"
-readonly EXPECTED_MMCIF_TREE_SHA256="c5512426e160df6dfa9533175f4eef3ec31539faa9aa14b2127d0f8d22cf3458"
 readonly DB_PARTIAL_MARKER_NAME=".kang-af3-db-partial"
 readonly PLOT_ENV_MARKER_NAME=".kang-af3-plot-env"
 readonly PLOT_ENV_MARKER_VALUE="ubuntu-matplotlib-v1"
+readonly SAFE_SYSTEM_PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 readonly -a DB_OBJECT_SPECS=(
-  "bfd-first_non_consensus_sequences.fasta:18171626364:fd87dca06401b03f4ac3c59a82dac14db491a7933ed6abaa19e14e02c6eb1af5"
-  "mgy_clusters_2022_05.fa:128579703018:9e7f50956c19cbcd8181dc5e9d7d6eebc08257cc858fc07d3ec88fd6b48dbbc9"
-  "uniref90_2022_05.fa:71821260491:f0c61e13a6f71ec2b19e44d35acb531ed3a06a4a839fc12feb80d3adf883c049"
-  "uniprot_all_2021_04.fa:108447942931:76f32efd5c6ba73857b0beb3bf1ff823cf0dbef3d876c70d80ee387db13a169d"
-  "pdb_seqres_2022_09_28.fasta:232899463:1b3bc853322c32f2eea818065b8f569a18d25a52326a8d2c2c3de85752e55fe1"
-  "nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta:80977012680:14c05ac0827c9bf06a37acfc4b3dd1d66e48d5a5f713c0de68611aa7fedc00f9"
-  "rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta:228433680:55ef718071244ad7433678ba249aaeb67707b499f0189a38edadca8d64972318"
-  "rnacentral_active_seq_id_90_cov_80_linclust.fasta:13860314914:6c33f15c48d2ac8d7d42a8699ff2e7bd6a4816f8a074157522d3c5b591f927eb"
+  "bfd-first_non_consensus_sequences.fasta:18171626364"
+  "mgy_clusters_2022_05.fa:128579703018"
+  "uniref90_2022_05.fa:71821260491"
+  "uniprot_all_2021_04.fa:108447942931"
+  "pdb_seqres_2022_09_28.fasta:232899463"
+  "nt_rna_2023_02_23_clust_seq_id_90_cov_80_rep_seq.fasta:80977012680"
+  "rfam_14_9_clust_seq_id_90_cov_80_rep_seq.fasta:228433680"
+  "rnacentral_active_seq_id_90_cov_80_linclust.fasta:13860314914"
 )
 
 FULL=0
@@ -45,6 +45,16 @@ TMP_DIR=""
 WEIGHT_TMP=""
 WEIGHT_STAGE_DIR=""
 DB_VALIDATED_ID=""
+DOCKER=()
+readonly PROBE_TIMEOUT_SECONDS=180
+readonly PROBE_PREFIX="kang-af3-install-${UID:-0}-$$"
+PROBE_CONTAINERS=(
+  "${PROBE_PREFIX}-hello"
+  "${PROBE_PREFIX}-gpu"
+  "${PROBE_PREFIX}-version"
+  "${PROBE_PREFIX}-hmmer"
+  "${PROBE_PREFIX}-jax"
+)
 revision=""
 image_source=""
 docker_version=""
@@ -104,6 +114,14 @@ die() {
 }
 
 cleanup() {
+  local name
+  if ((${#DOCKER[@]})); then
+    for name in "${PROBE_CONTAINERS[@]}"; do
+      run_with_docker_group \
+        timeout --signal=TERM --kill-after=5s 30s \
+        docker rm -f -- "$name" >/dev/null 2>&1 || true
+    done
+  fi
   if [[ -n "$WEIGHT_TMP" && -e "$WEIGHT_TMP" ]]; then
     rm -f -- "$WEIGHT_TMP"
   fi
@@ -123,6 +141,8 @@ cleanup() {
   fi
 }
 trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 while (($#)); do
   case "$1" in
@@ -242,7 +262,7 @@ esac
 [[ "$(dpkg --print-architecture)" == "amd64" ]] || die "only the tested amd64 path is supported"
 
 for command in sudo apt-get dpkg-query nvidia-smi sha256sum stat find grep awk sed systemctl \
-  flock cmp install mktemp mv du df dirname sort xargs sg; do
+  flock cmp install mktemp mv du df dirname sort sg timeout; do
   command -v "$command" >/dev/null 2>&1 || die "required command is missing: $command"
 done
 nvidia-smi -L >/dev/null 2>&1 || die "NVIDIA driver is not working; fix nvidia-smi before running this installer"
@@ -289,18 +309,6 @@ weights_valid() {
   [[ "$(sha256sum "$MODEL_DIR/af3.bin" | awk '{print $1}')" == "$MODEL_SHA256" ]]
 }
 
-mmcif_tree_sha256() {
-  local directory="$1"
-  (
-    cd "$directory"
-    find . -maxdepth 1 -type f -name '*.cif' -print0 | \
-      LC_ALL=C sort -z | \
-      xargs -0 -r -n 256 -P 8 sha256sum | \
-      LC_ALL=C sort -k2,2 | \
-      sha256sum | awk '{print $1}'
-  )
-}
-
 db_structure_valid() {
   local root="$1"
   local spec name remainder expected_size actual_size cif_count
@@ -324,20 +332,16 @@ db_structure_valid() {
 
 db_valid() {
   local root="$1"
-  local spec name remainder expected_sha actual_sha root_id
-  local mmcif_archive mmcif_sha
+  local root_id mmcif_archive mmcif_sha
   [[ -d "$root" && ! -L "$root" ]] || return 1
   root_id="$(stat -c '%d:%i' "$root" 2>/dev/null)" || return 1
   [[ -z "$DB_VALIDATED_ID" || "$root_id" != "$DB_VALIDATED_ID" ]] || return 0
   db_structure_valid "$root" || return 1
-  for spec in "${DB_OBJECT_SPECS[@]}"; do
-    name="${spec%%:*}"
-    remainder="${spec#*:}"
-    expected_sha="${remainder#*:}"
-    printf '[install] SHA-256: %s\n' "$name" >&2
-    actual_sha="$(sha256sum "$root/$name" | awk '{print $1}')" || return 1
-    [[ "$actual_sha" == "$expected_sha" ]] || return 1
-  done
+  if python3 "$REPO_ROOT/scripts/af3_db.py" validate-full-seal \
+      --db-dir "$root" --require-official >/dev/null 2>&1; then
+    DB_VALIDATED_ID="$root_id"
+    return 0
+  fi
   mmcif_archive="$root/$MMCIF_ARCHIVE_RELATIVE"
   if [[ -e "$mmcif_archive" ]]; then
     [[ -d "$root/_zst" && ! -L "$root/_zst" ]] || return 1
@@ -347,11 +351,11 @@ db_valid() {
     printf '[install] SHA-256: %s\n' "$MMCIF_ARCHIVE_RELATIVE" >&2
     mmcif_sha="$(sha256sum "$mmcif_archive" | awk '{print $1}')" || return 1
     [[ "$mmcif_sha" == "$EXPECTED_MMCIF_ARCHIVE_SHA256" ]] || return 1
-  else
-    printf '[install] SHA-256: mmcif_files content tree (%s files)\n' "$EXPECTED_CIF_COUNT" >&2
-    mmcif_sha="$(mmcif_tree_sha256 "$root/mmcif_files")" || return 1
-    [[ "$mmcif_sha" == "$EXPECTED_MMCIF_TREE_SHA256" ]] || return 1
   fi
+  # One Python-owned deep pass hashes the exact FASTA/mmCIF payloads, compares
+  # the official pins, checks the binding before/after, and atomically publishes
+  # the seal. There is no caller-supplied "preverified" publication bypass.
+  python3 "$REPO_ROOT/scripts/af3_db.py" seal-full --db-dir "$root" || return 1
   DB_VALIDATED_ID="$root_id"
   return 0
 }
@@ -551,6 +555,18 @@ run_docker() {
 
 DOCKER=(run_docker)
 
+run_installer_probe() {
+  local suffix="$1"
+  local name="${PROBE_PREFIX}-${suffix}"
+  shift
+  # DOCKER contains the shell function `run_docker`; GNU timeout can exec only
+  # real programs, not an unexported function.  Put timeout and docker inside
+  # the same direct/group-shell dispatcher instead.
+  run_with_docker_group \
+    timeout --signal=TERM --kill-after=5s "${PROBE_TIMEOUT_SECONDS}s" \
+    docker run --name "$name" --rm "$@"
+}
+
 docker_capture_line() {
   local variable_name="$1"
   local captured=""
@@ -562,8 +578,8 @@ docker_capture_line() {
 }
 
 log "verifying Docker and GPU passthrough"
-"${DOCKER[@]}" run --rm "$HELLO_WORLD_IMAGE" >/dev/null
-"${DOCKER[@]}" run --rm --runtime=nvidia --gpus all "$GPU_PROBE_IMAGE" nvidia-smi \
+run_installer_probe hello "$HELLO_WORLD_IMAGE" >/dev/null
+run_installer_probe gpu --runtime=nvidia --gpus all "$GPU_PROBE_IMAGE" nvidia-smi \
   --query-gpu=name,driver_version,memory.total --format=csv,noheader
 
 image_exists() {
@@ -571,14 +587,14 @@ image_exists() {
 }
 
 validate_image_capabilities() {
-  "${DOCKER[@]}" run --rm --entrypoint python3 "$IMAGE" -c \
+  run_installer_probe version --entrypoint python3 "$IMAGE" -c \
     "from alphafold3 import version; assert version.__version__ == '$AF3_VERSION'" \
     >/dev/null || die "AF3 image does not report the pinned version $AF3_VERSION: $IMAGE"
-  "${DOCKER[@]}" run --rm --entrypoint jackhmmer "$IMAGE" -h 2>&1 | \
+  run_installer_probe hmmer --entrypoint jackhmmer "$IMAGE" -h 2>&1 | \
     grep -Fq -- '--seq_limit' || \
     die "AF3 image lacks the patched HMMER --seq_limit flag: $IMAGE"
-  "${DOCKER[@]}" run --rm --gpus all --entrypoint python3 "$IMAGE" -c \
-    "import jax; assert jax.default_backend() == 'gpu'; assert jax.devices()" \
+  run_installer_probe jax --gpus all --entrypoint python3 "$IMAGE" -c \
+    "import jax; backend=jax.default_backend(); devices=jax.devices(); assert backend == 'gpu'; assert devices and all(device.platform == 'gpu' for device in devices)" \
     >/dev/null || die "AF3 image cannot reach the GPU through JAX: $IMAGE"
 }
 
@@ -720,7 +736,8 @@ install_database() {
     warn "reusing installer-owned staging when present; the upstream downloader restarts objects rather than resuming byte ranges"
     ensure_source
     log "downloading the full AF3 database into the sibling staging directory"
-    bash "$SOURCE_DIR/fetch_databases.sh" "$DB_PARTIAL"
+    env -i HOME="$HOME" PATH="$SAFE_SYSTEM_PATH" LANG=C.UTF-8 LC_ALL=C.UTF-8 \
+      bash "$SOURCE_DIR/fetch_databases.sh" "$DB_PARTIAL"
     db_valid "$DB_PARTIAL" || \
       die "database verification failed. Partial data was preserved at $DB_PARTIAL; rerun after diagnosing the failed object."
   fi
@@ -732,6 +749,7 @@ install_database() {
   mv -T --no-clobber -- "$DB_PARTIAL" "$DB_DIR"
   [[ ! -e "$DB_PARTIAL" ]] || die "could not publish the database without replacing a path"
   rm -f -- "$DB_DIR/$DB_PARTIAL_MARKER_NAME"
+  DB_VALIDATED_ID=""
   db_valid "$DB_DIR" || die "published database failed final verification"
 }
 
@@ -740,7 +758,11 @@ if ((FULL)); then
   install_weights
   install_database
   log "running the complete Kang_AF3 environment check"
-  run_with_docker_group env \
+  run_with_docker_group env -i \
+    HOME="$HOME" \
+    PATH="$SAFE_SYSTEM_PATH" \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
     AF3_IMAGE="$IMAGE" \
     AF3_MODEL_DIR="$MODEL_DIR" \
     AF3_DB_DIR="$DB_DIR" \

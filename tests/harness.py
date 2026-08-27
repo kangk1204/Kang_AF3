@@ -9,6 +9,7 @@ pytest 가 이미 있는 환경에서는 pytest 로도 수집된다 (test_* 함�
 
 from __future__ import annotations
 
+import atexit
 import os
 import shutil
 import subprocess
@@ -24,6 +25,47 @@ REPO_ROOT = TESTS_DIR.parent
 # 임시 사본을 대상으로 돌리려고 이 환경변수로 갈아끼운다. 원본은 건드리지 않는다.
 SCRIPTS_DIR = Path(os.environ.get("AF3_TESTS_SCRIPTS_DIR") or (REPO_ROOT / "scripts"))
 FAKE_DOCKER = TESTS_DIR / "fake_docker.py"
+_HERMETIC_BIN: Path | None = None
+
+
+def clean_environment(*, preserve_scripts_dir: bool = False) -> dict:
+    """Return a host-independent environment for test subprocesses."""
+    env = dict(os.environ)
+    preserved = env.get("AF3_TESTS_SCRIPTS_DIR") if preserve_scripts_dir else None
+    for key in list(env):
+        if key.startswith("AF3_") or key in {"BASH_ENV", "ENV", "CDPATH", "GLOBIGNORE"}:
+            env.pop(key, None)
+    if preserved is not None:
+        env["AF3_TESTS_SCRIPTS_DIR"] = preserved
+    return env
+
+
+def activate_hermetic_environment() -> None:
+    """Block accidental host Docker use and inherited AF3 configuration suite-wide."""
+    global _HERMETIC_BIN
+    if _HERMETIC_BIN is not None:
+        return
+    preserved_scripts = os.environ.get("AF3_TESTS_SCRIPTS_DIR")
+    for key in list(os.environ):
+        if key.startswith("AF3_") or key in {"BASH_ENV", "ENV", "CDPATH", "GLOBIGNORE"}:
+            os.environ.pop(key, None)
+    if preserved_scripts is not None:
+        os.environ["AF3_TESTS_SCRIPTS_DIR"] = preserved_scripts
+    _HERMETIC_BIN = Path(tempfile.mkdtemp(prefix="af3_test_path_"))
+    docker = _HERMETIC_BIN / "docker"
+    docker.write_text("#!/bin/sh\nexit 127\n", encoding="utf-8")
+    docker.chmod(0o755)
+    os.environ["PATH"] = str(_HERMETIC_BIN) + os.pathsep + os.environ.get("PATH", "")
+
+    def cleanup() -> None:
+        if _HERMETIC_BIN is not None:
+            shutil.rmtree(_HERMETIC_BIN, ignore_errors=True)
+
+    atexit.register(cleanup)
+
+
+# pytest and ad-hoc module imports must be as hermetic as tests/run_tests.py.
+activate_hermetic_environment()
 
 
 class Failure(AssertionError):
@@ -88,6 +130,21 @@ class Workspace:
         mmcif = self.db_dir / "mmcif_files"
         mmcif.mkdir()
         (mmcif / "stub.cif").write_text("data_stub\n", encoding="utf-8")
+        # Production runners fail closed on unsealed full databases. Seal this
+        # tiny fixture through the same deep path so ordinary tests exercise the
+        # strict contract instead of globally opting into metadata-only mode.
+        import importlib.util as _importlib_util
+        import sys as _sys
+
+        _db_spec = _importlib_util.spec_from_file_location(
+            "af3_test_db_sealer", SCRIPTS_DIR / "af3_db.py"
+        )
+        if _db_spec is None or _db_spec.loader is None:
+            raise RuntimeError("cannot load af3_db.py for fixture sealing")
+        _db_module = _importlib_util.module_from_spec(_db_spec)
+        _sys.modules[_db_spec.name] = _db_module
+        _db_spec.loader.exec_module(_db_module)
+        _db_module.seal_full_database(self.db_dir, enforce_official_pins=False)
         # Sparse file: exact pinned-model size without consuming 1.15 GB of blocks.
         with (self.model_dir / "af3.bin").open("wb") as handle:
             handle.truncate(1_146_811_260)
@@ -221,12 +278,12 @@ def run_script(
 ) -> subprocess.CompletedProcess:
     """scripts/<script> 를 가짜 docker 가 놓인 PATH 로 실행한다."""
     bin_dir = make_stub_bin(workspace.root)
-    env = dict(os.environ)
-    for key in list(env):
-        if key.startswith("AF3_STUB_") or key.startswith("AF3_TEST_"):
-            env.pop(key, None)
+    env = clean_environment()
     env["PATH"] = f"{bin_dir}{os.pathsep}{env.get('PATH', '')}"
     env["AF3_STUB_LOG"] = str(workspace.stub_log)
+    # Unit-test runners must not contend on the host-wide production GPU lease.
+    # Cross-output lease behavior is tested explicitly inside one workspace.
+    env["AF3_GPU_LEASE_DIR"] = str(workspace.root / "gpu_leases")
     env["PYTHONIOENCODING"] = "utf-8"
     env.setdefault("LC_ALL", "C.UTF-8")
     if env_extra:

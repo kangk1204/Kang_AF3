@@ -44,6 +44,9 @@ def make_full_db(root: Path) -> Path:
     mmcif = root / "mmcif_files"
     mmcif.mkdir()
     (mmcif / "x.cif").write_text("data_x\n", encoding="utf-8")
+    load_module(DB_TOOL, "af3_db_fixture_sealer").seal_full_database(
+        root, enforce_official_pins=False
+    )
     return root
 
 
@@ -127,6 +130,36 @@ def test_verify_checks_reduced_overlay_manifest_sizes():
         report = mod.verify_database_roots([overlay, full])
         check(not report["ok"], "manifest 크기와 다른 overlay를 허용했다")
         check_in("manifest", " ".join(report["errors"]).lower(), "manifest 불일치 원인을 설명하지 않았다")
+
+
+@regression(
+    item="db",
+    prevents="같은 byte 수로 변조한 reduced overlay를 preferred/legacy identity가 manifest hash만 보고 허용하는 버그.",
+)
+def test_both_runners_reject_same_size_reduced_overlay_mutation():
+    db = load_module(DB_TOOL, "af3_db_overlay_same_size")
+    preferred = load_module(RUNNER, "af3_preferred_overlay_same_size")
+    legacy = load_module("af3_batch.py", "af3_legacy_overlay_same_size")
+    with tempfile.TemporaryDirectory(prefix="af3_overlay_same_size_") as td:
+        root = Path(td)
+        full = make_full_db(root / "full")
+        overlay = root / "overlay"
+        db.create_reduced_overlay(full, overlay, limits={name: 9 for name in FASTA_NAMES})
+        preferred.database_fingerprints([overlay, full], "full")
+        legacy.database_identity({}, [overlay, full])
+        candidate = overlay / FASTA_NAMES[0]
+        original = candidate.read_bytes()
+        candidate.write_bytes(bytes([original[0] ^ 1]) + original[1:])
+        for label, operation in (
+            ("preferred", lambda: preferred.database_fingerprints([overlay, full], "full")),
+            ("legacy", lambda: legacy.database_identity({}, [overlay, full])),
+        ):
+            try:
+                operation()
+            except (OSError, ValueError) as exc:
+                check_in("hash", str(exc), f"{label}가 same-size 변조 원인을 hash로 설명하지 않았다")
+            else:
+                check(False, f"{label}가 same-size reduced overlay 변조를 허용했다")
 
 
 @regression(
@@ -240,6 +273,185 @@ def test_model_size_pin_is_overridable_and_says_so():
             os.environ.pop("AF3_MODEL_BYTES", None)
             if saved is not None:
                 os.environ["AF3_MODEL_BYTES"] = saved
+
+
+@regression(
+    item="db-seal",
+    prevents="같은 공식 DB를 다른 경로에 설치하면 inode/path가 달라 content identity까지 달라지는 버그.",
+)
+def test_full_seal_content_identity_is_stable_across_paths_and_runners():
+    db = load_module(DB_TOOL, "af3_db_stable_identity")
+    preferred = load_module(RUNNER, "af3_preferred_stable_identity")
+    legacy = load_module("af3_batch.py", "af3_legacy_stable_identity")
+    with tempfile.TemporaryDirectory(prefix="af3_full_seal_stable_") as td:
+        root = Path(td)
+        left = make_full_db(root / "left")
+        right = make_full_db(root / "right")
+        left_record = db.validate_full_database_seal(left)
+        right_record = db.validate_full_database_seal(right)
+        check_equal(
+            left_record["content_identity"], right_record["content_identity"],
+            "동일 content가 설치 경로 때문에 다른 stable identity가 됐다",
+        )
+        preferred_record = preferred.database_fingerprints([left], "full")[0]
+        legacy_record = legacy.database_identity({}, [left])["roots"][0]
+        check_equal(
+            preferred_record["content_identity"], legacy_record["content_identity"],
+            "preferred/legacy runner의 stable DB content identity가 다르다",
+        )
+
+
+@regression(
+    item="db-seal",
+    prevents="매 실행 때 수백 GB payload를 다시 hash하거나, ordinary child 교체를 cheap binding이 놓치는 버그.",
+)
+def test_full_seal_runtime_uses_binding_not_payload_hashes_and_detects_change():
+    db = load_module(DB_TOOL, "af3_db_binding_runtime")
+    with tempfile.TemporaryDirectory(prefix="af3_full_seal_binding_") as td:
+        root = make_full_db(Path(td) / "full")
+        original_hash = db._sha256_file
+
+        def manifest_only(path, *args, **kwargs):
+            if Path(path).name != db.FULL_MANIFEST_NAME:
+                raise AssertionError("runtime attempted to hash a DB payload")
+            return original_hash(path, *args, **kwargs)
+
+        db._sha256_file = manifest_only
+        db.validate_full_database_seal(root)
+        db._sha256_file = original_hash
+        child = root / "mmcif_files" / "x.cif"
+        child.write_text("changed but ordinary\n", encoding="utf-8")
+        try:
+            db.validate_full_database_seal(root)
+        except ValueError as exc:
+            check_in("binding", str(exc), "ordinary child 변경 원인이 binding으로 설명되지 않았다")
+        else:
+            check(False, "seal 이후 ordinary mmCIF child 변경을 허용했다")
+
+
+@regression(
+    item="db-seal",
+    prevents="seal 누락·malformed 상태를 metadata fallback으로 조용히 낮추거나 링크를 신뢰하는 버그.",
+)
+def test_full_seal_fail_closed_and_rejects_malformed_and_link_entries():
+    db = load_module(DB_TOOL, "af3_db_fail_closed")
+    with tempfile.TemporaryDirectory(prefix="af3_full_seal_closed_") as td:
+        root = Path(td)
+        unsealed = make_full_db(root / "unsealed")
+        (unsealed / db.FULL_MANIFEST_NAME).unlink()
+        try:
+            db.seal_full_database(unsealed)
+        except ValueError as exc:
+            check_in("pinned", str(exc), "one-time seal이 official pinned object를 강제하지 않았다")
+        else:
+            check(False, "official pin과 다른 full DB에 seal을 게시했다")
+        check(not (unsealed / db.FULL_MANIFEST_NAME).exists(), "pin 불일치 뒤 seal이 남았다")
+
+        forged = make_full_db(root / "forged")
+        forged_path = forged / db.FULL_MANIFEST_NAME
+        forged_manifest = json.loads(forged_path.read_text(encoding="utf-8"))
+        forged_manifest["kind"] = db.FULL_KIND
+        forged_path.write_text(
+            json.dumps(forged_manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            db.validate_full_database_seal(forged)
+        except ValueError as exc:
+            check_in("pinned", str(exc), "self-authored official seal 거부 원인을 설명하지 않았다")
+        else:
+            check(False, "custom content의 kind만 official로 바꾼 forged seal을 허용했다")
+        try:
+            db.database_root_identity(unsealed)
+        except ValueError as exc:
+            check_in("seal", str(exc), "seal 누락 remediation을 설명하지 않았다")
+        else:
+            check(False, "seal 없는 full DB를 기본값으로 허용했다")
+        fallback = db.database_root_identity(unsealed, allow_unsealed=True)
+        check_equal(
+            fallback["kind"], "unsealed-full-database-metadata-only",
+            "호환 identity가 metadata-only라고 명시하지 않았다",
+        )
+        (unsealed / db.FULL_MANIFEST_NAME).write_text("{", encoding="utf-8")
+        try:
+            db.database_root_identity(unsealed, allow_unsealed=True)
+        except ValueError:
+            pass
+        else:
+            check(False, "malformed seal을 명시 opt-in으로 metadata fallback 했다")
+
+        linked = make_full_db(root / "linked")
+        (linked / db.FULL_MANIFEST_NAME).unlink()
+        victim = linked / "outside.cif"
+        victim.write_text("data_outside\n", encoding="utf-8")
+        (linked / "mmcif_files" / "x.cif").unlink()
+        (linked / "mmcif_files" / "x.cif").symlink_to(victim)
+        try:
+            db.seal_full_database(linked, enforce_official_pins=False)
+        except ValueError as exc:
+            check_in("symlink", str(exc), "mmCIF symlink 거부 원인을 설명하지 않았다")
+        else:
+            check(False, "mmCIF symlink를 seal했다")
+
+        special = make_full_db(root / "special")
+        (special / db.FULL_MANIFEST_NAME).unlink()
+        import os
+        os.mkfifo(special / "mmcif_files" / "pipe.cif")
+        try:
+            db.seal_full_database(special, enforce_official_pins=False)
+        except ValueError as exc:
+            check_in("non-regular", str(exc), "mmCIF special file 거부 원인을 설명하지 않았다")
+        else:
+            check(False, "mmCIF special file을 seal했다")
+
+        auxiliary = make_full_db(root / "auxiliary")
+        (auxiliary / db.FULL_MANIFEST_NAME).unlink()
+        (auxiliary / "mmcif_files" / "mmcif_files.tar.gz").write_bytes(b"archive")
+        manifest = db.seal_full_database(auxiliary, enforce_official_pins=False)
+        mmcif_record = manifest["content_identity"]["entries"]["mmcif_files"]
+        check_equal(mmcif_record["entries"], 1, "비-CIF 보조 archive를 effective-input seal에 포함했다")
+
+
+@regression(
+    item="db-seal",
+    prevents="installer가 deep verify 전에 seal을 게시하거나 게시 후 final DB로 이동해 binding 계약을 깨는 버그.",
+)
+def test_installer_seal_publication_is_between_deep_verify_and_promotion():
+    text = (Path(__file__).resolve().parents[1] / "scripts" / "install_af3_ubuntu.sh").read_text(
+        encoding="utf-8"
+    )
+    function = text[text.index("db_valid() {"):text.index("validate_db_partial() {")]
+    check_in("seal-full --db-dir \"$root\"", function, "installer가 Python-owned deep seal을 호출하지 않는다")
+    check("publish-preverified-full-seal" not in text, "caller-supplied hash로 official seal을 게시하는 우회 CLI가 남았다")
+    install = text[text.index("install_database() {"):]
+    check(
+        install.index('db_valid "$DB_PARTIAL"') < install.index('mv -T --no-clobber -- "$DB_PARTIAL"'),
+        "staged DB seal/verify 전에 final path로 promote한다",
+    )
+
+
+@regression(
+    item="db-seal",
+    prevents="installer 구조 size table과 Python official pin table이 조용히 달라지는 버그.",
+)
+def test_installer_and_python_full_db_pins_are_identical():
+    import re
+
+    db = load_module(DB_TOOL, "af3_db_pin_parity")
+    text = (Path(__file__).resolve().parents[1] / "scripts" / "install_af3_ubuntu.sh").read_text(
+        encoding="utf-8"
+    )
+    block = re.search(r"readonly -a DB_OBJECT_SPECS=\((.*?)\n\)", text, re.DOTALL)
+    check(block is not None, "installer DB_OBJECT_SPECS를 찾을 수 없다")
+    shell_specs = {}
+    for spec in re.findall(r'"([^"\n]+)"', block.group(1)):
+        name, raw_bytes = spec.split(":")
+        shell_specs[name] = int(raw_bytes)
+    python_sizes = {name: record[0] for name, record in db.PINNED_FULL_FILES.items()}
+    check_equal(shell_specs, python_sizes, "installer/Python FASTA size table이 다르다")
+    cif_count = re.search(r'readonly EXPECTED_CIF_COUNT="([0-9]+)"', text)
+    check(cif_count is not None, "installer mmCIF count pin을 찾을 수 없다")
+    check_equal(int(cif_count.group(1)), db.PINNED_MMCIF_ENTRIES, "mmCIF count pin이 다르다")
 
 
 @regression(

@@ -56,6 +56,7 @@ af3_batch.py - AlphaFold 3 대량 스크리닝용 최적화 배치 러너
       vhh_001_in/        입력 JSON (원본, 이 스크립트는 절대 수정하지 않는다)
       vhh_001_out/       최종 결과 (AF3 가 타깃별 하위 폴더를 만든다)
       vhh_001_work/      이 스크립트가 만드는 작업 공간
+        stage_inputs/      원본 JSON의 fsync된 private snapshot (identity 기준)
         msa_raw/           MSA 단계 원본 출력
         msa_store/         재사용 가능한 *_data.json 보관소
         stage_msa/         MSA 단계에 넘길 입력 (자동 생성/삭제)
@@ -84,18 +85,24 @@ af3_batch.py - AlphaFold 3 대량 스크리닝용 최적화 배치 러너
 """
 
 import argparse
+import codecs
 import csv
 import fcntl
+import hashlib
 import json
 import os
 import re
+import selectors
 import shlex
 import shutil
+import socket
 import stat
 import string
 import subprocess
 import sys
+import tempfile
 import time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
@@ -103,7 +110,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from af3_db import verify_database_roots, verify_model_dir  # noqa: E402
+from af3_db import (  # noqa: E402
+    database_root_identity,
+    verify_database_roots,
+    verify_model_dir,
+)
 
 TOP_LEVEL_KEYS = {
     "name",
@@ -116,6 +127,9 @@ TOP_LEVEL_KEYS = {
     "userCCDPath",
 }
 MAX_INPUT_JSON_BYTES = 512 * 1024 * 1024
+MANIFEST_VERSION = 1
+PROVENANCE_SUFFIX = "_af3_legacy_manifest.json"
+MSA_MANIFEST_SUFFIX = "_data.af3_manifest.json"
 
 # AF3 기본 버킷 사다리.
 # run_alphafold.py 의 _BUCKETS 기본값은 **128 에서 시작한다** (소스 대조 및 실측 확인).
@@ -144,6 +158,130 @@ def csv_safe_cell(value):
 
 def log(msg):
     print("[%s] %s" % (datetime.now().strftime("%H:%M:%S"), msg), flush=True)
+
+
+def sha256_file(path, chunk_size=1024 * 1024):
+    """Return a streaming SHA-256 without loading large AF3 assets into RAM."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        while True:
+            block = handle.read(chunk_size)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def semantic_json_sha256(obj):
+    payload = json.dumps(obj, ensure_ascii=False, sort_keys=True,
+                         separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def atomic_write_json(path, value):
+    """Publish JSON without following a symlink or truncating a hardlink."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".%s.tmp." % path.name,
+                                    dir=str(path.parent))
+    tmp = Path(tmp_name)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, indent=2, sort_keys=True)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, path)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def _stat_identity(path):
+    """Cheap identity for very large resources that have no signed manifest."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return {"path": str(path), "missing": True}
+    return {
+        "path": str(path), "device": info.st_dev, "inode": info.st_ino,
+        "bytes": info.st_size, "mtime_ns": info.st_mtime_ns,
+        "mode": stat.S_IFMT(info.st_mode),
+    }
+
+
+def _recursive_metadata_identity(directory):
+    digest = hashlib.sha256()
+    count = 0
+    total = 0
+    stack = [(Path(directory), Path("."))]
+    while stack:
+        current, relative = stack.pop()
+        entries = sorted(os.scandir(current), key=lambda entry: entry.name, reverse=True)
+        for entry in entries:
+            path = Path(entry.path)
+            info = os.lstat(path)
+            if stat.S_ISLNK(info.st_mode):
+                raise OSError("DB directory 안의 symlink는 허용하지 않는다: %s" % path)
+            rel = relative / entry.name
+            digest.update(("%s\0%s\0%s\n" % (
+                "D" if stat.S_ISDIR(info.st_mode) else "F",
+                rel.as_posix(),
+                (info.st_size, info.st_mtime_ns, info.st_dev, info.st_ino),
+            )).encode("utf-8", "surrogateescape"))
+            count += 1
+            if stat.S_ISDIR(info.st_mode):
+                stack.append((path, rel))
+            elif stat.S_ISREG(info.st_mode):
+                total += info.st_size
+            else:
+                raise OSError("DB directory 안의 special file은 허용하지 않는다: %s" % path)
+    return {"algorithm": "recursive-path-size-mtime-inode-v1",
+            "entries": count, "bytes": total, "sha256": digest.hexdigest()}
+
+
+def database_identity(db_report, db_dirs, allow_unsealed=False):
+    """Use the same sealed stable-content contract as the preferred runner."""
+    del db_report  # Path resolution was already validated; identity is root-manifest based.
+    return {
+        "roots": [
+            database_root_identity(value, allow_unsealed=allow_unsealed)
+            for value in db_dirs
+        ]
+    }
+
+
+def model_identity(model_dir):
+    """Use the model's exact digest; a path and byte count are not identity."""
+    model = Path(model_dir).expanduser().absolute() / "af3.bin"
+    record = _stat_identity(model)
+    if model.is_file() and not model.is_symlink():
+        record["sha256"] = sha256_file(model)
+    return record
+
+
+def image_identity(docker, image, dry_run=False):
+    if dry_run:
+        return {"reference": image, "digest": "unresolved-dry-run"}
+    try:
+        result = subprocess.run(
+            list(docker) + ["image", "inspect", "--format", "{{.Id}}", image],
+            capture_output=True, text=True, timeout=120, check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError("도커 이미지 identity 확인 실패: %s" % exc)
+    digest = (result.stdout or "").strip()
+    if result.returncode != 0 or not digest:
+        raise RuntimeError("도커 이미지 identity 확인 실패(exit=%d): %s"
+                           % (result.returncode, (result.stderr or "").strip()))
+    return {"reference": image, "digest": digest}
 
 
 # =============================================================================
@@ -616,7 +754,28 @@ def outdir_is_complete(d, mode="full", lenient=False):
     return resolve_result_dir(d, mode=mode)["complete"]
 
 
-def find_result_dirs(output_dir, fold_name):
+def index_result_dirs(output_dir):
+    """Scan an output root once and index directories by their artifact stem."""
+    index = {}
+    try:
+        entries = sorted(p for p in output_dir.iterdir()
+                         if p.is_dir() and not p.is_symlink()
+                         and not is_sidecar(p.name))
+    except OSError:
+        return index
+    for path in entries:
+        info = resolve_result_dir(path, mode="full")
+        keys = set()
+        if info["stem"]:
+            keys.add(info["stem"])
+        else:
+            keys.add(strip_af3_timestamp(path.name))
+        for key in keys:
+            index.setdefault(key, []).append(path)
+    return index
+
+
+def find_result_dirs(output_dir, fold_name, result_index=None):
     """한 타깃의 결과 폴더를 모두 찾는다 (없으면 빈 목록).
 
     AF3 는 출력 폴더가 비어 있지 않으면 <name>_<YYYYmmdd_HHMMSS> 폴더를 새로 만든다.
@@ -627,6 +786,8 @@ def find_result_dirs(output_dir, fold_name):
          타깃까지 잡았다. 이제 폴더 안 산출물의 stem 이 타깃명과 같은지 확인한다.
     """
     want = sanitise_name(fold_name)
+    if result_index is not None:
+        return list(result_index.get(want, []))
     out = []
     try:
         entries = sorted(p for p in output_dir.iterdir()
@@ -646,13 +807,177 @@ def find_result_dirs(output_dir, fold_name):
     return out
 
 
+def result_manifest_path(result_dir, fold_name):
+    return result_dir / (sanitise_name(fold_name) + PROVENANCE_SUFFIX)
+
+
+def result_is_reusable(result_dir, fold_name, expected_identity,
+                       trust_unverified=False, lenient=False):
+    if not outdir_is_complete(result_dir, mode="full", lenient=lenient):
+        return False
+    manifest = result_manifest_path(result_dir, fold_name)
+    if manifest_matches(manifest, expected_identity):
+        try:
+            stored = read_fold_json(manifest)
+            artifacts = stored.get("artifacts")
+            if not isinstance(artifacts, list) or not artifacts:
+                return False
+            for record in artifacts:
+                if not isinstance(record, dict) or not isinstance(record.get("name"), str):
+                    return False
+                path = result_dir / record["name"]
+                if (not path.is_file() or path.is_symlink()
+                        or path.stat().st_nlink != 1
+                        or path.stat().st_size != record.get("bytes")
+                        or sha256_file(path) != record.get("sha256")):
+                    return False
+            return True
+        except (OSError, ValueError):
+            return False
+    return bool(trust_unverified and not manifest.exists() and not manifest.is_symlink())
+
+
+def artifact_snapshot(result_dir, fold_name):
+    """Identity of required artifacts, used to avoid blessing historical output."""
+    stem = sanitise_name(fold_name)
+    records = []
+    for group in FINAL_SUFFIX_GROUPS:
+        for suffix in group:
+            path = result_dir / (stem + suffix)
+            if path.is_file() and not path.is_symlink():
+                info = path.stat()
+                records.append((path.name, info.st_dev, info.st_ino,
+                                info.st_size, info.st_mtime_ns))
+                break
+    return tuple(records)
+
+
+def publish_result_manifest(result_dir, fold_name, identity):
+    """Record identity only after the current run produced complete artifacts."""
+    if not outdir_is_complete(result_dir, mode="full"):
+        return False
+    artifacts = []
+    stem = sanitise_name(fold_name)
+    for group in FINAL_SUFFIX_GROUPS:
+        selected = None
+        for suffix in group:
+            candidate = result_dir / (stem + suffix)
+            if (candidate.is_file() and not candidate.is_symlink()
+                    and candidate.stat().st_nlink == 1
+                    and candidate.stat().st_size > 0):
+                selected = candidate
+                break
+        if selected is None:
+            return False
+        artifacts.append({
+            "name": selected.name,
+            "bytes": selected.stat().st_size,
+            "sha256": sha256_file(selected),
+        })
+    atomic_write_json(
+        result_manifest_path(result_dir, fold_name),
+        {"manifest_version": MANIFEST_VERSION, "identity": identity,
+         "artifacts": artifacts},
+    )
+    return True
+
+
 # =============================================================================
 # 파일 스테이징
 # =============================================================================
-def stage_files(paths, dest, mode="link"):
+def _snapshot_stat_key(info):
+    """Fields that must stay stable while a source file is snapshotted."""
+    return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
+            info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+def _copy_snapshot_bytes(source_fd, target_fd, chunk_size=1024 * 1024):
+    """Copy one already-open source into one private destination descriptor."""
+    while True:
+        block = os.read(source_fd, chunk_size)
+        if not block:
+            return
+        view = memoryview(block)
+        while view:
+            written = os.write(target_fd, view)
+            if written <= 0:
+                raise OSError("snapshot 파일 쓰기가 진행되지 않았다")
+            view = view[written:]
+
+
+def _copy_private_snapshot(source, target):
+    """Create a durable, single-link snapshot and reject source-copy races.
+
+    The source pathname is checked both before and after the descriptor copy.
+    This catches in-place writes as well as rename/replacement races instead of
+    committing an identity for a mixture of two source generations.
+    """
+    source = Path(source)
+    target = Path(target)
+    before_path = os.lstat(source)
+    if source.is_symlink() or not stat.S_ISREG(before_path.st_mode):
+        raise OSError("snapshot 원본이 일반 파일이 아니거나 symlink다: %s" % source)
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    source_fd = os.open(str(source), os.O_RDONLY | nofollow)
+    target_fd = None
+    target_created = False
+    try:
+        before_fd = os.fstat(source_fd)
+        if (not stat.S_ISREG(before_fd.st_mode)
+                or _snapshot_stat_key(before_fd) != _snapshot_stat_key(before_path)):
+            raise OSError("snapshot 원본이 열리는 동안 교체되었다: %s" % source)
+        target_fd = os.open(
+            str(target), os.O_WRONLY | os.O_CREAT | os.O_EXCL | nofollow, 0o600)
+        target_created = True
+        _copy_snapshot_bytes(source_fd, target_fd)
+        os.fchmod(target_fd, 0o400)
+        os.fsync(target_fd)
+        after_fd = os.fstat(source_fd)
+        after_path = os.lstat(source)
+        if (_snapshot_stat_key(after_fd) != _snapshot_stat_key(before_fd)
+                or _snapshot_stat_key(after_path) != _snapshot_stat_key(before_fd)):
+            raise OSError("snapshot 복사 중 원본이 수정되거나 교체되었다: %s" % source)
+    except BaseException:
+        if target_fd is not None:
+            os.close(target_fd)
+            target_fd = None
+        if target_created:
+            try:
+                target.unlink()
+            except OSError:
+                pass
+        raise
+    finally:
+        if target_fd is not None:
+            os.close(target_fd)
+        os.close(source_fd)
+
+    target_info = os.lstat(target)
+    if (target.is_symlink() or not stat.S_ISREG(target_info.st_mode)
+            or target_info.st_nlink != 1):
+        try:
+            target.unlink()
+        except OSError:
+            pass
+        raise OSError("snapshot 결과가 private regular single-link 파일이 아니다: %s"
+                      % target)
+    return sha256_file(target)
+
+
+def _fsync_directory(path):
+    directory_fd = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
+def stage_files(paths, dest, mode="snapshot", expected_sha256=None):
     """실행 대상만 모아둔 임시 입력 폴더를 만든다.
 
-    mode="link": 하드링크 (원본 JSON 은 읽기만 하므로 안전, 디스크 절약)
+    mode="snapshot": 원본의 private single-link 복사본. 복사 도중 원본이 바뀌면
+                     실패하며 파일과 디렉터리를 fsync 한다. 입력 JSON 기본 모드다.
     mode="copy": 복사 (msa_store 보호용. AF3 가 입력을 덮어쓸 수 있다고 전해지므로
                  -- 이슈 #488 이 출처로 제시되었으나 원문 대조는 하지 않았다 --
                  추론 단계 입력은 원본이 아니라 복사본을 넘긴다. MSA 산출물은
@@ -668,15 +993,25 @@ def stage_files(paths, dest, mode="link"):
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
     (dest / marker_name).write_text("Kang_AF3 legacy stage v1\n", encoding="utf-8")
+    if mode not in ("snapshot", "copy"):
+        raise ValueError("알 수 없는 staging mode: %s" % mode)
     for p in paths:
+        p = Path(p)
         target = dest / p.name
-        if mode == "link":
-            try:
-                os.link(p, target)
-                continue
-            except OSError:
-                pass
-        shutil.copy2(p, target)
+        if mode == "snapshot":
+            copied_sha256 = _copy_private_snapshot(p, target)
+            expected = (expected_sha256 or {}).get(p.name)
+            if expected is not None and copied_sha256 != expected:
+                try:
+                    target.unlink()
+                except OSError:
+                    pass
+                raise OSError(
+                    "입력 snapshot digest가 identity와 다르다: %s" % p)
+        else:
+            # The inference/MSA-store copy contract is intentionally unchanged.
+            shutil.copy2(p, target)
+    _fsync_directory(dest)
     return dest
 
 
@@ -685,7 +1020,7 @@ def stage_files(paths, dest, mode="link"):
 # (이슈 #485 / #488 이 출처로 제시된 전제에 대한 대비. 원문 대조는 하지 않았으나,
 #  아래 검사는 전제가 맞든 틀리든 손해가 없는 종류다 -- 실패할 입력을 미리 걸러낼 뿐이다.)
 # =============================================================================
-def validate_data_json(path):
+def validate_data_json(path, expected_fold_name=None):
     """--norun_data_pipeline 로 넘길 파일이 MSA를 실제로 담고 있는지 확인.
 
     2단계 분리에서 가장 흔한 실패는 'Protein chain N is missing unpaired MSA' 다.
@@ -697,6 +1032,11 @@ def validate_data_json(path):
         obj = read_fold_json(path)
     except Exception as e:
         return False, "JSON 파싱 실패: %s" % e
+
+    if expected_fold_name is not None:
+        actual = obj.get("name")
+        if not isinstance(actual, str) or sanitise_name(actual) != sanitise_name(expected_fold_name):
+            return False, "내부 name(%r)이 요청 target(%r)과 다르다" % (actual, expected_fold_name)
 
     seqs = obj.get("sequences")
     if not seqs:
@@ -723,6 +1063,25 @@ def validate_data_json(path):
             return False, ("%d번째 단백질 체인의 templates 가 null 이다. "
                            "--norun_data_pipeline 에서는 템플릿 검색을 할 수 없어 "
                            "빈 목록 [] 이 들어 있어야 한다" % i)
+    return True, ""
+
+
+def validate_msa_artifact(path, expected_fold_name):
+    """Validate current-shard ownership and base AF3 schema before publication.
+
+    Some AF3-compatible test/dry data producers do not materialize MSA fields;
+    inference readiness remains the stricter ``validate_data_json`` gate.
+    """
+    try:
+        obj = read_fold_json(path)
+    except Exception as exc:
+        return False, "JSON 파싱 실패: %s" % exc
+    problem = validate_fold_job(obj)
+    if problem:
+        return False, problem
+    actual = obj.get("name")
+    if sanitise_name(actual) != sanitise_name(expected_fold_name):
+        return False, "내부 name(%r)이 요청 target(%r)과 다르다" % (actual, expected_fold_name)
     return True, ""
 
 
@@ -773,14 +1132,18 @@ def teardown_containers():
     if not _TEARDOWN_DOCKER:
         return
     docker = _TEARDOWN_DOCKER[0]
-    for name in list(_STARTED_CONTAINERS):
-        try:
-            subprocess.run([*docker, "rm", "-f", name],
-                           stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL,
-                           check=False, timeout=120)
-        except (OSError, subprocess.SubprocessError):
-            pass
+    names = list(dict.fromkeys(_STARTED_CONTAINERS))
+    if not names:
+        return
+    try:
+        # Remove all containers in one bounded call.  A per-container timeout
+        # makes shutdown time grow without limit when --msa-workers is large.
+        subprocess.run([*docker, "rm", "-f", *names],
+                       stdout=subprocess.DEVNULL,
+                       stderr=subprocess.DEVNULL,
+                       check=False, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def build_cmd(args, docker, stage, input_dir, output_dir, buckets,
@@ -871,10 +1234,82 @@ def build_cmd(args, docker, stage, input_dir, output_dir, buckets,
 
 
 FOLD_START = re.compile(r"Running fold job\s+(.+?)\.\.\.")
-TOOK = re.compile(r"took\s+([\d.]+)\s+seconds")
 
 
-def run_streamed(cmd, logfile, tag):
+def _progress_signature(roots, target_names=None):
+    """Return cheap recursive metadata that changes as AF3 artifacts grow.
+
+    Symlinks and non-regular files are ignored.  ``target_names`` restricts a
+    shared MSA output tree to one shard's names so another healthy shard cannot
+    indefinitely conceal a stalled worker.
+    """
+    count = 0
+    total_bytes = 0
+    newest_mtime_ns = 0
+    wanted = set(target_names or [])
+    for raw_root in roots:
+        root = Path(raw_root)
+        if not root.exists() or root.is_symlink():
+            continue
+        for current, dirnames, filenames in os.walk(str(root), followlinks=False):
+            dirnames[:] = [
+                name for name in dirnames
+                if not (Path(current) / name).is_symlink()
+            ]
+            for filename in filenames:
+                path = Path(current) / filename
+                if wanted:
+                    try:
+                        relative = path.relative_to(root)
+                    except ValueError:
+                        continue
+                    if not any(
+                            component == name or component.startswith(name + "_")
+                            for component in relative.parts for name in wanted):
+                        continue
+                try:
+                    info = os.lstat(path)
+                except OSError:
+                    continue
+                if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                    continue
+                count += 1
+                total_bytes += info.st_size
+                newest_mtime_ns = max(newest_mtime_ns, info.st_mtime_ns)
+    return count, total_bytes, newest_mtime_ns
+
+
+def _stop_process(process, grace_seconds=5):
+    """Terminate then kill a child without allowing cleanup to hang."""
+    if process.poll() is not None:
+        return
+    try:
+        process.terminate()
+        process.wait(timeout=grace_seconds)
+        return
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    try:
+        process.kill()
+        process.wait(timeout=grace_seconds)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
+def _watchdog_poll_interval(no_progress_timeout):
+    if no_progress_timeout:
+        return min(1.0, max(0.1, no_progress_timeout / 4.0))
+    return 1.0
+
+
+def _watchdog_scan_interval(no_progress_timeout):
+    if no_progress_timeout:
+        return min(30.0, max(0.25, no_progress_timeout / 4.0))
+    return 30.0
+
+
+def run_streamed(cmd, logfile, tag, no_progress_timeout=7200,
+                 progress_roots=()):
     """컨테이너를 실행하면서 stdout 을 로그로 남기고, 타깃별 벽시계 시간을 측정한다.
 
     AF3 가 찍는 'Running fold job <name>...' 줄을 기준으로 구간을 자른다.
@@ -888,53 +1323,199 @@ def run_streamed(cmd, logfile, tag):
         lf.write("CMD: %s\n" % " ".join(cmd))
         lf.flush()
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                stderr=subprocess.STDOUT, text=True,
-                                bufsize=1)
-        for raw in proc.stdout:
-            lf.write(raw)
-            m = FOLD_START.search(raw)
-            if m:
-                now = time.time()
-                if cur is not None:
-                    timings.append((cur, cur_t0, now))
-                cur, cur_t0 = m.group(1).strip(), now
-                log("  [%s] 진행: %s" % (tag, cur))
-            elif TOOK.search(raw):
-                lf.flush()
-        proc.wait()
+                                stderr=subprocess.STDOUT, bufsize=0)
+        selector = selectors.DefaultSelector()
+        selector.register(proc.stdout, selectors.EVENT_READ)
+        decoder = codecs.getincrementaldecoder("utf-8")("replace")
+        line_buffer = ""
+        last_progress = time.monotonic()
+        signature = _progress_signature(progress_roots)
+        scan_interval = _watchdog_scan_interval(no_progress_timeout)
+        next_scan = last_progress + scan_interval
+        timed_out = False
+
+        def consume(text):
+            nonlocal cur, cur_t0, line_buffer
+            if not text:
+                return
+            lf.write(text)
+            lf.flush()
+            line_buffer += text
+            lines = line_buffer.splitlines(True)
+            if lines and not lines[-1].endswith(("\n", "\r")):
+                line_buffer = lines.pop()
+            else:
+                line_buffer = ""
+            for raw in lines:
+                m = FOLD_START.search(raw)
+                if m:
+                    now = time.time()
+                    if cur is not None:
+                        timings.append((cur, cur_t0, now))
+                    cur, cur_t0 = m.group(1).strip(), now
+                    log("  [%s] 진행: %s" % (tag, cur))
+
+        try:
+            while selector.get_map() or proc.poll() is None:
+                events = selector.select(
+                    timeout=_watchdog_poll_interval(no_progress_timeout))
+                now = time.monotonic()
+                for key, _event in events:
+                    try:
+                        chunk = os.read(key.fd, 64 * 1024)
+                    except BlockingIOError:
+                        continue
+                    if chunk:
+                        last_progress = now
+                        consume(decoder.decode(chunk))
+                    else:
+                        selector.unregister(key.fileobj)
+                if now >= next_scan:
+                    current_signature = _progress_signature(progress_roots)
+                    if current_signature != signature:
+                        signature = current_signature
+                        last_progress = time.monotonic()
+                    next_scan = time.monotonic() + scan_interval
+                if (no_progress_timeout
+                        and time.monotonic() - last_progress >= no_progress_timeout):
+                    message = ("[%s] 오류: stdout/log 또는 결과 artifact 변화가 %s초 동안 "
+                               "없어 프로세스를 종료한다.\n"
+                               % (datetime.now().isoformat(), no_progress_timeout))
+                    lf.write(message)
+                    lf.flush()
+                    log("오류: %s 단계가 %s초 동안 진행되지 않아 종료한다."
+                        % (tag, no_progress_timeout))
+                    _stop_process(proc)
+                    timed_out = True
+                    break
+            if not timed_out:
+                proc.wait()
+            # Decode a final partial UTF-8 sequence/line after pipe EOF.
+            consume(decoder.decode(b"", final=True))
+            if line_buffer:
+                consume("\n")
+        finally:
+            selector.close()
+            if proc.poll() is None:
+                _stop_process(proc)
+            if proc.stdout is not None:
+                proc.stdout.close()
         if cur is not None:
             timings.append((cur, cur_t0, time.time()))
-        lf.write("\n[exit=%d, wall=%.1fs]\n" % (proc.returncode, time.time() - t0))
-    return proc.returncode, timings, time.time() - t0
+        returncode = 124 if timed_out else proc.returncode
+        lf.write("\n[exit=%d, wall=%.1fs]\n" % (returncode, time.time() - t0))
+    return returncode, timings, time.time() - t0
 
 
 # =============================================================================
 # 단계 실행
 # =============================================================================
-def collect_msa_outputs(msa_raw, msa_store):
-    """MSA 단계 출력에서 *_data.json 만 골라 재사용 보관소로 모은다."""
+def _atomic_copy(source, target):
+    """Copy, fsync, and atomically replace a regular destination."""
+    target.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_name = tempfile.mkstemp(prefix=".%s.tmp." % target.name,
+                                    dir=str(target.parent))
+    tmp = Path(tmp_name)
+    try:
+        with open(source, "rb") as src, os.fdopen(fd, "wb") as dst:
+            shutil.copyfileobj(src, dst, 1024 * 1024)
+            dst.flush()
+            os.fsync(dst.fileno())
+        os.replace(tmp, target)
+        dir_fd = os.open(target.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
+def collect_msa_outputs(msa_raw, msa_store, candidates=None, identities=None):
+    """Publish validated current MSA files; never recursively replay history.
+
+    ``candidates`` is supplied by the execution path and contains only artifacts
+    created by successful current shards.  The optional fallback is retained for
+    direct legacy integrations, but scans only the root and its immediate AF3
+    result directories rather than recursively copying historical trees.
+    """
     msa_store.mkdir(parents=True, exist_ok=True)
     moved = 0
-    for p in sorted(msa_raw.rglob("*_data.json")):
+    if candidates is None:
+        candidates = list(msa_raw.glob("*_data.json"))
+        for child in sorted(msa_raw.iterdir() if msa_raw.is_dir() else []):
+            if child.is_dir() and not child.is_symlink() and not is_sidecar(child.name):
+                candidates.extend(child.glob("*_data.json"))
+    identities = identities or {}
+    for p in sorted(set(candidates)):
         if is_sidecar(p.name):
             continue
+        try:
+            source_info = os.lstat(p)
+        except OSError:
+            continue
+        if (not stat.S_ISREG(source_info.st_mode) or p.is_symlink()
+                or source_info.st_nlink != 1):
+            continue
+        stem = p.name[:-len(DATA_SUFFIX)] if p.name.endswith(DATA_SUFFIX) else ""
+        identity = identities.get(stem)
+        ok, _why = validate_msa_artifact(p, stem) if identity is not None else (True, "")
+        if not ok and identity is not None:
+            continue
         target = msa_store / p.name
-        # 크기로 판단하면 안 된다. 이번 실행이 방금 만든 결과가 항상 옳다.
-        # 옛 파일이 더 크다는 이유로 남기면, 서열이나 DB 가 바뀐 뒤에도 옛 MSA 와
-        # 템플릿이 추론에 들어간다. 그것을 크기로는 구분할 수 없다.
-        if target.is_symlink():
-            target.unlink()
-        shutil.copy2(p, target)
+        _atomic_copy(p, target)
+        if identity is not None:
+            atomic_write_json(
+                msa_store / (stem + MSA_MANIFEST_SUFFIX),
+                {
+                    "manifest_version": MANIFEST_VERSION,
+                    "identity": identity,
+                    "artifact": {"sha256": sha256_file(target), "bytes": target.stat().st_size},
+                },
+            )
         moved += 1
     return moved
 
 
-def msa_store_is_complete(work, fold_name):
+def _data_candidates(msa_raw):
+    candidates = list(msa_raw.glob("*_data.json"))
+    try:
+        children = sorted(msa_raw.iterdir())
+    except OSError:
+        children = []
+    for child in children:
+        if child.is_dir() and not child.is_symlink() and not is_sidecar(child.name):
+            candidates.extend(child.glob("*_data.json"))
+    return [path for path in candidates if path.is_file() and not path.is_symlink()]
+
+
+def _file_generation(path):
+    info = path.stat()
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+
+def msa_store_is_complete(work, fold_name, expected_identity=None,
+                          trust_unverified=False):
     path = work / "msa_store" / (sanitise_name(fold_name) + "_data.json")
     try:
-        return path.is_file() and not path.is_symlink() and path.stat().st_size > 0
+        if not (path.is_file() and not path.is_symlink() and path.stat().st_size > 0):
+            return False
     except OSError:
         return False
+    manifest = work / "msa_store" / (sanitise_name(fold_name) + MSA_MANIFEST_SUFFIX)
+    if expected_identity is not None and manifest_matches(manifest, expected_identity):
+        try:
+            stored = read_fold_json(manifest)
+            artifact = stored.get("artifact", {})
+            return (artifact.get("bytes") == path.stat().st_size
+                    and artifact.get("sha256") == sha256_file(path))
+        except Exception:
+            return False
+    return bool(trust_unverified and not manifest.exists() and not manifest.is_symlink())
 
 
 def msa_n_cpu(args, n_shards=1):
@@ -958,6 +1539,149 @@ def msa_n_cpu(args, n_shards=1):
         else max(1, min(cores // 2, 8))
 
 
+def wait_for_msa_processes(procs, msa_raw, no_progress_timeout=7200):
+    """Wait for all MSA shards while independently detecting stalled workers.
+
+    Each item is ``(index, process, logfile, handle, shard_targets)``.  Log-file
+    growth or artifacts whose paths belong to that shard reset its own timer.
+    This intentionally polls every process rather than waiting in launch order.
+    """
+    now = time.monotonic()
+    scan_interval = _watchdog_scan_interval(no_progress_timeout)
+    states = {}
+    for si, process, logfile, handle, shard_targets in procs:
+        names = {sanitise_name(target["name"]) for target in shard_targets}
+        try:
+            log_size = logfile.stat().st_size
+        except OSError:
+            log_size = 0
+        states[si] = {
+            "process": process,
+            "logfile": logfile,
+            "handle": handle,
+            "names": names,
+            "log_size": log_size,
+            "artifact_signature": _progress_signature([msa_raw], names),
+            "last_progress": now,
+            "next_scan": now + scan_interval,
+        }
+
+    rcs = {}
+    try:
+        while states:
+            now = time.monotonic()
+            for si, state in list(states.items()):
+                process = state["process"]
+                rc = process.poll()
+                if rc is not None:
+                    state["handle"].close()
+                    rcs[si] = rc
+                    del states[si]
+                    log("  MSA 갈래 %d 종료 (exit=%d, 로그=%s)"
+                        % (si, rc, state["logfile"]))
+                    continue
+
+                try:
+                    log_size = state["logfile"].stat().st_size
+                except OSError:
+                    log_size = 0
+                if log_size != state["log_size"]:
+                    state["log_size"] = log_size
+                    state["last_progress"] = now
+
+                if now >= state["next_scan"]:
+                    signature = _progress_signature([msa_raw], state["names"])
+                    if signature != state["artifact_signature"]:
+                        state["artifact_signature"] = signature
+                        state["last_progress"] = time.monotonic()
+                    state["next_scan"] = time.monotonic() + scan_interval
+
+                if (no_progress_timeout
+                        and time.monotonic() - state["last_progress"]
+                        >= no_progress_timeout):
+                    message = ("\n[%s] 오류: 이 MSA 갈래의 stdout/log 또는 artifact 변화가 "
+                               "%s초 동안 없어 프로세스를 종료한다.\n"
+                               % (datetime.now().isoformat(), no_progress_timeout))
+                    state["handle"].write(message)
+                    state["handle"].flush()
+                    log("오류: MSA 갈래 %d가 %s초 동안 진행되지 않아 종료한다."
+                        % (si, no_progress_timeout))
+                    _stop_process(process)
+                    state["handle"].close()
+                    rcs[si] = 124
+                    del states[si]
+                    log("  MSA 갈래 %d 종료 (exit=124, 로그=%s)"
+                        % (si, state["logfile"]))
+            if states:
+                time.sleep(_watchdog_poll_interval(no_progress_timeout))
+    finally:
+        for state in states.values():
+            if state["process"].poll() is None:
+                _stop_process(state["process"])
+            try:
+                state["handle"].close()
+            except OSError:
+                pass
+    return rcs
+
+
+def target_identity(target, args, kind, db_identity_record,
+                    model_identity_record, image_identity_record):
+    """Build the exact reuse contract for one target and one output kind."""
+    config = {
+        "extra_flags": list(args.extra_flag or []),
+        "msa_gpus": bool(args.msa_gpus),
+        "requested_msa_n_cpu": args.msa_n_cpu,
+        "requested_msa_workers": args.msa_workers,
+        "ligand_tokens": args.ligand_tokens,
+        "estimated_bucket": needed_buckets([target["tokens"]])[0],
+    }
+    if kind == "final":
+        config.update({
+            "diffusion_samples": args.diffusion_samples,
+            "recycles": args.recycles,
+            "flash_attention": args.flash_attention,
+            "no_prealloc": bool(args.no_prealloc),
+            "unified_memory": bool(args.unified_memory),
+        })
+    return {
+        "manifest_version": MANIFEST_VERSION,
+        "kind": kind,
+        "output_name": sanitise_name(target["name"]),
+        "input": {
+            # Both values are derived from the durable snapshot later mounted
+            # read-only into AF3, never from the mutable source pathname.
+            "semantic_json_sha256": target["semantic_json_sha256"],
+            "json_sha256": target["input_json_sha256"],
+            "source_file": target["source_path"].name,
+        },
+        # validate_fold_job currently rejects external *Path values.  Keep this
+        # explicit so future sidecar support must add hashes before reuse works.
+        "sidecars": [],
+        "databases": db_identity_record,
+        "model": model_identity_record if kind == "final" else None,
+        "image": image_identity_record,
+        "config": config,
+    }
+
+
+def manifest_matches(path, expected_identity):
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if (not stat.S_ISREG(info.st_mode) or path.is_symlink()
+            or info.st_nlink != 1):
+        return False
+    try:
+        stored = read_fold_json(path)
+    except Exception:
+        return False
+    return (isinstance(stored, dict)
+            and stored.get("manifest_version") == MANIFEST_VERSION
+            and stored.get("identity") == expected_identity)
+
+
 def do_stage_msa(args, docker, flags, work, targets):
     """CPU MSA 단계: 입력을 여러 조각으로 나눠 컨테이너를 동시 실행한다."""
     msa_raw = work / "msa_raw"
@@ -968,7 +1692,7 @@ def do_stage_msa(args, docker, flags, work, targets):
     k = max(1, args.msa_workers)
     shards = [[] for _ in range(k)]
     for i, t in enumerate(targets):
-        shards[i % k].append(t["path"])
+        shards[i % k].append(t)
     shards = [s for s in shards if s]
 
     per_worker_cpu = msa_n_cpu(args, len(shards))
@@ -981,10 +1705,20 @@ def do_stage_msa(args, docker, flags, work, targets):
         log("  주의: 갈래를 1개보다 늘리는 것은 실측상 이득이 없다 "
             "(32스레드 1갈래 0.890 대 2갈래 0.767 타깃/분). --msa-workers 1 권장.")
 
+    before = {str(path): _file_generation(path) for path in _data_candidates(msa_raw)}
     procs = []
     t0 = time.time()
-    for si, paths in enumerate(shards):
-        sd = stage_files(paths, work / ("stage_msa_%d" % si), mode="link")
+    for si, shard_targets in enumerate(shards):
+        paths = [target["path"] for target in shard_targets]
+        sd = stage_files(
+            paths,
+            work / ("stage_msa_%d" % si),
+            mode="snapshot",
+            expected_sha256={
+                target["path"].name: target["input_json_sha256"]
+                for target in shard_targets
+            },
+        )
         cmd = build_cmd(args, docker, "msa", sd, msa_raw, None,
                         n_cpu=per_worker_cpu, flags=flags,
                         container=container_name("msa%d" % si))
@@ -998,21 +1732,34 @@ def do_stage_msa(args, docker, flags, work, targets):
         except BaseException:
             handle.close()
             raise
-        procs.append((si, process, lf, handle))
+        procs.append((si, process, lf, handle, shard_targets))
     if args.dry_run:
         return {}, 0.0
 
-    rcs = {}
-    for si, p, lf, handle in procs:
-        try:
-            rc = p.wait()
-        finally:
-            handle.close()
-        rcs[si] = rc
-        log("  MSA 갈래 %d 종료 (exit=%d, 로그=%s)" % (si, rc, lf))
+    rcs = wait_for_msa_processes(
+        procs, msa_raw, no_progress_timeout=args.no_progress_timeout)
+    successful_names = set()
+    for si, _p, _lf, _handle, shard_targets in procs:
+        rc = rcs[si]
+        if rc == 0:
+            successful_names.update(sanitise_name(t["name"]) for t in shard_targets)
     wall = time.time() - t0
 
-    n = collect_msa_outputs(msa_raw, work / "msa_store")
+    current = []
+    for path in _data_candidates(msa_raw):
+        stem = path.name[:-len(DATA_SUFFIX)]
+        if stem not in successful_names:
+            continue
+        if before.get(str(path)) == _file_generation(path):
+            continue
+        ok, why = validate_msa_artifact(path, stem)
+        if not ok:
+            log("경고: 현재 MSA 산출물을 게시하지 않는다(%s): %s" % (path, why))
+            continue
+        current.append(path)
+    identities = {sanitise_name(t["name"]): t["msa_identity"] for t in targets}
+    n = collect_msa_outputs(msa_raw, work / "msa_store",
+                            candidates=current, identities=identities)
     log("MSA 단계 완료: %.1f초, *_data.json %d건을 msa_store 에 보관" % (wall, n))
     if n == 0:
         log("경고: *_data.json 이 하나도 생기지 않았다. 로그를 확인하라: %s" % logs)
@@ -1029,14 +1776,14 @@ def do_stage_infer(args, docker, flags, work, output_dir, targets):
     ready, bad = [], []
     for t in targets:
         cand = store / (sanitise_name(t["name"]) + "_data.json")
-        if not cand.exists():
-            alts = [p for p in store.glob(t["path"].stem + "_data.json")
-                    if not is_sidecar(p.name)]
-            cand = alts[0] if alts else None
-        if cand is None:
+        if not cand.is_file() or cand.is_symlink():
             bad.append((t["name"], "msa_store 에 *_data.json 이 없다 (MSA 단계 미실행/실패)"))
             continue
-        ok, why = validate_data_json(cand)
+        if not msa_store_is_complete(
+                work, t["name"], t["msa_identity"], args.trust_unverified_legacy):
+            bad.append((t["name"], "MSA manifest가 현재 입력/DB/image/config와 일치하지 않는다"))
+            continue
+        ok, why = validate_data_json(cand, t["name"])
         if not ok:
             bad.append((t["name"], why))
             continue
@@ -1087,7 +1834,11 @@ def do_stage_infer(args, docker, flags, work, output_dir, targets):
         return 0, [], 0.0, ready
 
     lf = logs / ("infer_%s.log" % datetime.now().strftime("%Y%m%d_%H%M%S"))
-    rc, timings, wall = run_streamed(cmd, lf, "추론")
+    rc, timings, wall = run_streamed(
+        cmd, lf, "추론",
+        no_progress_timeout=args.no_progress_timeout,
+        progress_roots=(output_dir,),
+    )
     log("추론 단계 종료: exit=%d, 전체 %.1f초, 건당 평균 %.1f초 (측정값)"
         % (rc, wall, wall / max(1, len(ready))))
     return rc, timings, wall, ready
@@ -1101,7 +1852,15 @@ def do_stage_oneshot(args, docker, flags, work, output_dir, targets):
     bks = needed_buckets([t["tokens"] for t in targets])
     log("oneshot 단계: %d건, 토큰 %d~%d, 사용 버킷 %s"
         % (len(targets), targets[0]["tokens"], targets[-1]["tokens"], bks))
-    sd = stage_files([t["path"] for t in targets], work / "stage_oneshot", mode="link")
+    sd = stage_files(
+        [t["path"] for t in targets],
+        work / "stage_oneshot",
+        mode="snapshot",
+        expected_sha256={
+            target["path"].name: target["input_json_sha256"]
+            for target in targets
+        },
+    )
     cmd = build_cmd(args, docker, "oneshot", sd, output_dir, bks,
                     n_cpu=msa_n_cpu(args, 1), flags=flags,
                     container=container_name("oneshot"))
@@ -1110,10 +1869,139 @@ def do_stage_oneshot(args, docker, flags, work, output_dir, targets):
               % (len(targets), " ".join(cmd)))
         return 0, [], 0.0
     lf = logs / ("oneshot_%s.log" % datetime.now().strftime("%Y%m%d_%H%M%S"))
-    rc, timings, wall = run_streamed(cmd, lf, "oneshot")
+    rc, timings, wall = run_streamed(
+        cmd, lf, "oneshot",
+        no_progress_timeout=args.no_progress_timeout,
+        progress_roots=(output_dir,),
+    )
     log("oneshot 종료: exit=%d, 전체 %.1f초, 건당 평균 %.1f초 (측정값)"
         % (rc, wall, wall / max(1, len(targets))))
     return rc, timings, wall
+
+
+def acquire_run_locks(output_dir, work):
+    """Acquire shared resources in canonical path order to avoid AB/BA deadlock."""
+    paths = {
+        output_dir / ".run_af3_batch.lock",  # common with the preferred runner
+        work / ".run_af3_batch.work.lock",
+    }
+    locks = []
+    try:
+        for lock_path in sorted(paths, key=lambda p: str(p.resolve(strict=False))):
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(lock_path, flags, 0o600)
+            info = os.fstat(descriptor)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                os.close(descriptor)
+                raise OSError("잠금 경로가 단일 일반 파일이 아니다: %s" % lock_path)
+            handle = os.fdopen(descriptor, "r+", encoding="utf-8")
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BaseException:
+                handle.close()
+                raise
+            handle.seek(0)
+            handle.truncate()
+            handle.write("host=%s pid=%d\n" % (socket.gethostname(), os.getpid()))
+            handle.flush()
+            os.fsync(handle.fileno())
+            locks.append(handle)
+    except BaseException:
+        for handle in reversed(locks):
+            handle.close()
+        raise
+    return locks
+
+
+def _gpu_lease_root():
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    configured = os.environ.get("AF3_GPU_LEASE_DIR")
+    root = (Path(configured).expanduser().absolute() if configured else
+            Path(tempfile.gettempdir()) / ("kang-af3-gpu-leases-%d" % uid))
+    root.mkdir(mode=0o700, exist_ok=True)
+    info = os.lstat(root)
+    if (not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode)
+            or info.st_mode & 0o077
+            or (hasattr(os, "getuid") and info.st_uid != os.getuid())):
+        raise OSError("GPU lease 폴더가 안전하지 않다: %s" % root)
+    return root
+
+
+def _visible_gpu_keys():
+    try:
+        proc = subprocess.run(
+            ["nvidia-smi", "--query-gpu=uuid", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=20, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        return ["unknown-all-devices"]
+    keys = [line.strip() for line in proc.stdout.splitlines() if line.strip()]
+    return sorted(set(keys)) if proc.returncode == 0 and keys else ["unknown-all-devices"]
+
+
+GPU_INVENTORY_LEASE_KEY = "inventory-global-v1"
+
+
+def _acquire_legacy_gpu_lease(key, shared=False):
+    """Acquire one hardened lease in the namespace shared by both runners."""
+    safe = hashlib.sha256(key.encode("utf-8")).hexdigest()[:24]
+    path = _gpu_lease_root() / ("gpu-%s.lock" % safe)
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        os.close(descriptor)
+        raise OSError("GPU lease가 단일 일반 파일이 아니다: %s" % path)
+    try:
+        lock_mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+        fcntl.flock(descriptor, lock_mode | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        raise
+    if not shared:
+        os.ftruncate(descriptor, 0)
+        os.write(
+            descriptor,
+            ("host=%s pid=%d device=%s\n" %
+             (socket.gethostname(), os.getpid(), key)).encode("utf-8"),
+        )
+        os.fsync(descriptor)
+    return descriptor
+
+
+@contextmanager
+def gpu_leases_for_legacy(enabled):
+    """Lease every GPU exposed by legacy --gpus all using the preferred namespace."""
+    if not enabled:
+        yield
+        return
+    descriptors = []
+    try:
+        keys = _visible_gpu_keys()
+        unknown = "unknown-all-devices" in keys
+        # Canonical order: inventory gate first, then sorted device UUIDs.
+        # Unknown --gpus all owners take the gate exclusively for their full
+        # lifetime; enumerated owners share it and exclusively lease each UUID.
+        descriptors.append(_acquire_legacy_gpu_lease(
+            GPU_INVENTORY_LEASE_KEY, shared=not unknown))
+        if not unknown:
+            for key in sorted(set(keys)):
+                descriptors.append(_acquire_legacy_gpu_lease(key))
+        yield
+    finally:
+        # Container removal is part of the reservation lifetime.  Releasing
+        # first would let a conflicting run start while a timed-out container
+        # can still own CUDA memory.  The outer process-finally repeats this
+        # bounded cleanup harmlessly as a last-resort signal path safeguard.
+        teardown_containers()
+        for descriptor in reversed(descriptors):
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
 
 
 # =============================================================================
@@ -1176,6 +2064,15 @@ def parse_args(argv=None):
                         "(_summary_confidences.json / _ranking_scores.csv / _model.cif) "
                         "중 하나만 있어도 완료로 본다. 기본은 3종 모두 있고 크기가 "
                         "0보다 클 때만 완료다. 예전 출력 폴더를 다시 돌리지 않으려면 쓴다")
+    p.add_argument(
+        "--trust-unverified-legacy", action="store_true",
+        help="manifest가 없는 옛 MSA/최종 결과를 현재 입력과 같다고 명시적으로 신뢰한다. "
+             "기본값은 재사용하지 않음(과학 데이터 오귀속 방지)",
+    )
+    p.add_argument(
+        "--allow-unsealed-db", action="store_true",
+        help="호환성 전용: seal 없는 full DB를 metadata-only로 식별한다. 기본값은 거부",
+    )
     p.add_argument("--docker", default=None, help="도커 실행 명령 강제 지정 (예: 'sudo docker')")
     p.add_argument("--extra-flag", action="append", default=[],
                    help="run_alphafold.py 에 그대로 넘길 추가 플래그. 반드시 등호 형식으로 "
@@ -1184,6 +2081,11 @@ def parse_args(argv=None):
     p.add_argument("--ligand-tokens", type=int, default=30,
                    help="리간드 1개를 몇 토큰으로 어림할지 (정렬/버킷 선택에만 영향)")
     p.add_argument("--no-probe", action="store_true", help="플래그 지원 여부 탐지를 건너뛴다")
+    p.add_argument(
+        "--no-progress-timeout", type=int, default=7200,
+        help="stdout/log와 결과 artifact가 모두 변하지 않는 최대 초. 기본 7200(2시간), "
+             "0이면 무진행 감시를 끈다",
+    )
     p.add_argument("--dry-run", action="store_true",
                    help="실제 실행 없이 조립된 docker 명령만 출력한다")
     return p.parse_args(argv)
@@ -1204,6 +2106,9 @@ def main(argv=None):
         if value is not None and value <= 0:
             print("오류: %s 는 1 이상이어야 한다." % label)
             return 2
+    if args.no_progress_timeout < 0:
+        print("오류: --no-progress-timeout 은 0 이상이어야 한다.")
+        return 2
 
     if args.input_dir:
         input_dir = Path(args.input_dir).resolve()
@@ -1248,6 +2153,8 @@ def main(argv=None):
 
     # ---- 필수 경로 확인 -------------------------------------------------
     missing = []
+    db_report = {"resolved": {}}
+    model_report = {}
     if not input_dir.is_dir():
         missing.append("입력 폴더 없음: %s" % input_dir)
     if stage_uses_databases(args.stage):
@@ -1267,30 +2174,19 @@ def main(argv=None):
             return 1
         print("(드라이런이므로 경로 오류를 무시하고 명령 조립만 계속한다)")
 
+    if output_dir.is_symlink() or work.is_symlink():
+        print("오류: output/work 폴더로 symlink를 사용할 수 없다.")
+        return 1
     output_dir.mkdir(parents=True, exist_ok=True)
     work.mkdir(parents=True, exist_ok=True)
-    # 잠금은 두 실행이 실제로 다투는 것을 보호해야 한다. work 는 실행마다 다를 수
-    # 있지만 output-dir 은 공유된다. work 를 잠그면 --work 를 달리한 두 실행이
-    # 같은 결과 트리에 동시에 쓴다.
-    lock_path = output_dir / ".af3_batch.lock"
-    lock_flags = os.O_RDWR | os.O_CREAT
-    if hasattr(os, "O_NOFOLLOW"):
-        lock_flags |= os.O_NOFOLLOW
     try:
-        lock_fd = os.open(lock_path, lock_flags, 0o600)
-        lock_stat = os.fstat(lock_fd)
-        if not stat.S_ISREG(lock_stat.st_mode) or lock_stat.st_nlink != 1:
-            os.close(lock_fd)
-            raise OSError("legacy lock is not a single regular file")
-        lock_file = os.fdopen(lock_fd, "r+", encoding="utf-8")
-        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        # Keep both handles alive until main returns.  The output filename and
+        # owner format are shared with run_af3_batch_improved.py.
+        lock_path = output_dir / ".run_af3_batch.lock"
+        run_locks = acquire_run_locks(output_dir, work)
     except (OSError, BlockingIOError) as exc:
-        print("오류: 같은 work 폴더를 다른 legacy 실행이 사용 중이거나 잠금 경로가 안전하지 않다: %s" % exc)
+        print("오류: 같은 output/work 자원을 다른 실행이 사용 중이거나 잠금 경로가 안전하지 않다: %s" % exc)
         return 1
-    lock_file.seek(0)
-    lock_file.truncate()
-    lock_file.write("pid=%d\n" % os.getpid())
-    lock_file.flush()
     if args.cache_dir:
         # 컴파일 캐시는 '있으면 좋은' 것이다. 만들 수 없으면 경고만 남기고 캐시 없이 진행한다.
         try:
@@ -1313,8 +2209,19 @@ def main(argv=None):
         print("오류: '%s' 에 입력 JSON 이 없다." % input_dir)
         return 1
 
+    # Freeze every mutable user input before parsing, identity construction, or
+    # reuse decisions.  Subsequent stages copy only these private snapshots, so
+    # the identity we commit describes the exact generation AF3 consumes.
+    try:
+        input_snapshots = stage_files(
+            json_files, work / "stage_inputs", mode="snapshot")
+    except (OSError, ValueError) as exc:
+        log("오류: 입력 JSON snapshot 생성 실패: %s" % exc)
+        return 2
+
     targets, unreadable = [], []
-    for p in json_files:
+    for source_path in json_files:
+        p = input_snapshots / source_path.name
         try:
             obj = read_fold_json(p)
         except Exception as e:
@@ -1325,7 +2232,10 @@ def main(argv=None):
             unreadable.append((p.name, schema_error))
             continue
         name = obj["name"]
-        targets.append({"path": p, "name": name,
+        targets.append({"path": p, "source_path": source_path,
+                        "name": name, "obj": obj,
+                        "semantic_json_sha256": semantic_json_sha256(obj),
+                        "input_json_sha256": sha256_file(p),
                         "tokens": count_tokens(obj, args.ligand_tokens)})
     if unreadable:
         log("오류: 사용할 수 없는 JSON %d건:" % len(unreadable))
@@ -1345,6 +2255,42 @@ def main(argv=None):
     log("입력 JSON %d건 확인. 토큰 수로 정렬한다 (로그 가독성 목적. "
         "정렬 자체의 시간 이득은 실측 0.00초/건이다)." % len(targets))
     targets.sort(key=lambda t: t["tokens"])
+
+    # Identity must be resolved before completion checks.  Otherwise a mutable
+    # image tag or replaced model/DB can make name-only output look reusable.
+    docker = find_docker(args.docker)
+    if docker is not None:
+        _TEARDOWN_DOCKER.append(list(docker))
+    if docker is None:
+        if not args.dry_run:
+            print("오류: docker 명령을 찾을 수 없다.")
+            return 1
+        docker = ["docker"]
+        log("(드라이런: docker 가 없으므로 'docker' 로 가정한다)")
+    try:
+        image_record = image_identity(docker, args.image, args.dry_run)
+    except RuntimeError as exc:
+        print("오류: %s" % exc)
+        return 1
+    try:
+        db_record = (
+            database_identity(
+                db_report, args.db_dirs, allow_unsealed=args.allow_unsealed_db
+            )
+            if stage_uses_databases(args.stage)
+            else {"roots": []}
+        )
+    except (OSError, ValueError) as exc:
+        print("오류: DB content identity 검증 실패: %s" % exc)
+        return 1
+    model_record = model_identity(args.model_dir) if stage_uses_model(args.stage) else None
+    for target in targets:
+        target["msa_identity"] = target_identity(
+            target, args, "msa", db_record, None, image_record)
+        target["final_identity"] = target_identity(
+            target, args, "final", db_record, model_record, image_record)
+        target["final_identity"]["msa_identity_sha256"] = semantic_json_sha256(
+            target["msa_identity"])
 
     # ---- 상태 파일 / 재시도 ---------------------------------------------
     state_path = work / "state.json"
@@ -1367,6 +2313,7 @@ def main(argv=None):
     # 판정 기준은 실행 단계에 맞춘다: --stage msa 는 _data.json 만 보고,
     # 나머지는 정식 산출물 3종을 본다 (stage_check_mode 참고).
     chk_mode = stage_check_mode(args.stage)
+    output_index = index_result_dirs(output_dir)
     if not args.no_skip:
         pending, done = [], 0
         log("완료 판정 기준: %s"
@@ -1375,15 +2322,24 @@ def main(argv=None):
                     "3종 모두 (크기 0 제외)"))
         if args.lenient_done:
             log("  --lenient-done: 완료 표식 하나만 있어도 완료로 본다 (2026-08 이전 동작)")
+        if args.trust_unverified_legacy:
+            log("  --trust-unverified-legacy: manifest 없는 옛 산출물의 동일성을 사용자가 책임지고 신뢰")
         for t in targets:
-            if chk_mode == "data" and msa_store_is_complete(work, t["name"]):
-                done += 1
-                continue
-            dirs = find_result_dirs(output_dir, t["name"])
-            if any(outdir_is_complete(d, mode=chk_mode, lenient=args.lenient_done)
-                   for d in dirs):
-                done += 1
-                continue
+            if chk_mode == "data":
+                if msa_store_is_complete(
+                        work, t["name"], t["msa_identity"],
+                        args.trust_unverified_legacy):
+                    done += 1
+                    continue
+                dirs = []
+            else:
+                dirs = find_result_dirs(output_dir, t["name"], output_index)
+                if any(result_is_reusable(
+                        d, t["name"], t["final_identity"],
+                        args.trust_unverified_legacy, args.lenient_done)
+                       for d in dirs):
+                    done += 1
+                    continue
             # 미완성 폴더가 있으면 AF3 가 타임스탬프 폴더를 새로 만들어 결과가 흩어진다.
             # 삭제하지 않고 partial/ 로 옮겨둔다.
             for d in dirs:
@@ -1410,16 +2366,6 @@ def main(argv=None):
         return 0
 
     # ---- 도커 / 플래그 준비 ----------------------------------------------
-    docker = find_docker(args.docker)
-    if docker is not None:
-        _TEARDOWN_DOCKER.append(list(docker))
-    if docker is None:
-        if not args.dry_run:
-            print("오류: docker 명령을 찾을 수 없다.")
-            return 1
-        docker = ["docker"]
-        log("(드라이런: docker 가 없으므로 'docker' 로 가정한다)")
-
     flags = None
     if not args.no_probe and not args.dry_run:
         log("이미지가 지원하는 플래그를 --help 로 확인한다 (1회, 수십 초)")
@@ -1444,24 +2390,79 @@ def main(argv=None):
     t_start = time.time()
     timings, rc_all = [], 0
     ran = list(targets)
+    output_index = index_result_dirs(output_dir)
+    output_before = {}
+    if args.stage != "msa":
+        for target in ran:
+            for directory in find_result_dirs(output_dir, target["name"], output_index):
+                output_before[str(directory)] = artifact_snapshot(directory, target["name"])
 
-    if args.stage == "oneshot":
-        rc, timings, wall = do_stage_oneshot(args, docker, flags, work, output_dir, targets)
-        rc_all = rc or 0
-    else:
-        if args.stage in ("msa", "both"):
-            rcs, _ = do_stage_msa(args, docker, flags, work, targets)
-            if rcs and any(v != 0 for v in rcs.values()):
-                log("오류: 하나 이상의 MSA 갈래가 0이 아닌 코드로 끝났다. 로그를 확인하라.")
-                rc_all = 1
-        if args.stage in ("infer", "both"):
-            rc, timings, wall, _ready = do_stage_infer(
-                args, docker, flags, work, output_dir, targets)
-            rc_all = rc_all or (rc or 0)
+    needs_gpu_lease = (
+        args.stage in ("infer", "both", "oneshot")
+        or (args.stage == "msa" and args.msa_gpus)
+    ) and not args.dry_run
+    try:
+        with gpu_leases_for_legacy(needs_gpu_lease):
+            if args.stage == "oneshot":
+                rc, timings, wall = do_stage_oneshot(args, docker, flags, work, output_dir, targets)
+                rc_all = rc or 0
+            else:
+                if args.stage in ("msa", "both"):
+                    rcs, _ = do_stage_msa(args, docker, flags, work, targets)
+                    if rcs and any(v != 0 for v in rcs.values()):
+                        log("오류: 하나 이상의 MSA 갈래가 0이 아닌 코드로 끝났다. 로그를 확인하라.")
+                        rc_all = 1
+                if args.stage in ("infer", "both"):
+                    rc, timings, wall, _ready = do_stage_infer(
+                        args, docker, flags, work, output_dir, targets)
+                    rc_all = rc_all or (rc or 0)
+    except (OSError, BlockingIOError) as exc:
+        log("오류: 다른 Kang_AF3 실행이 GPU lease를 보유하거나 lease가 안전하지 않다: %s" % exc)
+        return 2
 
     if args.dry_run:
         print("\n[드라이런 종료] 실제 실행은 하지 않았다. 위 명령을 그대로 복사해 써도 된다.")
         return 0
+
+    # Bless only complete artifacts that are new or changed in this invocation.
+    # This prevents a failed rerun from attaching today's manifest to yesterday's
+    # canonical structure.
+    output_index = index_result_dirs(output_dir)
+    if args.stage != "msa" and rc_all == 0:
+        for target in ran:
+            for directory in find_result_dirs(output_dir, target["name"], output_index):
+                current = artifact_snapshot(directory, target["name"])
+                if not current or output_before.get(str(directory)) == current:
+                    continue
+                try:
+                    publish_result_manifest(
+                        directory, target["name"], target["final_identity"])
+                except OSError as exc:
+                    log("오류: 결과 manifest 게시 실패(%s): %s" % (directory, exc))
+                    rc_all = rc_all or 1
+    elif args.stage != "msa" and rc_all != 0:
+        # A nonzero producer can leave complete-looking finals.  Without a
+        # per-target success signal those artifacts cannot be blessed.  Preserve
+        # every changed directory for diagnosis and keep it pending.
+        partial_dir = work / "partial"
+        partial_dir.mkdir(parents=True, exist_ok=True)
+        for target in ran:
+            for directory in find_result_dirs(output_dir, target["name"], output_index):
+                current = artifact_snapshot(directory, target["name"])
+                if not current or output_before.get(str(directory)) == current:
+                    continue
+                destination = partial_dir / (
+                    "%s_nonzero_%s_%d" % (
+                        directory.name,
+                        datetime.now().strftime("%Y%m%d_%H%M%S_%f"),
+                        os.getpid(),
+                    )
+                )
+                shutil.move(str(directory), str(destination))
+                log("nonzero producer 결과를 manifest 없이 보존 이동: %s -> %s" %
+                    (directory, destination))
+
+    output_index = index_result_dirs(output_dir)
 
     # ---- 결과 정리 --------------------------------------------------------
     tmap = {}
@@ -1470,12 +2471,20 @@ def main(argv=None):
 
     rows, failed = [], []
     for t in ran:
-        dirs = find_result_dirs(output_dir, t["name"])
+        dirs = find_result_dirs(output_dir, t["name"], output_index)
         if args.stage == "msa":
-            ok = msa_store_is_complete(work, t["name"])
+            ok = msa_store_is_complete(
+                work, t["name"], t["msa_identity"], args.trust_unverified_legacy)
+            reusable_dirs = []
         else:
-            ok = any(outdir_is_complete(d, mode=chk_mode, lenient=args.lenient_done)
-                     for d in dirs)
+            reusable_dirs = [d for d in dirs if result_is_reusable(
+                d, t["name"], t["final_identity"],
+                args.trust_unverified_legacy, args.lenient_done)]
+            reusable_dirs.sort(
+                key=lambda d: dir_run_time(d, resolve_result_dir(d, mode="full")),
+                reverse=True,
+            )
+            ok = bool(reusable_dirs)
         if not ok:
             failed.append(t["name"])
         rows.append({
@@ -1488,7 +2497,7 @@ def main(argv=None):
             "output": (
                 str(work / "msa_store" / (sanitise_name(t["name"]) + "_data.json"))
                 if args.stage == "msa" and ok
-                else str(dirs[0]) if dirs else ""
+                else str(reusable_dirs[0]) if reusable_dirs else ""
             ),
         })
 

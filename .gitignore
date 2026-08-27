@@ -93,6 +93,8 @@ jax_cache/
 # 최상위/임의 위치의 입력 JSON·CSV 는 실제 서열일 가능성이 있으므로 제외
 /*.json
 /*.csv
+# Repository-owned, non-biological artifact lineage is intentionally tracked.
+!ARTIFACT_MANIFEST.json
 
 # examples/ 와 results_example/ 는 예외 (공개 PDB 유래 예시와 실측 결과)
 !examples/

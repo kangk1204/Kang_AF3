@@ -78,8 +78,51 @@ import os
 import re
 import statistics
 import sys
+import tempfile
 import time
 from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parent.parent
+OUTPUT_DISTRIBUTION_FILES = (
+    "OUTPUT_NOTICE.md",
+    "OUTPUT_TERMS_OF_USE.md",
+    "LEGALLY_BINDING_TERMS_OF_USE.txt",
+)
+
+
+def propagate_output_terms(outdir):
+    """AF3-derived artifacts와 함께 필수 고지/약관 사본을 배치한다."""
+    destination = Path(outdir)
+    for name in OUTPUT_DISTRIBUTION_FILES:
+        source = REPO_ROOT / name
+        if not source.is_file():
+            raise RuntimeError("필수 AF3 출력물 고지 파일이 없다: %s" % source)
+        text = source.read_text(encoding="utf-8")
+        target = destination / name
+        fd, temporary_name = tempfile.mkstemp(prefix=".%s.tmp." % target.name,
+                                               dir=str(destination))
+        temporary = Path(temporary_name)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, target)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+
+def infer_chain_count(summary):
+    """요약 JSON에서 사슬 수를 보수적으로 추론한다. 알 수 없으면 None이다."""
+    for key in ("chain_ptm", "chain_iptm"):
+        values = summary.get(key)
+        if isinstance(values, list) and values:
+            return len(values)
+    matrix = summary.get("chain_pair_iptm")
+    if isinstance(matrix, list) and matrix:
+        return len(matrix)
+    return None
 
 
 def csv_safe_cell(value):
@@ -938,14 +981,14 @@ def plot_pae(conf, name, outpath):
     return max(max(r) for r in pae)
 
 
-def scatter_metric(rows):
+def scatter_metric_details(rows):
     """요약 산점도의 x 값을 고른다: 복합체는 ipTM, 단량체는 pTM.
 
     복합체에서 pTM 을 그리면 계면이 무너진 건이 '오른쪽 위 = 좋은 후보' 자리에
     찍힌다. 실측 예: nb_1kxv 는 pTM 0.81 / pLDDT 90.7 인데 ipTM 은 0.18 이고
     등급은 C_계면실패다. 등급이 쓰는 지표와 그림이 쓰는 지표를 맞춘다.
     """
-    xs, ys, names = [], [], []
+    xs, ys, names, omitted = [], [], [], []
     saw_iptm = saw_ptm = False
     for r in rows:
         y = r.get("mean_atom_plddt")
@@ -954,14 +997,19 @@ def scatter_metric(rows):
         iptm, ptm = r.get("iptm"), r.get("ptm")
         if iptm is not None:
             x, saw_iptm = iptm, True
-        elif (r.get("n_chain") or 1) > 1:
+        elif r.get("n_chain") is None:
+            omitted.append((r.get("name"), "사슬 수 불명; ipTM 누락"))
+            continue
+        elif r.get("n_chain") > 1:
             # 사슬이 여럿인데 ipTM 이 없다. '단량체라 값이 없다' 가 아니라 '계면을
             # 평가하지 못했다' 는 뜻이다. pTM 으로 그리면 계면을 모르는 건이
             # 오른쪽 위(좋은 후보) 자리에 앉는다. 그래서 아예 그리지 않는다.
+            omitted.append((r.get("name"), "다중 사슬; ipTM 누락"))
             continue
         elif ptm is not None:
             x, saw_ptm = ptm, True
         else:
+            omitted.append((r.get("name"), "pTM/ipTM 누락"))
             continue
         xs.append(x)
         ys.append(y)
@@ -972,6 +1020,12 @@ def scatter_metric(rows):
         key = "iptm"
     else:
         key = "ptm"
+    return xs, ys, names, key, omitted
+
+
+def scatter_metric(rows):
+    """기존 호출 계약을 보존하면서 tri-state omission은 details 함수에 남긴다."""
+    xs, ys, names, key, _omitted = scatter_metric_details(rows)
     return xs, ys, names, key
 
 
@@ -1019,7 +1073,7 @@ def plot_summary(rows, outpath):
                         else ["AF3 top model", "other samples, same input"])
 
     # --- 오른쪽: pTM 대 원자 가중 평균 pLDDT 산점 ---
-    xs, ys2, nm, _metric_key = scatter_metric(rows)
+    xs, ys2, nm, _metric_key, omitted = scatter_metric_details(rows)
     if xs:
         for lo, hi, color, _ko, _en in PLDDT_BANDS:
             ax2.axhspan(lo, hi, color=color, alpha=0.16, lw=0, zorder=0)
@@ -1044,12 +1098,30 @@ def plot_summary(rows, outpath):
         ax2.set_yticks([0, 50, 70, 90])
         ax2.set_xlim(0, 1.0)
         ax2.set_title(t("sum_r"))
+        if omitted:
+            ax2.text(
+                0.02, 0.02,
+                ("산점도 제외 %d건: %s" if _LANG == 0
+                 else "%d omitted from scatter: %s")
+                % (len(omitted), "; ".join(reason for _name, reason in omitted)),
+                transform=ax2.transAxes, fontsize=6.5, color="#8B1A1A",
+                va="bottom", wrap=True,
+            )
         band_legend = (
             [plt.Rectangle((0, 0), 1, 1, color=cc, alpha=0.5, lw=0)
              for _lo, _hi, cc, _k, _e in PLDDT_BANDS],
             [(ko if _LANG == 0 else en) for _lo, _hi, _c, ko, en in PLDDT_BANDS])
     else:
         ax2.axis("off")
+        if omitted:
+            ax2.text(
+                0.02, 0.8,
+                ("산점도에 포함할 수 있는 지표가 없다.\n제외 %d건: %s" if _LANG == 0
+                 else "No evaluable scatter metric.\n%d omitted: %s")
+                % (len(omitted), "; ".join(reason for _name, reason in omitted)),
+                transform=ax2.transAxes, fontsize=8, color="#8B1A1A", va="top",
+                wrap=True,
+            )
         band_legend = None
 
     # 축 라벨과 겹치지 않게 두 범례를 그림 하단 여백에 배치한다.
@@ -1314,6 +1386,7 @@ def main(argv=None):
         % len(targets))
 
     os.makedirs(args.out, exist_ok=True)
+    propagate_output_terms(args.out)
 
     rows = []
     cif_targets = []
@@ -1374,7 +1447,7 @@ def main(argv=None):
             "iptm": summ.get("iptm"),
             "fraction_disordered": summ.get("fraction_disordered"),
             "has_clash": summ.get("has_clash"),
-            "n_chain": len(summ.get("chain_ptm") or []),
+            "n_chain": infer_chain_count(summ),
             "n_token": len(conf.get("pae")) if conf and conf.get("pae") else None,
             "n_residue": len(res) if res else None,
             # mean_plddt/min_plddt는 기존 visualize_table.csv 호환용 잔기 지표다.
@@ -1471,16 +1544,22 @@ def main(argv=None):
         print("  ... (%d개 더. 전체는 %s 를 봐라)" % (len(rows) - 15, os.path.basename(tbl)))
     if all(r["iptm"] is None for r in rows):
         print("")
-        print("ipTM 이 전부 비어 있다. %s" % t("monomer"))
-        print("사슬이 2개 이상일 때만 계산된다. 항원-나노바디 복합체를 돌리면 채워진다.")
+        singles = sum(r["n_chain"] == 1 for r in rows)
+        multis = sum((r["n_chain"] or 0) > 1 for r in rows)
+        unknown = sum(r["n_chain"] is None for r in rows)
+        print("ipTM 이 전부 비어 있다: 단일 사슬 %d건(해당 없음), "
+              "다중 사슬 %d건(계면 미평가), 사슬 수 불명 %d건."
+              % (singles, multis, unknown))
     print("")
     print("그림에서 무엇을 볼 것인가")
     print("  pLDDT 그림 : 파란 배경(90 이상) 안에 선이 있으면 그 잔기는 믿을 만하다.")
     print("               CDR 루프가 노랑/주황으로 내려앉는 것은 나노바디에서 흔하다.")
     print("               다만 프레임워크(파랑)가 아니라 CDR 이 무너지면 그 후보는 의심해라.")
     print("  PAE 그림   : 대각선 근처만 어두우면 각 도메인은 확실하지만 서로의 위치는 불확실하다.")
-    print("               복합체에서 사슬 경계(붉은 선) 바깥의 사각형이 어두워야 결합을 믿는다.")
-    print("  요약 그림  : 오른쪽 위에 모인 것이 좋은 후보다. 열린 원의 퍼짐이 크면 재현성이 낮다.")
+    print("               복합체에서 사슬 경계 밖이 어두우면 AF3의 상대 배치 confidence가 높다.")
+    print("               이것은 실제 결합·affinity 또는 native pose의 증거가 아니다.")
+    print("  요약 그림  : 오른쪽 위 점은 AF3 내부 신뢰도 기준의 탐색 우선순위일 뿐이다.")
+    print("               결합·친화도·native 정확도의 증거가 아니며 assay/native 검증이 필요하다.")
     print("=" * 70)
     return 0
 

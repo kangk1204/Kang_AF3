@@ -1,0 +1,194 @@
+{
+  "artifacts": [
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": "python3 scripts/build_reference_artifacts.py --build",
+      "generator_version": 1,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/ab_benchmark.png",
+      "sha256": "554fac783b44bd1f6c01bfa0844a88fc4ec9d034532e248df66c36a9987c8e17",
+      "sources": [
+        {
+          "path": "results_example/ab_benchmark.csv",
+          "sha256": "810cbb747ba919a84f051bc96225c5475a94c18e577765e4b4d3decd754847f2"
+        }
+      ],
+      "status": "reproducible_from_tracked_sources"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": "python3 scripts/build_reference_artifacts.py --build",
+      "generator_version": 1,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/baseline_gpu5070ti.png",
+      "sha256": "7065aedf9269dc7ff62cfa167680ab81b8ea99b6c8219a862b76f47e58b9d98c",
+      "sources": [
+        {
+          "path": "results_example/ab_benchmark.csv",
+          "sha256": "810cbb747ba919a84f051bc96225c5475a94c18e577765e4b4d3decd754847f2"
+        },
+        {
+          "path": "docs/benchmark_report.md",
+          "sha256": "18c5e9f28d11aca6654486a9110be4a022733c6758a52dda1cc14e1639876353"
+        }
+      ],
+      "status": "reproducible_from_tracked_sources"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": "python3 scripts/build_reference_artifacts.py --build",
+      "generator_version": 1,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/confidence_overview.png",
+      "sha256": "6cac610759e500f3e0cd769eea7a2678c08f4e83f9ec2d8076270c499840e641",
+      "sources": [
+        {
+          "path": "results_example/af3_summary.csv",
+          "sha256": "ae83d18c33a850175613c70348227b03155ecc7f3468aab4fdc1600158092762"
+        }
+      ],
+      "status": "reproducible_from_tracked_sources"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": "python3 scripts/build_reference_artifacts.py --build",
+      "generator_version": 1,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/db_confidence_comparison.png",
+      "sha256": "d65cd991508d750d83f4b1c2df21b292368c2cd4f0e901be99e875cac2c03932",
+      "sources": [
+        {
+          "path": "results_example/db_confidence_comparison.csv",
+          "sha256": "1cae2b4d78fabae0780fbacfc18824a7e2dff2e36da2c969bc55c7143cb3dab6"
+        }
+      ],
+      "status": "reproducible_from_tracked_sources"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": "python3 scripts/build_reference_artifacts.py --build",
+      "generator_version": 1,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/msa_depth_comparison.png",
+      "sha256": "bf96732e0dbdcd119dcd5b7d1942ce09b13d52790f6aeafb33bb8320d6ac1aad",
+      "sources": [
+        {
+          "path": "results_example/msa_comparison.csv",
+          "sha256": "fcead4e4f6757670663e93f67638eacdbc26049d81fdad7cdc5790acb0a456f3"
+        }
+      ],
+      "status": "reproducible_from_tracked_sources"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": "python3 scripts/build_reference_artifacts.py --build",
+      "generator_version": 1,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/msa_threads_scaling.png",
+      "sha256": "9bebfd4df16c3c0d95c5227a1ee865e166bcdd482a24acc5ef906de5baeaae98",
+      "sources": [
+        {
+          "path": "results_example/msa_threads.csv",
+          "sha256": "fe168f30f293fc654f8248a6876b0b0a1387ce4415d59dd88c78a9af71b33576"
+        }
+      ],
+      "status": "reproducible_from_tracked_sources"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": null,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "examples/view3d_example.html",
+      "reason": "embedded AF3 output is retained, but original generator inputs/session are absent",
+      "sha256": "d40d11782870c264558345a3a144598919c322e5d0d8c469ac4e6d4c4faae50d",
+      "sources": [],
+      "status": "historical_not_reproducible"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": null,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/example_complex_pae.png",
+      "reason": "raw *_confidences.json is not distributed",
+      "sha256": "85cc5364e17512d19efb8c25406246d12f525b4019702c232e2420143ab7cde1",
+      "sources": [],
+      "status": "historical_not_reproducible"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": null,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/example_complex_plddt.png",
+      "reason": "raw *_confidences.json/mmCIF is not distributed",
+      "sha256": "03cc38d5084e8b0013f0b94410843c001508f6228ab82cdd50bd5ba84695c051",
+      "sources": [],
+      "status": "historical_not_reproducible"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": null,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/example_pymol_plddt.png",
+      "reason": "original PyMOL session and raw mmCIF are absent",
+      "sha256": "93c00d17ab6a1e70aa503233aa69db5b2cb09b17ab444f9504445ee15012eea4",
+      "sources": [],
+      "status": "historical_not_reproducible"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": null,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/example_summary_6targets.png",
+      "reason": "original raw AF3 output is absent",
+      "sha256": "f532af9f83adc9612a0f22ce13513b9dcc44df7c524844e65644f3ed88c7a76b",
+      "sources": [],
+      "status": "historical_not_reproducible"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": null,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/quickstart_a_multifasta.png",
+      "reason": "original raw AF3 output is absent",
+      "sha256": "4f22732563837b61d06d2a9ff6886794b6238b3a44a7f4a39f769523b076a620",
+      "sources": [],
+      "status": "historical_not_reproducible"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": null,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/quickstart_b_homodimer_pae.png",
+      "reason": "original raw AF3 output is absent",
+      "sha256": "cf02fa44076cd1f6a57876e995178ebc1aa117aeafd86345686d3515c906d8dd",
+      "sources": [],
+      "status": "historical_not_reproducible"
+    },
+    {
+      "af3_revision": "97d20234c6eb89e8d05376e9eecc9321e60a559b",
+      "generator": null,
+      "output_terms": "notice_and_pinned_terms_distributed",
+      "path": "figures/view3d_screenshot.png",
+      "reason": "browser/session capture source is absent",
+      "sha256": "64d175efde7c7986adb022c70c37258acfa69fe6bc6b13659fd5904c3fb398e5",
+      "sources": [],
+      "status": "historical_not_reproducible"
+    }
+  ],
+  "build_environment": {
+    "font_family": "DejaVu Sans",
+    "font_file": "DejaVuSans.ttf",
+    "font_sha256": "3fdf69cabf06049ea70a00b5919340e2ce1e6d02b0cc3c4b44fb6801bd1e0d22",
+    "freetype": "2.14.2",
+    "matplotlib": "3.10.7+dfsg1",
+    "platform": "Linux-7.0.0-30-generic-x86_64-with-glibc2.43",
+    "python": "3.14.4",
+    "python_implementation": "CPython"
+  },
+  "builder_sha256": "d19309da06bee2d9c689745c3d4d9fcee3b3419f9aeabe2ee8d9d5f96faae9e3",
+  "generated_by": "scripts/build_reference_artifacts.py",
+  "reproducibility_scope": "source lineage is portable; PNG byte identity is claimed only when Python/matplotlib/FreeType/font environment matches build_environment",
+  "schema_version": 1,
+  "scope": "tracked reference figures and AF3-derived example viewer",
+  "terms_sha256": "7ab1c4ef16a8fe88db3ccef813a5e28dec63b1e2d336876e5ae60b6d6b4686b8"
+}

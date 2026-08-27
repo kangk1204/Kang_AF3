@@ -56,7 +56,9 @@ DB 구성이 정한다.** 축소 DB 구성에서는 데이터 파이프라인 1.
 > 2026-08-25 에 같은 1건을 끝까지 돌려 보니 **34.8분** 이 걸렸고, 그중
 > data pipeline(MSA)이 2055.0초였다. 추론은 13.0초다. **full DB 로 대량
 > 스크리닝을 계획할 때 이 표의 40.2시간을 그대로 쓰면 안 된다.** 전수는 overlay 로,
-> 상위 후보만 full DB 로 재계산하는 조합이 이 저장소의 권장이다.
+> 축소 DB 전수 + 일부 full DB 재계산은 계산량 탐색용 workflow다. representative common
+> panel, prespecified metric/tie policy, held-out validation과 허용 miss-rate 전에는 후보
+> 제거 전략으로 검증되거나 권장된 것이 아니다.
 
 ---
 
@@ -414,6 +416,6 @@ find vhh_001_in -name '._*' -delete        # 지워도 안전하다
 | `results_example/sort_effect.csv` | 길이순 정렬 효과 측정 |
 | `results_example/msa_comparison.csv` | 축소/전체 DB MSA 깊이 대조 |
 | `results_example/db_confidence_comparison.csv` | 축소/전체 DB 신뢰도 대조 |
-| `af3_결과요약.csv` | 실제 AF3 출력 12건 집계 (등급 열 포함) |
+| `results_example/af3_summary.csv` | 실제 AF3 출력 12건 집계 (local heuristic 등급 열 포함) |
 | `docs/benchmark_notes.md` / `docs/db_notes.md` | 측정 작업 노트 |
 | `docs/install_log.md` | 동작 확인된 버전 조합 |

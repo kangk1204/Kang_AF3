@@ -152,7 +152,11 @@ def test_output_dir_follows_json_name_not_filename():
         workspace.write_json("zzz_filename.json", workspace.monomer("aaa realname"))
         workspace.make_result("aaa_realname", stage="full")
 
-        proc = run_script(RUNNER, default_args(workspace, "--audit"), workspace)
+        proc = run_script(
+            RUNNER,
+            default_args(workspace, "--audit", "--trust-unverified-results"),
+            workspace,
+        )
         check_in(
             "완료 1개, 미완료 0개",
             proc.stdout,

@@ -57,6 +57,10 @@ AF3_STUB_LOG        호출 내역을 JSON Lines 로 기록할 경로
 AF3_STUB_GPU_FAIL   --gpus 를 붙인 run 을 실패시킨다 (컨테이너가 GPU 를 못 보는 상황)
 AF3_STUB_JAX_CPU    컨테이너 안 JAX 가 cpu 백엔드로 떨어진 상황
 AF3_STUB_JAX_FAIL   컨테이너 안 JAX 초기화 자체가 실패하는 상황
+AF3_STUB_JAX_MIXED  경고에 gpu가 있지만 실제 backend는 cpu인 상황
+AF3_STUB_HELP_FAIL  run_alphafold.py --help 컨테이너 실행 실패
+AF3_STUB_HELP_EMPTY --help가 성공하지만 실질적인 flag 출력이 없는 상황
+AF3_STUB_PROBE_HANG 환경 probe가 끝나지 않는 상황(호출 종류 문자열)
 AF3_STUB_FAIL_AT    N번째 작업에서 _data.json 만 쓰고 중단 (추론 중 끊김 재현)
 AF3_STUB_FAIL_NAMES 이 정규화 이름들에서 중단 (쉼표 구분)
 AF3_STUB_EXIT       중단 시 종료코드 (기본 1)
@@ -344,28 +348,60 @@ def main(argv: list[str]) -> int:
     parsed = parse_docker_args(argv)
     image = parsed["image"] or ""
 
+    def start_probe(kind: str) -> None:
+        if parsed["name"]:
+            registry_write(registry_names() + [parsed["name"]])
+        log_event({"call": "probe", "kind": kind, "name": parsed["name"]})
+        if os.environ.get("AF3_STUB_PROBE_HANG") == kind:
+            time.sleep(600)
+
+    def finish_probe(code: int) -> int:
+        if parsed["name"]:
+            registry_write([n for n in registry_names() if n != parsed["name"]])
+        return code
+
     # Environment-check probes that do not invoke run_alphafold.py.
     if "nvidia-smi" in argv:
+        start_probe("gpu")
         if os.environ.get("AF3_STUB_GPU_FAIL") and parsed["gpus"]:
             # 컨테이너가 GPU 를 못 보는 상황. 실제 docker 도 0 이 아닌 코드로 끝난다.
             print("docker: Error response from daemon: could not select device "
                   "driver \"nvidia\" with capabilities: [[gpu]].", file=sys.stderr)
-            return 125
+            return finish_probe(125)
         print("Stub NVIDIA GPU, 16384 MiB, 999.0")
-        return 0
+        return finish_probe(0)
     if any("import jax" in a for a in argv):
+        start_probe("jax")
+        probe_source = " ".join(a for a in argv if "import jax" in a)
+        enforces_gpu = (
+            "backend == \"gpu\"" in probe_source
+            and "device.platform == \"gpu\"" in probe_source
+        )
         if os.environ.get("AF3_STUB_JAX_CPU"):
-            # 드라이버/CUDA 조합이 어긋나 JAX 가 CPU 로 떨어진 상황
-            print("cpu")
-            return 0
+            # CPU fallback is rejected only when the probe itself contains the
+            # exact backend/device assertions.  This lets mutation testing prove
+            # that deleting those assertions really restores the false-success bug.
+            if enforces_gpu:
+                print("AssertionError: backend=cpu", file=sys.stderr)
+                return finish_probe(1)
+            print("backend=cpu")
+            return finish_probe(0)
+        if os.environ.get("AF3_STUB_JAX_MIXED"):
+            print("warning: gpu plugin unavailable", file=sys.stderr)
+            if enforces_gpu:
+                print("AssertionError: backend=cpu", file=sys.stderr)
+                return finish_probe(1)
+            print("backend=cpu")
+            return finish_probe(0)
         if os.environ.get("AF3_STUB_JAX_FAIL"):
             print("RuntimeError: Unable to initialize backend 'cuda'", file=sys.stderr)
-            return 1
-        print("gpu")
-        return 0
+            return finish_probe(1)
+        print("backend=gpu devices=1")
+        return finish_probe(0)
     if "jackhmmer" in argv and "-h" in argv:
+        start_probe("hmmer")
         print("HMMER 3.4 stub\n  --seq_limit <n> : truncate hits")
-        return 0
+        return finish_probe(0)
 
     # --helpfull 처리. 근거 (7): 실제로 종료코드 1 이다.
     if (
@@ -373,19 +409,26 @@ def main(argv: list[str]) -> int:
         or "--helpfull" in argv
         or "--help" in argv
     ):
+        start_probe("help")
         log_event({"call": "help", "image": image})
+        if os.environ.get("AF3_STUB_HELP_FAIL"):
+            print("docker: help probe failed", file=sys.stderr)
+            return finish_probe(125)
+        if os.environ.get("AF3_STUB_HELP_EMPTY"):
+            print("usage: run_alphafold.py")
+            return finish_probe(0)
         if "broken" in image:
             # docker 가 이미지를 못 찾은 상황. 근거: docker 관례상 125.
             sys.stderr.write(
                 f"Unable to find image '{image}' locally\n"
                 f"docker: Error response from daemon: pull access denied for {image}.\n"
             )
-            return 125
+            return finish_probe(125)
         # 이미지 이름에 'legacy' 가 들어가면 구버전으로 흉내낸다.
         # (부분일치 함정 주의: 'old' 로 판정하면 'alphafold3' 의 'fold' 가 걸린다.
         #  실제로 이 스텁을 만들 때 그 버그로 테스트 2건이 헛돌았다.)
         sys.stdout.write(HELP_LEGACY if "legacy" in image else HELP_MODERN)
-        return 1
+        return finish_probe(1)
 
     if "broken" in image:
         # 이미지가 없어도 "docker 를 불렀다" 는 사실 자체는 기록한다.

@@ -20,6 +20,8 @@
 from __future__ import annotations
 
 import argparse
+import atexit
+import errno
 import fcntl
 import hashlib
 import json
@@ -34,9 +36,10 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from datetime import datetime
+from math import ceil
 from pathlib import Path
 from typing import Iterator, Sequence
 
@@ -44,7 +47,11 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from af3_db import verify_database_roots, verify_model_dir  # noqa: E402
+from af3_db import (  # noqa: E402
+    database_root_identity,
+    verify_database_roots,
+    verify_model_dir,
+)
 
 
 # =========================================================
@@ -66,6 +73,7 @@ STALE_STAGE_HOURS = 24
 
 
 SCRIPT_ID = "run_af3_batch_improved"
+PRODUCER_VERSION = "2026.08.27"
 STATE_FORMAT_VERSION = 1
 STAGE_PREFIX = ".af3_pending_"
 STAGE_MARKER_NAME = ".af3_stage_marker"
@@ -105,6 +113,8 @@ KNOWN_FLAGS = frozenset(
     }
 )
 INFRASTRUCTURE_EXIT_CODES = frozenset({125, 126, 127})
+DEFAULT_GPU_MEMORY_FRACTION = 0.95
+DEFAULT_NO_PROGRESS_TIMEOUT_SECONDS = 2 * 60 * 60
 # 컨테이너 이름 규칙: <접두사><러너 PID>_<순번>.
 # `docker run` 으로 띄운 컨테이너는 러너가 죽어도 데몬이 계속 돌린다 (Ctrl-C, SIGTERM,
 # SSH 끊김 모두에서 확인). 이름에 PID 를 박아 두어야 나중에 "이 컨테이너를 띄운 실행이
@@ -163,9 +173,21 @@ CONTAINER_CACHE = "/af3/cache"
 
 
 @dataclass(frozen=True)
+class FileSnapshot:
+    """Private immutable copy of one validated untrusted input file."""
+
+    path: Path
+    bytes: int
+    sha256: str
+    device: int
+    inode: int
+
+
+@dataclass(frozen=True)
 class Sidecar:
     source: Path
     relative_path: Path
+    snapshot: FileSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -174,6 +196,7 @@ class Job:
     output_name: str
     raw_name: str
     sidecars: tuple[Sidecar, ...]
+    json_snapshot: FileSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -181,6 +204,26 @@ class StageStatus:
     path: Path
     removable: bool
     reason: str
+
+
+@dataclass(frozen=True)
+class GPUDevice:
+    index: str
+    uuid: str
+    free_mib: int
+    total_mib: int
+
+
+@dataclass(frozen=True)
+class RunOutcome:
+    """Per-job producer outcome used to decide which results may be committed."""
+
+    had_failure: bool
+    successful_outputs: frozenset[str]
+
+
+class GPUAdmissionError(RuntimeError):
+    """GPU readiness or lease conflict; a user-correctable preflight failure."""
 
 
 def sanitised_name(name: str) -> str:
@@ -281,45 +324,547 @@ def nonempty_file(path: Path) -> bool:
 
 
 PROVENANCE_SUFFIX = "_af3run_provenance.json"
-PROVENANCE_VERSION = 1
+PROVENANCE_VERSION = 2
+PROVENANCE_IDENTITY_KEYS = (
+    "provenance_version",
+    "producer",
+    "producer_version",
+    "schema_version",
+    "effective_input_sha256",
+    "mode",
+    "gpu_memory_fraction",
+    "database_fingerprints",
+    "model_checksum",
+    "image",
+    "image_identity",
+)
+_UNSET = object()
 
 
 def provenance_path(result_dir: Path, output_name: str) -> Path:
     return result_dir / f"{output_name}{PROVENANCE_SUFFIX}"
 
 
-def job_provenance(job_file: Path, mode: str, db_dirs: Sequence[Path],
-                   model_dir: Path, image: str) -> dict:
+def _json_bytes(value: object) -> bytes:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+
+
+_INPUT_SNAPSHOT_ROOT: Path | None = None
+
+
+def _cleanup_input_snapshot_root() -> None:
+    global _INPUT_SNAPSHOT_ROOT
+    root = _INPUT_SNAPSHOT_ROOT
+    _INPUT_SNAPSHOT_ROOT = None
+    if root is not None:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _input_snapshot_root() -> Path:
+    """Return a process-private store for immutable input observations."""
+    global _INPUT_SNAPSHOT_ROOT
+    if _INPUT_SNAPSHOT_ROOT is None:
+        root = Path(tempfile.mkdtemp(prefix="kang_af3_input_snapshot_"))
+        os.chmod(root, 0o700)
+        _INPUT_SNAPSHOT_ROOT = root
+        atexit.register(_cleanup_input_snapshot_root)
+    return _INPUT_SNAPSHOT_ROOT
+
+
+def _snapshot_test_hook(path: Path, phase: str) -> None:
+    """No-op seam used by deterministic race regressions."""
+
+
+def _same_file_observation(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(right.st_mode)
+        and right.st_nlink == 1
+        and left.st_dev == right.st_dev
+        and left.st_ino == right.st_ino
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
+
+
+def _write_all(descriptor: int, block: bytes) -> None:
+    offset = 0
+    while offset < len(block):
+        written = os.write(descriptor, block[offset:])
+        if written <= 0:
+            raise OSError("snapshot 파일에 끝까지 쓰지 못했습니다")
+        offset += written
+
+
+def _snapshot_descriptor(
+    source_fd: int,
+    before: os.stat_result,
+    display_path: Path,
+    maximum_bytes: int | None,
+    post_stat,
+) -> FileSnapshot:
+    """Consume a validated source descriptor into the private snapshot store."""
+    temporary_path: Path | None = None
+    target_fd: int | None = None
+    try:
+        opened = os.fstat(source_fd)
+        if not _same_file_observation(before, opened):
+            raise OSError(
+                f"검사 중 입력 파일이 교체되거나 변경되었습니다: {display_path}"
+            )
+        target_fd, temporary_name = tempfile.mkstemp(
+            prefix="input_", dir=str(_input_snapshot_root())
+        )
+        temporary_path = Path(temporary_name)
+        os.fchmod(target_fd, 0o400)
+        digest = hashlib.sha256()
+        copied = 0
+        while True:
+            block = os.read(source_fd, 1024 * 1024)
+            if not block:
+                break
+            copied += len(block)
+            if maximum_bytes is not None and copied > maximum_bytes:
+                raise OSError(
+                    f"파일이 복사 중 안전 한도 {maximum_bytes} bytes를 넘었습니다: "
+                    f"{display_path}"
+                )
+            digest.update(block)
+            _write_all(target_fd, block)
+        os.fsync(target_fd)
+        _snapshot_test_hook(display_path, "after_copy")
+        after_fd = os.fstat(source_fd)
+        after_path = post_stat()
+        if (
+            copied != opened.st_size
+            or not _same_file_observation(opened, after_fd)
+            or not _same_file_observation(opened, after_path)
+        ):
+            raise OSError(
+                f"snapshot 생성 중 입력 파일이 교체되거나 변경되었습니다: "
+                f"{display_path}"
+            )
+        stored = os.fstat(target_fd)
+        return FileSnapshot(
+            path=temporary_path,
+            bytes=copied,
+            sha256=digest.hexdigest(),
+            device=stored.st_dev,
+            inode=stored.st_ino,
+        )
+    except BaseException:
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except OSError:
+                pass
+        raise
+    finally:
+        if target_fd is not None:
+            os.close(target_fd)
+
+
+def _snapshot_regular_file(
+    path: Path, *, maximum_bytes: int | None = None
+) -> FileSnapshot:
+    """Copy one untrusted final path through O_NOFOLLOW and a validated fd."""
+    path = Path(path)
+    before = os.lstat(path)
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise OSError(f"단일 일반 파일이 아니거나 hardlink입니다: {path}")
+    if maximum_bytes is not None and before.st_size > maximum_bytes:
+        raise OSError(
+            f"파일이 안전 한도 {maximum_bytes} bytes를 넘습니다 ({before.st_size} bytes)"
+        )
+    _snapshot_test_hook(path, "after_lstat")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    source_fd = os.open(path, flags)
+    try:
+        return _snapshot_descriptor(
+            source_fd,
+            before,
+            path,
+            maximum_bytes,
+            lambda: os.lstat(path),
+        )
+    finally:
+        os.close(source_fd)
+
+
+def _snapshot_relative_regular_file(
+    root: Path,
+    relative_path: Path,
+    *,
+    maximum_bytes: int | None = None,
+    root_fd: int | None = None,
+) -> FileSnapshot:
+    """Snapshot a path by walking every component with no-follow dirfds.
+
+    Each opened directory remains bound to the original inode even if its name
+    is concurrently renamed and replaced with a symlink.  A not-yet-opened
+    component that is replaced by a symlink fails at O_NOFOLLOW instead of
+    escaping the input root.
+    """
+    root = Path(root)
+    relative_path = Path(relative_path)
+    parts = relative_path.parts
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        raise OSError(f"안전하지 않은 상대경로입니다: {relative_path}")
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = (
+        os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    )
+    opened_directories: list[int] = []
+    source_fd: int | None = None
+    try:
+        if root_fd is None:
+            current_fd = os.open(root, directory_flags)
+        else:
+            current_fd = os.dup(root_fd)
+            os.set_inheritable(current_fd, False)
+        opened_directories.append(current_fd)
+        if not stat.S_ISDIR(os.fstat(current_fd).st_mode):
+            raise OSError(f"입력 root가 일반 폴더가 아닙니다: {root}")
+        walked = Path()
+        for component in parts[:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=current_fd)
+            opened_directories.append(next_fd)
+            if not stat.S_ISDIR(os.fstat(next_fd).st_mode):
+                raise OSError(f"sidecar 상위 경로가 폴더가 아닙니다: {walked / component}")
+            current_fd = next_fd
+            walked = walked / component
+            _snapshot_test_hook(root / walked, "after_parent_open")
+
+        leaf = parts[-1]
+        display_path = root / relative_path
+        before = os.stat(leaf, dir_fd=current_fd, follow_symlinks=False)
+        if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+            raise OSError(f"단일 일반 파일이 아니거나 hardlink입니다: {display_path}")
+        if maximum_bytes is not None and before.st_size > maximum_bytes:
+            raise OSError(
+                f"파일이 안전 한도 {maximum_bytes} bytes를 넘습니다 "
+                f"({before.st_size} bytes)"
+            )
+        _snapshot_test_hook(display_path, "after_lstat")
+        source_fd = os.open(leaf, file_flags, dir_fd=current_fd)
+        return _snapshot_descriptor(
+            source_fd,
+            before,
+            display_path,
+            maximum_bytes,
+            lambda: os.stat(leaf, dir_fd=current_fd, follow_symlinks=False),
+        )
+    finally:
+        if source_fd is not None:
+            os.close(source_fd)
+        for descriptor in reversed(opened_directories):
+            os.close(descriptor)
+
+
+def _open_snapshot(snapshot: FileSnapshot) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(snapshot.path, flags)
+    info = os.fstat(descriptor)
+    if (
+        not stat.S_ISREG(info.st_mode)
+        or info.st_nlink != 1
+        or info.st_dev != snapshot.device
+        or info.st_ino != snapshot.inode
+        or info.st_size != snapshot.bytes
+    ):
+        os.close(descriptor)
+        raise OSError(f"private input snapshot이 변경되었습니다: {snapshot.path}")
+    return descriptor
+
+
+def _read_snapshot(snapshot: FileSnapshot) -> bytes:
+    descriptor = _open_snapshot(snapshot)
+    try:
+        chunks: list[bytes] = []
+        digest = hashlib.sha256()
+        while True:
+            block = os.read(descriptor, 1024 * 1024)
+            if not block:
+                break
+            chunks.append(block)
+            digest.update(block)
+        data = b"".join(chunks)
+        if len(data) != snapshot.bytes or digest.hexdigest() != snapshot.sha256:
+            raise OSError(f"private input snapshot 내용이 변경되었습니다: {snapshot.path}")
+        return data
+    finally:
+        os.close(descriptor)
+
+
+def _publish_snapshot(snapshot: FileSnapshot, destination: Path) -> None:
+    """Atomically publish a verified snapshot into the Docker staging tree."""
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    source_fd = _open_snapshot(snapshot)
+    target_fd: int | None = None
+    temporary: Path | None = None
+    try:
+        target_fd, temporary_name = tempfile.mkstemp(
+            prefix=f".{destination.name}.", dir=str(destination.parent)
+        )
+        temporary = Path(temporary_name)
+        digest = hashlib.sha256()
+        copied = 0
+        while True:
+            block = os.read(source_fd, 1024 * 1024)
+            if not block:
+                break
+            copied += len(block)
+            digest.update(block)
+            _write_all(target_fd, block)
+        os.fsync(target_fd)
+        if copied != snapshot.bytes or digest.hexdigest() != snapshot.sha256:
+            raise OSError(f"private input snapshot 복사 검증에 실패했습니다: {snapshot.path}")
+        os.close(target_fd)
+        target_fd = None
+        os.replace(temporary, destination)
+        temporary = None
+        directory_fd = os.open(destination.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        os.close(source_fd)
+        if target_fd is not None:
+            os.close(target_fd)
+        if temporary is not None:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        while True:
+            block = handle.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _model_file_checksum(path: Path) -> dict[str, object]:
+    """Return an exact checksum, without reading terabytes of sparse test holes.
+
+    Normal model files use ordinary SHA-256.  Sparse files use a structural
+    checksum over hole lengths and the exact bytes in allocated extents.  That
+    representation is content-sensitive but avoids turning the sparse 1.1-GB
+    regression fixture into a 1.1-GB read for every subprocess.
+    """
+    info = os.lstat(path)
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+        raise OSError(f"모델 파일이 일반 파일이 아닙니다: {path}")
+    sparse = info.st_size > 0 and info.st_blocks * 512 < info.st_size
+    if not sparse or not hasattr(os, "SEEK_DATA"):
+        return {
+            "algorithm": "sha256",
+            "bytes": info.st_size,
+            "sha256": _sha256_file(path),
+        }
+
+    digest = hashlib.sha256(b"af3-sparse-file-v1\0")
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        position = 0
+        while position < info.st_size:
+            try:
+                data_offset = os.lseek(descriptor, position, os.SEEK_DATA)
+            except OSError as exc:
+                if exc.errno != errno.ENXIO:
+                    raise
+                data_offset = info.st_size
+            if data_offset > position:
+                digest.update(b"H" + (data_offset - position).to_bytes(8, "big"))
+            if data_offset >= info.st_size:
+                break
+            hole_offset = min(
+                os.lseek(descriptor, data_offset, os.SEEK_HOLE), info.st_size
+            )
+            digest.update(b"D" + (hole_offset - data_offset).to_bytes(8, "big"))
+            os.lseek(descriptor, data_offset, os.SEEK_SET)
+            remaining = hole_offset - data_offset
+            while remaining:
+                block = os.read(descriptor, min(1024 * 1024, remaining))
+                if not block:
+                    raise OSError(f"모델 파일을 끝까지 읽지 못했습니다: {path}")
+                digest.update(block)
+                remaining -= len(block)
+            position = hole_offset
+    finally:
+        os.close(descriptor)
+    return {
+        "algorithm": "sha256-sparse-extents-v1",
+        "bytes": info.st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
+def model_checksum(model_dir: Path, mode: str) -> dict[str, object] | None:
+    if mode == "data":
+        return None
+    return _model_file_checksum(Path(model_dir).expanduser() / "af3.bin")
+
+
+def database_fingerprints(
+    db_dirs: Sequence[Path], mode: str, *, allow_unsealed: bool = False
+) -> list[dict[str, object]]:
+    """Resolve sealed content identities, with an explicit compatibility fallback.
+
+    Full databases fail closed unless their one-time deep verification seal is
+    valid. ``allow_unsealed`` is deliberately labelled metadata-only. Reduced
+    overlays retain their existing manifest/content checks.
+    """
+    if mode == "inference":
+        return []
+    return [
+        database_root_identity(
+            Path(raw_root).expanduser().resolve(),
+            allow_unsealed=allow_unsealed,
+        )
+        for raw_root in db_dirs
+    ]
+
+
+def job_provenance(
+    job: Job | Path,
+    mode: str,
+    db_dirs: Sequence[Path],
+    model_dir: Path,
+    image: str,
+    image_identity: dict[str, object] | None = None,
+    *,
+    gpu_memory_fraction: float | None = None,
+    database_records: list[dict[str, object]] | None = None,
+    model_record: object = _UNSET,
+) -> dict:
     """이 결과가 '무엇으로부터' 나왔는지 적는다.
 
     이름만 같으면 완료로 보던 것이 문제였다. 서열을 고치고 같은 이름으로 다시
     돌리면 옛 구조가 새 결과로 보고된다. 그래서 다음 실행이 같은 조건인지 비교할
     수 있도록 입력과 설정을 함께 남긴다.
     """
-    digest = hashlib.sha256(job_file.read_bytes()).hexdigest()
+    if isinstance(job, Job):
+        job_file = job.json_file
+        sidecars = job.sidecars
+        json_snapshot = job.json_snapshot
+    else:
+        job_file = Path(job)
+        sidecars = ()
+        json_snapshot = None
+    if json_snapshot is None:
+        json_snapshot = _snapshot_regular_file(
+            job_file, maximum_bytes=MAX_INPUT_JSON_BYTES
+        )
+    canonical = _json_bytes(json.loads(_read_snapshot(json_snapshot).decode("utf-8")))
+    canonical_digest = hashlib.sha256(canonical).hexdigest()
+    sidecar_records: list[dict[str, object]] = []
+    for sidecar in sorted(sidecars, key=lambda item: str(item.relative_path)):
+        sidecar_snapshot = sidecar.snapshot or _snapshot_regular_file(sidecar.source)
+        sidecar_records.append(
+            {
+                "path": sidecar.relative_path.as_posix(),
+                "bytes": sidecar_snapshot.bytes,
+                "sha256": sidecar_snapshot.sha256,
+            }
+        )
+    effective = hashlib.sha256()
+    effective.update(b"af3-effective-input-v1\0")
+    effective.update(canonical)
+    effective.update(b"\0")
+    effective.update(_json_bytes(sidecar_records))
     return {
+        "producer": SCRIPT_ID,
+        "producer_version": PRODUCER_VERSION,
+        "schema_version": STATE_FORMAT_VERSION,
         "provenance_version": PROVENANCE_VERSION,
-        "input_sha256": digest,
+        # Keep input_sha256 for readers of provenance v1; its meaning is now
+        # canonical JSON rather than incidental whitespace/key order.
+        "input_sha256": canonical_digest,
+        "canonical_input_sha256": canonical_digest,
+        "sidecars": sidecar_records,
+        "effective_input_sha256": effective.hexdigest(),
         "input_file": job_file.name,
         "mode": mode,
+        "gpu_memory_fraction": gpu_memory_fraction,
         "db_dirs": [str(Path(d).expanduser()) for d in db_dirs],
+        "database_fingerprints": (
+            database_fingerprints(db_dirs, mode)
+            if database_records is None
+            else database_records
+        ),
         "model_dir": str(Path(model_dir).expanduser()),
+        "model_checksum": (
+            model_checksum(model_dir, mode)
+            if model_record is _UNSET
+            else model_record
+        ),
         "image": image,
+        "image_identity": image_identity,
     }
 
 
 def write_provenance(result_dir: Path, output_name: str, record: dict) -> None:
+    """Atomically commit provenance without following attacker-controlled paths."""
+    if result_dir.is_symlink() or not result_dir.is_dir():
+        raise OSError(f"provenance 결과 경로가 안전한 폴더가 아닙니다: {result_dir}")
+    destination = provenance_path(result_dir, output_name)
+    if destination.exists() or destination.is_symlink():
+        info = os.lstat(destination)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+        ):
+            raise OSError(f"provenance 목적지가 단일 일반 파일이 아닙니다: {destination}")
+
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{destination.name}.tmp.", dir=str(result_dir)
+    )
+    temporary = Path(temporary_name)
     try:
-        result_dir.mkdir(parents=True, exist_ok=True)
-        provenance_path(result_dir, output_name).write_text(
-            json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True),
-            encoding="utf-8",
-        )
-    except OSError as exc:
-        print(f"[경고] provenance 기록을 남기지 못했습니다: {exc}")
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise OSError(f"provenance 임시 파일이 안전하지 않습니다: {temporary}")
+        with os.fdopen(descriptor, "w", encoding="utf-8", closefd=False) as handle:
+            handle.write(
+                json.dumps(record, ensure_ascii=False, indent=2, sort_keys=True)
+                + "\n"
+            )
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+        directory_fd = os.open(result_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        os.close(descriptor)
+        temporary.unlink(missing_ok=True)
 
 
-def needs_run(output_dir: Path, job_output_name: str, mode: str, record: dict) -> str | None:
+def needs_run(
+    output_dir: Path,
+    job_output_name: str,
+    mode: str,
+    record: dict,
+    *,
+    trust_unverified: bool = False,
+) -> str | None:
     """다시 계산해야 하면 그 이유를, 아니면 None 을 준다.
 
     완료 판정이 두 곳에 흩어져 있으면 한쪽만 provenance 를 보게 되어, 잠금 획득 뒤
@@ -328,23 +873,53 @@ def needs_run(output_dir: Path, job_output_name: str, mode: str, record: dict) -
     result_dir = output_dir / job_output_name
     if not is_complete(result_dir, job_output_name, mode):
         return "결과물 없음"
-    return provenance_mismatch(result_dir, job_output_name, record)
+    return provenance_mismatch(
+        result_dir, job_output_name, record, trust_unverified=trust_unverified
+    )
 
 
-def provenance_mismatch(result_dir: Path, output_name: str, record: dict) -> str | None:
-    """옛 결과가 지금 조건과 다른지 본다. 기록이 없으면 판단하지 않는다(None)."""
+def provenance_mismatch(
+    result_dir: Path,
+    output_name: str,
+    record: dict,
+    *,
+    trust_unverified: bool = False,
+) -> str | None:
+    """Return why a complete result cannot be proven to match this execution."""
     path = provenance_path(result_dir, output_name)
-    if not path.is_file():
-        return None
+    if not path.exists() and not path.is_symlink():
+        return None if trust_unverified else "provenance 기록 없음"
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return "provenance 기록 상태를 확인할 수 없다"
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        return "provenance 기록이 단일 일반 파일이 아니다"
     try:
         stored = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return "provenance 기록을 읽을 수 없다"
-    for key, label in (("input_sha256", "입력 JSON 내용"), ("mode", "실행 모드"),
-                       ("db_dirs", "데이터베이스 경로"), ("model_dir", "모델 폴더"),
-                       ("image", "도커 이미지")):
+    labels = {
+        "provenance_version": "provenance 버전",
+        "producer": "producer",
+        "producer_version": "producer 버전",
+        "schema_version": "schema 버전",
+        "effective_input_sha256": "입력 JSON/sidecar 내용",
+        "mode": "실행 모드",
+        "gpu_memory_fraction": "JAX GPU 메모리 비율",
+        "database_fingerprints": "데이터베이스 fingerprint",
+        "model_checksum": "모델 checksum",
+        "image": "도커 이미지",
+        "image_identity": "도커 이미지 digest/revision",
+    }
+    for key in PROVENANCE_IDENTITY_KEYS:
         if stored.get(key) != record.get(key):
-            return label
+            return labels[key]
+    artifact_problem = artifact_manifest_problem(
+        result_dir, output_name, stored.get("mode", "full"), stored.get("artifacts")
+    )
+    if artifact_problem is not None:
+        return artifact_problem
     return None
 
 
@@ -358,6 +933,101 @@ def is_complete(result_dir: Path, output_name: str, mode: str = "full") -> bool:
         any(nonempty_file(result_dir / f"{output_name}{suffix}") for suffix in group)
         for group in FINAL_REQUIRED_SUFFIXES
     )
+
+
+def result_artifact_manifest(result_dir: Path, output_name: str, mode: str) -> dict[str, dict[str, object]]:
+    """Hash the committed canonical artifacts that make a result reusable."""
+    paths = []
+    data_json = result_dir / f"{output_name}_data.json"
+    if nonempty_file(data_json):
+        paths.append(data_json)
+    if mode != "data":
+        for group in FINAL_REQUIRED_SUFFIXES:
+            selected = next(
+                (result_dir / f"{output_name}{suffix}"
+                 for suffix in group
+                 if nonempty_file(result_dir / f"{output_name}{suffix}")),
+                None,
+            )
+            if selected is not None and selected not in paths:
+                paths.append(selected)
+    return {
+        path.name: {"bytes": path.stat().st_size, "sha256": _sha256_file(path)}
+        for path in sorted(paths, key=lambda value: value.name)
+    }
+
+
+def artifact_manifest_problem(
+    result_dir: Path,
+    output_name: str,
+    mode: str,
+    stored: object,
+) -> str | None:
+    if not isinstance(stored, dict) or not stored:
+        return "artifact hash manifest 없음"
+    current = result_artifact_manifest(result_dir, output_name, mode)
+    if current != stored:
+        return "canonical artifact hash/size 불일치"
+    return None
+
+
+def _material_input_subset(value: object) -> object:
+    """Project an AF3 input onto fields that must survive into *_data.json."""
+    if isinstance(value, dict):
+        return {
+            key: _material_input_subset(child)
+            for key, child in value.items()
+            if key not in SIDECAR_KEYS and key not in {"dialect", "version"}
+        }
+    if isinstance(value, list):
+        return [_material_input_subset(child) for child in value]
+    return value
+
+
+def _is_subset(expected: object, actual: object) -> bool:
+    if isinstance(expected, dict):
+        return isinstance(actual, dict) and all(
+            key in actual and _is_subset(value, actual[key])
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return (
+            isinstance(actual, list)
+            and len(expected) == len(actual)
+            and all(_is_subset(left, right) for left, right in zip(expected, actual))
+        )
+    return expected == actual
+
+
+def current_result_problem(result_dir: Path, job: Job, mode: str) -> str | None:
+    """Validate that the canonical result belongs to the job just executed."""
+    if not is_complete(result_dir, job.output_name, mode):
+        return "필수 결과물 누락"
+    data_json = result_dir / f"{job.output_name}_data.json"
+    if data_json.is_symlink() or not data_json.is_file():
+        return "current-run data JSON 누락 또는 symlink"
+    try:
+        info = os.lstat(data_json)
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0:
+            return "current-run data JSON이 정상 일반 파일이 아님"
+        payload = json.loads(data_json.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return f"current-run data JSON을 읽을 수 없음 ({exc})"
+    raw_name = payload.get("name") if isinstance(payload, dict) else None
+    if not isinstance(raw_name, str) or sanitised_name(raw_name) != job.output_name:
+        return f"current-run target identity 불일치 ({raw_name!r})"
+    try:
+        snapshot = job.json_snapshot or _snapshot_regular_file(
+            job.json_file, maximum_bytes=MAX_INPUT_JSON_BYTES
+        )
+        requested = json.loads(_read_snapshot(snapshot).decode("utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        return f"staged input JSON을 다시 읽을 수 없음 ({exc})"
+    expected_core = _material_input_subset(requested)
+    actual_core = _material_input_subset(payload)
+    if not _is_subset(expected_core, actual_core):
+        return "current-run data JSON의 sequence/seed/ligand core가 staged input과 다름"
+    return None
 
 
 def iter_sidecar_values(obj: object) -> Iterator[tuple[str, object]]:
@@ -375,22 +1045,29 @@ def iter_sidecar_values(obj: object) -> Iterator[tuple[str, object]]:
             stack.extend(current)
 
 
-def read_job(json_file: Path, input_dir: Path) -> tuple[Job | None, str | None]:
+def read_job(
+    json_file: Path,
+    input_dir: Path,
+    sidecar_snapshot_cache: dict[Path, FileSnapshot] | None = None,
+    input_root_fd: int | None = None,
+) -> tuple[Job | None, str | None]:
     """JSON 하나를 읽고 이름과 staging할 sidecar를 검증한다."""
+    input_root = Path(os.path.abspath(input_dir))
     try:
-        info = os.lstat(json_file)
-    except OSError as exc:
-        return None, f"파일 상태를 확인할 수 없습니다 ({exc})"
-    if json_file.is_symlink() or not stat.S_ISREG(info.st_mode):
-        return None, "일반 파일이 아닌 JSON 또는 symlink는 허용하지 않습니다"
-    if info.st_size > MAX_INPUT_JSON_BYTES:
-        return None, (
-            f"JSON이 안전 한도 {MAX_INPUT_JSON_BYTES} bytes를 넘습니다 "
-            f"({info.st_size} bytes)"
+        json_relative_path = Path(os.path.abspath(json_file)).relative_to(input_root)
+    except ValueError:
+        return None, "입력 JSON이 input root 밖에 있습니다"
+    try:
+        json_snapshot = _snapshot_relative_regular_file(
+            input_root,
+            json_relative_path,
+            maximum_bytes=MAX_INPUT_JSON_BYTES,
+            root_fd=input_root_fd,
         )
+    except OSError as exc:
+        return None, f"안전한 JSON snapshot을 만들 수 없습니다 ({exc})"
     try:
-        with json_file.open(encoding="utf-8") as handle:
-            obj = json.load(handle)
+        obj = json.loads(_read_snapshot(json_snapshot).decode("utf-8"))
     except UnicodeDecodeError:
         return None, "UTF-8이 아닙니다 (macOS 껍데기 파일일 수 있음)"
     except json.JSONDecodeError as exc:
@@ -417,7 +1094,6 @@ def read_job(json_file: Path, input_dir: Path) -> tuple[Job | None, str | None]:
             "점(.) 또는 = + - @ 로 시작하는 이름과 '.', '..', 관리 파일 이름은 피하세요"
         )
 
-    input_root = input_dir.resolve()
     sidecars: dict[Path, Sidecar] = {}
     for key, value in iter_sidecar_values(obj):
         if value in (None, ""):
@@ -433,10 +1109,7 @@ def read_job(json_file: Path, input_dir: Path) -> tuple[Job | None, str | None]:
                 f"{key}={value!r}은 절대경로입니다. Docker 안에서도 동작하도록 "
                 "JSON 파일 기준 상대경로로 바꿔 주세요"
             )
-        try:
-            source = (json_file.parent / raw_path).resolve()
-        except (OSError, RuntimeError, ValueError) as exc:
-            return None, f"{key} 경로를 확인할 수 없습니다: {exc}"
+        source = Path(os.path.abspath(json_file.parent / raw_path))
         try:
             relative_path = source.relative_to(input_root)
         except ValueError:
@@ -444,9 +1117,25 @@ def read_job(json_file: Path, input_dir: Path) -> tuple[Job | None, str | None]:
                 f"{key}={value!r}이 입력 폴더 밖을 가리킵니다. "
                 "sidecar 파일을 입력 폴더 안에 두세요"
             )
-        if not source.is_file():
-            return None, f"{key}가 가리키는 파일이 없습니다: {source}"
-        sidecars[relative_path] = Sidecar(source, relative_path)
+        if relative_path in sidecars:
+            continue
+        try:
+            sidecar_snapshot = (
+                sidecar_snapshot_cache.get(source)
+                if sidecar_snapshot_cache is not None
+                else None
+            )
+            if sidecar_snapshot is None:
+                sidecar_snapshot = _snapshot_relative_regular_file(
+                    input_root, relative_path, root_fd=input_root_fd
+                )
+                if sidecar_snapshot_cache is not None:
+                    sidecar_snapshot_cache[source] = sidecar_snapshot
+        except OSError as exc:
+            return None, f"{key}의 안전한 sidecar snapshot을 만들 수 없습니다: {exc}"
+        sidecars[relative_path] = Sidecar(
+            source, relative_path, snapshot=sidecar_snapshot
+        )
 
     return (
         Job(
@@ -454,23 +1143,51 @@ def read_job(json_file: Path, input_dir: Path) -> tuple[Job | None, str | None]:
             output_name=output_name,
             raw_name=raw_name,
             sidecars=tuple(sidecars.values()),
+            json_snapshot=json_snapshot,
         ),
         None,
     )
 
 
 def collect_jobs(input_dir: Path) -> tuple[list[Job], list[tuple[Path, str]]]:
-    json_files = sorted(
-        path for path in input_dir.glob("*.json") if not path.name.startswith("._")
-    )
     jobs: list[Job] = []
     errors: list[tuple[Path, str]] = []
-    for json_file in json_files:
-        job, error = read_job(json_file, input_dir)
-        if error is not None:
-            errors.append((json_file, error))
-        elif job is not None:
-            jobs.append(job)
+    sidecar_snapshot_cache: dict[Path, FileSnapshot] = {}
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        root_fd = os.open(input_dir, directory_flags)
+    except OSError as exc:
+        return [], [(input_dir, f"input root를 안전하게 열 수 없습니다 ({exc})")]
+    try:
+        if not stat.S_ISDIR(os.fstat(root_fd).st_mode):
+            return [], [(input_dir, "input root가 일반 폴더가 아닙니다")]
+        try:
+            names = sorted(
+                name
+                for name in os.listdir(root_fd)
+                if name.endswith(".json") and not name.startswith("._")
+            )
+        except OSError as exc:
+            return [], [(input_dir, f"input root를 열거할 수 없습니다 ({exc})")]
+        for name in names:
+            json_file = input_dir / name
+            job, error = read_job(
+                json_file,
+                input_dir,
+                sidecar_snapshot_cache,
+                input_root_fd=root_fd,
+            )
+            if error is not None:
+                errors.append((json_file, error))
+            elif job is not None:
+                jobs.append(job)
+    finally:
+        os.close(root_fd)
     return jobs, errors
 
 
@@ -568,8 +1285,11 @@ def quarantine_incomplete(
     job: Job,
     mode: str,
     keep: int = QUARANTINE_KEEP_PER_JOB,
+    *,
+    force_complete: bool = False,
+    reason: str | None = None,
 ) -> Path | None:
-    """미완료 결과를 작업별 제한 보존하여 AF3의 suffix 출력 회피를 막는다."""
+    """Preserve an old result before retrying into the canonical destination."""
     if keep < 1:
         raise ValueError("격리 결과 보존 개수는 1개 이상이어야 합니다")
     if not is_safe_output_name(job.output_name):
@@ -580,7 +1300,10 @@ def quarantine_incomplete(
         raise OSError(f"결과 경로가 심볼릭 링크라서 이동하지 않습니다: {result_dir}")
     if result_dir.exists() and not result_dir.is_dir():
         raise OSError(f"결과 경로가 폴더가 아니라서 이동하지 않습니다: {result_dir}")
-    if is_complete(result_dir, job.output_name, mode) or not path_has_content(result_dir):
+    if (
+        not force_complete
+        and is_complete(result_dir, job.output_name, mode)
+    ) or not path_has_content(result_dir):
         return None
 
     quarantine_root = output_dir / QUARANTINE_DIR_NAME
@@ -618,7 +1341,9 @@ def quarantine_incomplete(
         marker_written = True
     except OSError as exc:
         print(f"[경고] 격리 결과 표식을 쓰지 못해 자동 정리에서 제외합니다: {exc}")
-    print(f"[보존] 미완료 결과 이동: {result_dir.name} -> {target}")
+    kind = "provenance 불일치 결과" if force_complete else "미완료 결과"
+    suffix = f" ({reason})" if reason else ""
+    print(f"[보존] {kind} 이동: {result_dir.name} -> {target}{suffix}")
     if marker_written:
         prune_job_quarantine(job_root, output_dir, job.output_name, keep)
     return target
@@ -666,7 +1391,10 @@ def stage_jobs(
             },
         )
         for job in jobs:
-            shutil.copy2(job.json_file, stage_dir / job.json_file.name)
+            json_snapshot = job.json_snapshot or _snapshot_regular_file(
+                job.json_file, maximum_bytes=MAX_INPUT_JSON_BYTES
+            )
+            _publish_snapshot(json_snapshot, stage_dir / job.json_file.name)
             for sidecar in job.sidecars:
                 target = stage_dir / sidecar.relative_path
                 if target.exists():
@@ -674,10 +1402,13 @@ def stage_jobs(
                         continue
                     raise OSError(f"staging 대상이 이미 다른 파일로 존재합니다: {target}")
                 target.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    os.link(sidecar.source, target)
-                except OSError:
-                    shutil.copy2(sidecar.source, target)
+                # A hard link is not an immutable snapshot: editing the source
+                # in place while AF3 runs also changes the staged inode and can
+                # make the committed provenance describe different bytes.
+                sidecar_snapshot = sidecar.snapshot or _snapshot_regular_file(
+                    sidecar.source
+                )
+                _publish_snapshot(sidecar_snapshot, target)
     except BaseException:
         shutil.rmtree(stage_dir, ignore_errors=True)
         raise
@@ -801,6 +1532,208 @@ def gpu_busy_reason(others: Sequence[str], free_mib: int | None,
             "       그래도 강행하려면 --allow-busy-gpu 를 붙인다."
         )
     return None
+
+
+def gpu_inventory() -> list[GPUDevice]:
+    """Return independently addressable GPU devices from nvidia-smi."""
+    if shutil.which("nvidia-smi") is None:
+        return []
+    try:
+        process = subprocess.run(
+            [
+                "nvidia-smi",
+                "--query-gpu=index,uuid,memory.free,memory.total",
+                "--format=csv,noheader,nounits",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    if process.returncode != 0:
+        return []
+    devices: list[GPUDevice] = []
+    seen: set[str] = set()
+    for line in process.stdout.splitlines():
+        fields = [field.strip() for field in line.split(",")]
+        if (
+            len(fields) != 4
+            or not fields[0].isdigit()
+            or not fields[2].isdigit()
+            or not fields[3].isdigit()
+            or not fields[1]
+            or fields[1] in seen
+        ):
+            return []
+        seen.add(fields[1])
+        devices.append(
+            GPUDevice(fields[0], fields[1], int(fields[2]), int(fields[3]))
+        )
+    return devices
+
+
+def gpu_admission_floor(total_mib: int, fraction: float) -> int:
+    """Memory required before launch, aligned with JAX's configured fraction."""
+    return max(GPU_FREE_MIB_MIN, ceil(total_mib * fraction))
+
+
+def _gpu_lease_dir() -> Path:
+    uid = os.getuid() if hasattr(os, "getuid") else 0
+    configured = os.environ.get("AF3_GPU_LEASE_DIR")
+    root = (
+        Path(configured).expanduser().absolute()
+        if configured
+        else Path(tempfile.gettempdir()) / f"kang-af3-gpu-leases-{uid}"
+    )
+    root.mkdir(mode=0o700, exist_ok=True)
+    info = os.lstat(root)
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or not stat.S_ISDIR(info.st_mode)
+        or (hasattr(os, "getuid") and info.st_uid != os.getuid())
+        or info.st_mode & 0o077
+    ):
+        raise RuntimeError(f"GPU lease 폴더가 안전하지 않습니다: {root}")
+    return root
+
+
+GPU_INVENTORY_LEASE_KEY = "inventory-global-v1"
+
+
+def _try_gpu_lease(device_key: str, *, shared: bool = False) -> int | None:
+    """Try one hardened lease file, optionally in shared inventory mode."""
+    safe_key = hashlib.sha256(device_key.encode("utf-8")).hexdigest()[:24]
+    path = _gpu_lease_dir() / f"gpu-{safe_key}.lock"
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    info = os.fstat(descriptor)
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        os.close(descriptor)
+        raise RuntimeError(f"GPU lease가 단일 일반 파일이 아닙니다: {path}")
+    try:
+        lock_mode = fcntl.LOCK_SH if shared else fcntl.LOCK_EX
+        fcntl.flock(descriptor, lock_mode | fcntl.LOCK_NB)
+    except BlockingIOError:
+        os.close(descriptor)
+        return None
+    # Multiple known-device owners may hold the inventory file concurrently.
+    # Only an exclusive owner can safely update its diagnostic contents.
+    if not shared:
+        os.ftruncate(descriptor, 0)
+        os.write(
+            descriptor,
+            f"host={socket.gethostname()} pid={os.getpid()} device={device_key}\n".encode(),
+        )
+        os.fsync(descriptor)
+    return descriptor
+
+
+def _release_gpu_lease(descriptor: int) -> None:
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_UN)
+    finally:
+        os.close(descriptor)
+
+
+@contextmanager
+def gpu_reservation(
+    docker_command: Sequence[str],
+    *,
+    allow_busy: bool,
+    memory_fraction: float,
+) -> Iterator[GPUDevice | None]:
+    """Select, recheck, and lease one GPU until Docker teardown completes."""
+    devices = sorted(
+        gpu_inventory(), key=lambda device: (device.free_mib, device.uuid), reverse=True
+    )
+    if devices:
+        # Acquire the shared inventory gate before any UUID lease.  An owner
+        # that cannot enumerate devices takes this same gate exclusively, so a
+        # known and an unknown run can never split into disjoint lock files.
+        inventory_descriptor = _try_gpu_lease(
+            GPU_INVENTORY_LEASE_KEY, shared=True
+        )
+        if inventory_descriptor is None:
+            raise GPUAdmissionError(
+                "모든 GPU를 예약한 다른 Kang_AF3 실행이 있습니다."
+            )
+        try:
+            candidates = [
+                device
+                for device in devices
+                if allow_busy
+                or device.free_mib >= gpu_admission_floor(device.total_mib, memory_fraction)
+            ]
+            if not candidates:
+                details = ", ".join(
+                    f"{device.index}:{device.free_mib}/{device.total_mib}MiB"
+                    for device in devices
+                )
+                raise GPUAdmissionError(
+                    f"JAX 메모리 비율 {memory_fraction:.0%}를 만족하는 GPU가 없습니다 "
+                    f"({details}). --allow-busy-gpu로 강행할 수 있습니다."
+                )
+            for candidate in candidates:
+                descriptor = _try_gpu_lease(candidate.uuid)
+                if descriptor is None:
+                    continue
+                try:
+                    refreshed = next(
+                        (
+                            device
+                            for device in gpu_inventory()
+                            if device.uuid == candidate.uuid
+                        ),
+                        None,
+                    )
+                    if refreshed is None:
+                        continue
+                    if (
+                        not allow_busy
+                        and refreshed.free_mib
+                        < gpu_admission_floor(refreshed.total_mib, memory_fraction)
+                    ):
+                        continue
+                    yield refreshed
+                    return
+                finally:
+                    _release_gpu_lease(descriptor)
+            raise GPUAdmissionError(
+                "사용 가능한 GPU의 lease를 얻지 못했습니다. 다른 실행이 사용 중입니다."
+            )
+        finally:
+            _release_gpu_lease(inventory_descriptor)
+
+    # Old/limited nvidia-smi implementations cannot identify devices.  Take
+    # the inventory gate exclusively for the complete Docker/cleanup lifetime.
+    # This conflicts with both known-device shared holders and other unknown
+    # holders, across the preferred and legacy runners.
+    descriptor = _try_gpu_lease(GPU_INVENTORY_LEASE_KEY)
+    if descriptor is None:
+        raise GPUAdmissionError("다른 Kang_AF3 실행이 GPU lease를 보유하고 있습니다.")
+    try:
+        if not allow_busy:
+            others = list_managed_containers(docker_command)
+            free_mib, total_mib = gpu_memory_mib()
+            if others:
+                raise GPUAdmissionError(gpu_busy_reason(others, None) or "다른 AF3 실행이 있습니다")
+            if (
+                free_mib is not None
+                and total_mib is not None
+                and free_mib < gpu_admission_floor(total_mib, memory_fraction)
+            ):
+                raise GPUAdmissionError(
+                    f"GPU 여유 메모리가 {free_mib}MiB 뿐이다 "
+                    f"(JAX {memory_fraction:.0%} 기준 최소 "
+                    f"{gpu_admission_floor(total_mib, memory_fraction)}MiB 필요)."
+                )
+        yield None
+    finally:
+        _release_gpu_lease(descriptor)
 
 
 def orphan_containers(docker_command: Sequence[str]) -> list[str]:
@@ -1018,6 +1951,52 @@ def detect_docker_command(force: str | None = None) -> tuple[tuple[str, ...] | N
     )
 
 
+def resolve_image_identity(
+    docker_command: Sequence[str] | None, image: str
+) -> dict[str, object] | None:
+    """Resolve a mutable image tag to daemon identity and revision labels."""
+    if docker_command is None:
+        return None
+    template = (
+        "{{.Id}}\t{{json .RepoDigests}}\t"
+        "{{json (index .Config.Labels \"org.opencontainers.image.revision\")}}"
+    )
+    try:
+        process = subprocess.run(
+            [*docker_command, "image", "inspect", image, "--format", template],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if process.returncode != 0:
+        return None
+    line = (process.stdout or "").strip().splitlines()
+    if not line:
+        return None
+    fields = line[-1].split("\t")
+    # Lightweight test daemons may only expose an opaque inspect token.  It is
+    # still better than silently reducing the identity back to a mutable tag.
+    if len(fields) != 3:
+        return {"image_id": line[-1], "repo_digests": [], "revision": None}
+    image_id, raw_digests, raw_revision = fields
+    try:
+        repo_digests = json.loads(raw_digests)
+    except json.JSONDecodeError:
+        repo_digests = []
+    try:
+        revision = json.loads(raw_revision)
+    except json.JSONDecodeError:
+        revision = raw_revision or None
+    return {
+        "image_id": image_id or None,
+        "repo_digests": sorted(repo_digests) if isinstance(repo_digests, list) else [],
+        "revision": revision if isinstance(revision, str) else None,
+    }
+
+
 def probe_flags(
     docker_command: Sequence[str], image: str, timeout: int
 ) -> set[str] | None:
@@ -1089,6 +2068,8 @@ def docker_base(
     cache_dir: Path,
     use_cache: bool,
     container: str | None = None,
+    gpu_device: GPUDevice | None = None,
+    gpu_memory_fraction: float | None = None,
 ) -> list[str]:
     command = [*docker_command, "run", "--rm"]
     if container:
@@ -1104,7 +2085,11 @@ def docker_base(
         # 있는 곳으로 고정한다.
         command.extend(("--user", user, "-e", "HOME=/tmp"))
     if mode != "data":
-        command.extend(("--gpus", "all"))
+        command.extend(("--gpus", f"device={gpu_device.uuid}" if gpu_device else "all"))
+        if gpu_memory_fraction is not None:
+            command.extend(
+                ("-e", f"XLA_CLIENT_MEM_FRACTION={gpu_memory_fraction:g}")
+            )
 
     command.extend(("-v", f"{input_mount}:{CONTAINER_INPUT}:ro"))
     command.extend(("-v", f"{output_dir}:{CONTAINER_OUTPUT}"))
@@ -1134,10 +2119,46 @@ def docker_base(
     return command
 
 
+def _progress_signature(root: Path | None) -> tuple[int, int, int]:
+    if root is None or not root.exists():
+        return (0, 0, 0)
+    count = total = latest = 0
+    try:
+        for base, directories, files in os.walk(root):
+            directories[:] = [name for name in directories if name != QUARANTINE_DIR_NAME]
+            for name in files:
+                path = Path(base) / name
+                try:
+                    info = os.lstat(path)
+                except OSError:
+                    continue
+                if stat.S_ISREG(info.st_mode):
+                    count += 1
+                    total += info.st_size
+                    latest = max(latest, info.st_mtime_ns)
+    except OSError:
+        pass
+    return count, total, latest
+
+
+def _stop_process(process: subprocess.Popen) -> None:
+    if process.poll() is not None:
+        return
+    process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+
+
 def run_docker(
     command: Sequence[str],
     docker_command: Sequence[str] | None = None,
     container: str | None = None,
+    timeout: int | None = None,
+    progress_dir: Path | None = None,
+    no_progress_timeout: int | None = None,
 ) -> int:
     """컨테이너를 돌리고, 어떻게 끝나든 그 컨테이너를 남기지 않는다.
 
@@ -1145,19 +2166,54 @@ def run_docker(
     죽으면 데몬은 컨테이너를 계속 돌린다. 그래서 finally 에서 직접 지운다.
     (러너가 SIGKILL 로 죽으면 여기까지 못 오므로, 그 경우는 --audit/--cleanup 이 맡는다.)
     """
+    process = None
     try:
-        return subprocess.run(command, check=False).returncode
+        process = subprocess.Popen(command)
+        started = last_progress = time.monotonic()
+        signature = _progress_signature(progress_dir)
+        initial_scan = (
+            min(5.0, max(0.25, no_progress_timeout / 4.0))
+            if no_progress_timeout else 5.0
+        )
+        next_scan = started + initial_scan
+        while True:
+            returncode = process.poll()
+            if returncode is not None:
+                return returncode
+            now = time.monotonic()
+            if timeout and now - started >= timeout:
+                print(f"[오류] Docker 실행 제한시간 {timeout}초를 넘었습니다.")
+                _stop_process(process)
+                return 124
+            if no_progress_timeout and progress_dir is not None and now >= next_scan:
+                current = _progress_signature(progress_dir)
+                if current != signature:
+                    signature = current
+                    last_progress = now
+                elif now - last_progress >= no_progress_timeout:
+                    print(
+                        f"[오류] 결과 artifact 변화가 {no_progress_timeout}초 동안 없어 "
+                        "정지된 Docker 실행을 종료합니다."
+                    )
+                    _stop_process(process)
+                    return 124
+                next_scan = now + min(30, max(1, no_progress_timeout // 4))
+            time.sleep(0.25)
     except OSError as exc:
         print(f"[오류] Docker 명령을 시작할 수 없습니다: {exc}")
         return 127
     finally:
         if docker_command and container:
-            subprocess.run(
-                [*docker_command, "rm", "-f", container],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                check=False,
-            )
+            try:
+                subprocess.run(
+                    [*docker_command, "rm", "-f", container],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=30,
+                    check=False,
+                )
+            except (OSError, subprocess.TimeoutExpired) as exc:
+                print(f"[경고] 종료 컨테이너 정리가 30초 안에 끝나지 않았습니다: {container} ({exc})")
 
 
 def run_one_by_one(
@@ -1173,10 +2229,15 @@ def run_one_by_one(
     cache_dir: Path,
     use_cache: bool,
     quarantine_keep: int = QUARANTINE_KEEP_PER_JOB,
-) -> bool:
+    gpu_device: GPUDevice | None = None,
+    gpu_memory_fraction: float | None = None,
+    run_timeout: int | None = None,
+    no_progress_timeout: int | None = None,
+) -> RunOutcome:
     """한 입력의 실패가 다음 입력을 막지 않도록 파일별로 실행한다."""
     print("[안내] 남은 입력을 파일별로 실행합니다. 컨테이너 기동 비용은 반복됩니다.\n")
     had_failure = False
+    successful_outputs: set[str] = set()
     for index, job in enumerate(jobs, 1):
         if is_complete(output_dir / job.output_name, job.output_name, mode):
             continue
@@ -1200,9 +2261,18 @@ def run_one_by_one(
             cache_dir=cache_dir,
             use_cache=use_cache,
             container=name,
+            gpu_device=gpu_device,
+            gpu_memory_fraction=gpu_memory_fraction,
         )
         command.append(f"--json_path={CONTAINER_INPUT}/{job.json_file.name}")
-        returncode = run_docker(command, docker_command, name)
+        returncode = run_docker(
+            command,
+            docker_command,
+            name,
+            run_timeout,
+            output_dir,
+            no_progress_timeout,
+        )
         complete = is_complete(output_dir / job.output_name, job.output_name, mode)
         if returncode != 0 or not complete:
             had_failure = True
@@ -1211,10 +2281,25 @@ def run_one_by_one(
             print("       같은 GPU 에서 AF3 를 두 개 이상 동시에 돌리면 이렇게 죽을 수 "
                   "있습니다.")
             print("       다른 실행이 있는지: docker ps    (한 번에 하나만 돌리십시오)")
+            result_dir = output_dir / job.output_name
+            if path_has_content(result_dir):
+                try:
+                    quarantine_incomplete(
+                        output_dir,
+                        job,
+                        mode,
+                        quarantine_keep,
+                        force_complete=True,
+                        reason=reason,
+                    )
+                except OSError as exc:
+                    print(f"[경고] 실패 결과를 격리하지 못했습니다: {job.output_name} ({exc})")
+        else:
+            successful_outputs.add(job.output_name)
         if returncode in INFRASTRUCTURE_EXIT_CODES:
             print("[오류] Docker 실행 환경 오류이므로 반복 재시도를 중단합니다.")
-            return True
-    return had_failure
+            return RunOutcome(True, frozenset(successful_outputs))
+    return RunOutcome(had_failure, frozenset(successful_outputs))
 
 
 def run_batch_with_fallback(
@@ -1230,7 +2315,11 @@ def run_batch_with_fallback(
     cache_dir: Path,
     use_cache: bool,
     quarantine_keep: int = QUARANTINE_KEEP_PER_JOB,
-) -> bool:
+    gpu_device: GPUDevice | None = None,
+    gpu_memory_fraction: float | None = None,
+    run_timeout: int | None = None,
+    no_progress_timeout: int | None = None,
+) -> RunOutcome:
     # 결과 폴더 하나가 이상하다고 나머지 전부를 세우지 않는다. 파일별 경로와 같은
     # 규칙으로 건별 경고만 남기고, 종료코드에는 그 실패를 반드시 반영한다.
     quarantine_failed = False
@@ -1241,6 +2330,29 @@ def run_batch_with_fallback(
             print(f"[경고] {job.output_name}의 미완료 결과를 보존하지 못했습니다: {exc}")
             print("       AF3가 이 건의 결과를 타임스탬프 폴더에 따로 쓸 수 있습니다.")
             quarantine_failed = True
+
+    if quarantine_failed:
+        # A batch input_dir cannot omit only the unsafe job.  Fall back to the
+        # per-file path so unaffected jobs still run and the unsafe one remains
+        # an explicit failure rather than producing a timestamp sibling.
+        fallback = run_one_by_one(
+            jobs,
+            stage_dir=stage_dir,
+            output_dir=output_dir,
+            mode=mode,
+            docker_command=docker_command,
+            image=image,
+            db_dirs=db_dirs,
+            model_dir=model_dir,
+            cache_dir=cache_dir,
+            use_cache=use_cache,
+            quarantine_keep=quarantine_keep,
+            gpu_device=gpu_device,
+            gpu_memory_fraction=gpu_memory_fraction,
+            run_timeout=run_timeout,
+            no_progress_timeout=no_progress_timeout,
+        )
+        return RunOutcome(True, fallback.successful_outputs)
 
     name = container_name(0)
     command = docker_base(
@@ -1254,30 +2366,63 @@ def run_batch_with_fallback(
         cache_dir=cache_dir,
         use_cache=use_cache,
         container=name,
+        gpu_device=gpu_device,
+        gpu_memory_fraction=gpu_memory_fraction,
     )
     command.append(f"--input_dir={CONTAINER_INPUT}")
     print(f"[실행] 컨테이너 1회 기동으로 {len(jobs)}건을 순회합니다.")
     if mode != "data":
         print("[안내] 첫 입력은 JAX 컴파일 때문에 느릴 수 있으며 이후 입력이 빨라집니다.\n")
-    returncode = run_docker(command, docker_command, name)
+    returncode = run_docker(
+        command,
+        docker_command,
+        name,
+        run_timeout,
+        output_dir,
+        no_progress_timeout,
+    )
 
-    remaining = [
-        job
+    completed_after_batch = {
+        job.output_name
         for job in jobs
-        if not is_complete(output_dir / job.output_name, job.output_name, mode)
-    ]
+        if is_complete(output_dir / job.output_name, job.output_name, mode)
+    }
+    if returncode != 0:
+        # A nonzero batch exit does not identify which apparently complete job
+        # failed after writing finals.  Do not commit any of them.  Preserve the
+        # artifacts for diagnosis, then rerun each job so producer success is
+        # known at job granularity.
+        for job in jobs:
+            result_dir = output_dir / job.output_name
+            if not path_has_content(result_dir):
+                continue
+            try:
+                quarantine_incomplete(
+                    output_dir,
+                    job,
+                    mode,
+                    quarantine_keep,
+                    force_complete=True,
+                    reason=f"batch 종료코드 {returncode}",
+                )
+            except OSError as exc:
+                print(f"[경고] batch 실패 결과를 격리하지 못했습니다: {job.output_name} ({exc})")
+        completed_after_batch = set()
+        remaining = list(jobs)
+    else:
+        remaining = [job for job in jobs if job.output_name not in completed_after_batch]
     if not remaining:
-        return returncode != 0 or quarantine_failed
+        return RunOutcome(False, frozenset(completed_after_batch))
     if returncode in INFRASTRUCTURE_EXIT_CODES:
         print(f"[오류] Docker 실행 환경 오류(종료코드 {returncode})로 배치를 중단합니다.")
-        return True
+        return RunOutcome(True, frozenset())
 
     if returncode != 0:
         print(f"\n[경고] 배치 실행이 종료코드 {returncode}로 중단됐습니다.")
     else:
         print("\n[경고] 배치는 종료됐지만 필수 결과물이 없는 입력이 있습니다.")
     print(f"       완료 결과는 유지하고 남은 {len(remaining)}건만 파일별로 재시도합니다.\n")
-    fallback_failed = run_one_by_one(
+    fallback = run_one_by_one(
         remaining,
         stage_dir=stage_dir,
         output_dir=output_dir,
@@ -1289,8 +2434,15 @@ def run_batch_with_fallback(
         cache_dir=cache_dir,
         use_cache=use_cache,
         quarantine_keep=quarantine_keep,
+        gpu_device=gpu_device,
+        gpu_memory_fraction=gpu_memory_fraction,
+        run_timeout=run_timeout,
+        no_progress_timeout=no_progress_timeout,
     )
-    return returncode != 0 or fallback_failed or quarantine_failed
+    return RunOutcome(
+        returncode != 0 or fallback.had_failure,
+        frozenset(completed_after_batch) | fallback.successful_outputs,
+    )
 
 
 @contextmanager
@@ -1358,8 +2510,57 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--per-file", action="store_true", help="파일마다 컨테이너를 따로 실행")
     parser.add_argument("--no-cache", action="store_true", help="JAX 컴파일 캐시를 사용하지 않음")
-    parser.add_argument("--allow-busy-gpu", action="store_true",
-                        help="다른 AF3 가 GPU 를 쓰고 있어도 강행 (보통은 필요 없다)")
+    parser.add_argument(
+        "--allow-busy-gpu",
+        action="store_true",
+        help=(
+            "외부 프로세스/메모리 admission만 우회; 다른 Kang_AF3 실행의 "
+            "exclusive GPU lease는 우회하지 않음"
+        ),
+    )
+    parser.add_argument(
+        "--gpu-memory-fraction",
+        type=float,
+        default=DEFAULT_GPU_MEMORY_FRACTION,
+        metavar="FRACTION",
+        help=(
+            "실행 전 비어 있어야 하는 GPU 메모리 비율 "
+            f"(기본값: {DEFAULT_GPU_MEMORY_FRACTION}; JAX 기본 선점과 일치)"
+        ),
+    )
+    parser.add_argument(
+        "--run-timeout",
+        type=int,
+        default=0,
+        metavar="SECONDS",
+        help="각 Docker 실행 제한시간. 0은 무제한(긴 MSA 검색을 보호하는 기본값)",
+    )
+    parser.add_argument(
+        "--no-progress-timeout",
+        type=int,
+        default=DEFAULT_NO_PROGRESS_TIMEOUT_SECONDS,
+        metavar="SECONDS",
+        help=(
+            "canonical output artifact 변화가 없을 때 정지로 판단할 시간 "
+            f"(기본 {DEFAULT_NO_PROGRESS_TIMEOUT_SECONDS}; 0이면 비활성화)"
+        ),
+    )
+    parser.add_argument(
+        "--trust-unverified-results",
+        action="store_true",
+        help=(
+            "provenance가 없는 구버전 완료 결과를 재사용. 입력 동일성을 증명할 수 "
+            "없으므로 기본값은 안전하게 재계산"
+        ),
+    )
+    parser.add_argument(
+        "--allow-unsealed-db",
+        action="store_true",
+        help=(
+            "호환성 전용: full DB seal이 없을 때 metadata-only identity를 허용. "
+            "내용 동일성을 증명하지 못하므로 기본값은 거부"
+        ),
+    )
     action_group = parser.add_mutually_exclusive_group()
     action_group.add_argument(
         "--guide", action="store_true", help="초보자용 설명과 현재 경로만 표시하고 종료"
@@ -1618,6 +2819,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.quarantine_keep < 1:
         print("[오류] --quarantine-keep은 1개 이상이어야 합니다.")
         return 2
+    if not 0 < args.gpu_memory_fraction <= 1:
+        print("[오류] --gpu-memory-fraction은 0보다 크고 1 이하여야 합니다.")
+        return 2
+    if args.run_timeout < 0:
+        print("[오류] --run-timeout은 0 이상이어야 합니다.")
+        return 2
+    if args.no_progress_timeout < 0:
+        print("[오류] --no-progress-timeout은 0 이상이어야 합니다.")
+        return 2
 
     base_dir = Path.cwd().resolve()
     input_dir = resolve_path(base_dir, args.input_dir)
@@ -1694,16 +2904,43 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"   - {name!r} <- {files}")
         return 2
 
-    provenance = {
-        job.output_name: job_provenance(
-            job.json_file, args.mode, db_dirs, model_dir, args.image)
-        for job in jobs
-    }
+    identity_docker, identity_docker_error = detect_docker_command(args.docker)
+    image_identity = resolve_image_identity(identity_docker, args.image)
+    try:
+        database_records = database_fingerprints(
+            db_dirs, args.mode, allow_unsealed=args.allow_unsealed_db
+        )
+        model_record = model_checksum(model_dir, args.mode)
+        provenance = {
+            job.output_name: job_provenance(
+                job,
+                args.mode,
+                db_dirs,
+                model_dir,
+                args.image,
+                image_identity,
+                gpu_memory_fraction=(
+                    None if args.mode == "data" else args.gpu_memory_fraction
+                ),
+                database_records=database_records,
+                model_record=model_record,
+            )
+            for job in jobs
+        }
+    except (OSError, ValueError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        print(f"[오류] 실행 provenance를 계산할 수 없습니다: {exc}")
+        return 2
     pending = []
     changed = []
     unverifiable = []
     for job in jobs:
-        reason = needs_run(output_dir, job.output_name, args.mode, provenance[job.output_name])
+        reason = needs_run(
+            output_dir,
+            job.output_name,
+            args.mode,
+            provenance[job.output_name],
+            trust_unverified=args.trust_unverified_results,
+        )
         if reason:
             pending.append(job)
             if reason != "결과물 없음":
@@ -1736,8 +2973,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             stale_after_seconds=STALE_STAGE_HOURS * 3600,
         )
         print_stage_report(audit_stages)
-        audit_docker, _ = detect_docker_command(args.docker)
-        print_container_report(audit_docker)
+        print_container_report(identity_docker)
         print("[점검] --audit이므로 계산용 Docker 실행은 하지 않습니다.")
         return 1 if pending else 0
     if not pending:
@@ -1780,7 +3016,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("[취소] Docker를 실행하거나 결과를 변경하지 않았습니다.")
         return 0
 
-    docker_command, docker_error = detect_docker_command(args.docker)
+    docker_command, docker_error = identity_docker, identity_docker_error
     if docker_command is None:
         print(f"[오류] {docker_error}")
         return 2
@@ -1797,17 +3033,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     if unsupported_reason is not None:
         print(f"[오류] {unsupported_reason}")
         return 2
-
-    if args.mode != "data" and not args.allow_busy_gpu:
-        mine = {name for name in list_managed_containers(docker_command)
-                if (CONTAINER_NAME_RE.match(name) or (None,))
-                and CONTAINER_NAME_RE.match(name).group("pid") == str(os.getpid())}
-        others = [name for name in list_managed_containers(docker_command) if name not in mine]
-        free_mib, total_mib = gpu_memory_mib()
-        busy = gpu_busy_reason(others, free_mib, total_mib)
-        if busy:
-            print(f"[오류] {busy}")
-            return 2
 
     use_cache = (
         not args.no_cache
@@ -1832,17 +3057,53 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     started = time.monotonic()
     run_failed = False
+    successful_outputs: frozenset[str] = frozenset()
     cleanup_failed = False
     try:
         with output_lock(output_dir):
+            current_reasons = {
+                job.output_name: needs_run(
+                    output_dir,
+                    job.output_name,
+                    args.mode,
+                    provenance[job.output_name],
+                    trust_unverified=args.trust_unverified_results,
+                )
+                for job in pending
+            }
             pending = [
                 job
                 for job in pending
-                if needs_run(output_dir, job.output_name, args.mode, provenance[job.output_name])
+                if needs_run(
+                    output_dir,
+                    job.output_name,
+                    args.mode,
+                    provenance[job.output_name],
+                    trust_unverified=args.trust_unverified_results,
+                )
             ]
             if not pending:
                 print("[완료] 잠금 대기 중 다른 실행이 모든 작업을 끝냈습니다.")
                 return 0
+
+            # A complete canonical result with mismatched provenance must leave
+            # the canonical path before Docker starts.  Otherwise AF3 writes a
+            # timestamp sibling and an old structure can be stamped with the
+            # new input identity.
+            for job in pending:
+                reason = current_reasons[job.output_name]
+                result_dir = output_dir / job.output_name
+                if reason != "결과물 없음" and is_complete(
+                    result_dir, job.output_name, args.mode
+                ):
+                    quarantine_incomplete(
+                        output_dir,
+                        job,
+                        args.mode,
+                        args.quarantine_keep,
+                        force_complete=True,
+                        reason=reason,
+                    )
 
             # Creating empty result directories as the host user prevents a
             # root-running container from making the directory itself.  Empty
@@ -1865,60 +3126,163 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             stage_dir = stage_jobs(pending, output_dir.parent, output_dir)
             try:
-                batch_supported = "input_dir" in supported
-                use_batch = USE_SINGLE_RUN and not args.per_file and batch_supported
-                if not use_batch and not args.per_file and USE_SINGLE_RUN:
-                    print("[안내] 이 AF3 이미지에는 --input_dir이 없어 파일별 방식으로 전환합니다.")
-                if use_batch:
-                    run_failed = run_batch_with_fallback(
-                        pending,
-                        stage_dir=stage_dir,
-                        output_dir=output_dir,
-                        mode=args.mode,
-                        docker_command=docker_command,
-                        image=args.image,
-                        db_dirs=db_dirs,
-                        model_dir=model_dir,
-                        cache_dir=cache_dir,
-                        use_cache=use_cache,
-                        quarantine_keep=args.quarantine_keep,
+                # The staged tree, not a mutable source path, is the effective
+                # input Docker consumes.  Recompute only the cheap per-job part
+                # against that snapshot; model/DB fingerprints are shared once
+                # across the whole batch.
+                for job in pending:
+                    staged_job = Job(
+                        json_file=stage_dir / job.json_file.name,
+                        output_name=job.output_name,
+                        raw_name=job.raw_name,
+                        sidecars=tuple(
+                            Sidecar(
+                                stage_dir / sidecar.relative_path,
+                                sidecar.relative_path,
+                                snapshot=sidecar.snapshot,
+                            )
+                            for sidecar in job.sidecars
+                        ),
+                        json_snapshot=job.json_snapshot,
                     )
-                else:
-                    run_failed = run_one_by_one(
-                        pending,
-                        stage_dir=stage_dir,
-                        output_dir=output_dir,
-                        mode=args.mode,
-                        docker_command=docker_command,
-                        image=args.image,
-                        db_dirs=db_dirs,
-                        model_dir=model_dir,
-                        cache_dir=cache_dir,
-                        use_cache=use_cache,
-                        quarantine_keep=args.quarantine_keep,
+                    provenance[job.output_name] = job_provenance(
+                        staged_job,
+                        args.mode,
+                        db_dirs,
+                        model_dir,
+                        args.image,
+                        image_identity,
+                        gpu_memory_fraction=(
+                            None if args.mode == "data" else args.gpu_memory_fraction
+                        ),
+                        database_records=database_records,
+                        model_record=model_record,
                     )
+                reservation = (
+                    nullcontext(None)
+                    if args.mode == "data"
+                    else gpu_reservation(
+                        docker_command,
+                        allow_busy=args.allow_busy_gpu,
+                        memory_fraction=args.gpu_memory_fraction,
+                    )
+                )
+                with reservation as selected_gpu:
+                    if selected_gpu is not None:
+                        print(
+                            f"[GPU] device {selected_gpu.index} ({selected_gpu.uuid}) "
+                            f"{selected_gpu.free_mib}/{selected_gpu.total_mib}MiB를 예약했습니다."
+                        )
+                    batch_supported = "input_dir" in supported
+                    use_batch = USE_SINGLE_RUN and not args.per_file and batch_supported
+                    if not use_batch and not args.per_file and USE_SINGLE_RUN:
+                        print("[안내] 이 AF3 이미지에는 --input_dir이 없어 파일별 방식으로 전환합니다.")
+                    common_run_options = {
+                        "stage_dir": stage_dir,
+                        "output_dir": output_dir,
+                        "mode": args.mode,
+                        "docker_command": docker_command,
+                        "image": args.image,
+                        "db_dirs": db_dirs,
+                        "model_dir": model_dir,
+                        "cache_dir": cache_dir,
+                        "use_cache": use_cache,
+                        "quarantine_keep": args.quarantine_keep,
+                        "gpu_device": selected_gpu,
+                        "gpu_memory_fraction": (
+                            None
+                            if args.mode == "data"
+                            else args.gpu_memory_fraction
+                        ),
+                        "run_timeout": args.run_timeout or None,
+                        "no_progress_timeout": args.no_progress_timeout or None,
+                    }
+                    if use_batch:
+                        outcome = run_batch_with_fallback(
+                            pending, **common_run_options
+                        )
+                    else:
+                        outcome = run_one_by_one(pending, **common_run_options)
+                    run_failed = outcome.had_failure
+                    successful_outputs = outcome.successful_outputs
+
+                    # Provenance is the commit record for a current-run result.
+                    # Publish it while both the output lock and GPU lease are
+                    # still held, and only after canonical identity validation.
+                    for job in pending:
+                        if job.output_name not in successful_outputs:
+                            # A complete-looking artifact from a nonzero producer
+                            # is diagnostic evidence, not a committed result.
+                            result_dir = output_dir / job.output_name
+                            if path_has_content(result_dir):
+                                quarantine_incomplete(
+                                    output_dir,
+                                    job,
+                                    args.mode,
+                                    args.quarantine_keep,
+                                    force_complete=True,
+                                    reason="producer success 확인 실패",
+                                )
+                            continue
+                        result_dir = output_dir / job.output_name
+                        problem = current_result_problem(result_dir, job, args.mode)
+                        if problem is not None:
+                            if path_has_content(result_dir):
+                                quarantine_incomplete(
+                                    output_dir,
+                                    job,
+                                    args.mode,
+                                    args.quarantine_keep,
+                                    force_complete=True,
+                                    reason=problem,
+                                )
+                            run_failed = True
+                            print(f"[경고] {job.output_name} current-run 검증 실패: {problem}")
+                            continue
+                        record = dict(provenance[job.output_name])
+                        record["artifacts"] = result_artifact_manifest(
+                            result_dir, job.output_name, args.mode
+                        )
+                        record["runtime"] = {
+                            "gpu": (
+                                None
+                                if selected_gpu is None
+                                else {
+                                    "index": selected_gpu.index,
+                                    "uuid": selected_gpu.uuid,
+                                    "total_mib": selected_gpu.total_mib,
+                                }
+                            )
+                        }
+                        try:
+                            write_provenance(result_dir, job.output_name, record)
+                        except OSError:
+                            # A fresh result without a commit record must never
+                            # become a reusable canonical result on the next run.
+                            quarantine_incomplete(
+                                output_dir,
+                                job,
+                                args.mode,
+                                args.quarantine_keep,
+                                force_complete=True,
+                                reason="provenance publish 실패",
+                            )
+                            raise
             finally:
                 try:
                     shutil.rmtree(stage_dir)
                 except OSError as exc:
                     cleanup_failed = True
                     print(f"[경고] staging 폴더를 정리하지 못했습니다: {stage_dir} ({exc})")
+    except GPUAdmissionError as exc:
+        print(f"[오류] {exc}")
+        return 2
     except RuntimeError as exc:
         print(f"[오류] {exc}")
         return 1
     except OSError as exc:
         print(f"[오류] 파일 준비 또는 결과 보존 중 오류가 발생했습니다: {exc}")
         return 1
-
-    # 이번에 끝난 것에 한해 provenance 를 남긴다. 다음 실행이 같은 입력·설정인지
-    # 비교할 근거가 여기서 생긴다. 실패한 건에는 남기지 않는다.
-    for job in pending:
-        if is_complete(output_dir / job.output_name, job.output_name, args.mode):
-            write_provenance(
-                output_dir / job.output_name,
-                job.output_name,
-                provenance[job.output_name],
-            )
 
     completed = sum(
         is_complete(output_dir / job.output_name, job.output_name, args.mode)

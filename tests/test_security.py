@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import os
 import subprocess
 import sys
 import tempfile
@@ -217,7 +218,18 @@ def test_nonzero_docker_exit_is_sticky_after_finals():
             env_extra={"AF3_STUB_EXIT_AFTER_FINALS": "1"},
         )
         check(proc.returncode != 0, "Docker nonzero 종료를 성공으로 바꿨다")
-        check_in("0이 아닌", proc.stdout, "sticky failure 원인을 설명하지 않았다")
+        check_in("종료코드 1", proc.stdout, "sticky failure 원인을 설명하지 않았다")
+        provenance = (
+            workspace.output_dir / "a" / "a_af3run_provenance.json"
+        )
+        check(not provenance.exists(), "nonzero producer 결과에 provenance를 commit했다")
+        audit = run_script(
+            "run_af3_batch_improved.py",
+            default_args(workspace, "--audit"),
+            workspace,
+        )
+        check(audit.returncode != 0, "nonzero producer 결과를 다음 audit이 완료로 재사용했다")
+        check_in("미완료 1개", audit.stdout, "실패 결과가 pending으로 남지 않았다")
     finally:
         workspace.cleanup()
 
@@ -486,3 +498,122 @@ def test_stage2_manifest_does_not_follow_a_symlink():
             "건드리면 안 되는 내용",
             "symlink 를 따라가 바깥 파일을 덮어썼다",
         )
+
+
+@regression(
+    item="security",
+    prevents="stage2 manifest가 hardlink 피해자를 truncate하거나 FIFO에서 무기한 멈추고, 실패 중 반쪽 CSV를 게시하는 버그.",
+)
+def test_stage2_manifest_is_atomic_and_rejects_hardlinks_and_special_files():
+    mod = load_module("af3_stage2.py")
+    with tempfile.TemporaryDirectory(prefix="af3_manifest_atomic_") as td:
+        root = Path(td)
+        victim = root / "victim.txt"
+        victim.write_text("KEEP", encoding="utf-8")
+        hardlink = root / "hard.csv"
+        os.link(victim, hardlink)
+        try:
+            with mod.open_manifest(hardlink) as handle:
+                handle.write("BAD")
+        except OSError:
+            pass
+        else:
+            check(False, "hardlink manifest를 허용했다")
+        check_equal(victim.read_text(encoding="utf-8"), "KEEP", "hardlink 피해자를 truncate했다")
+
+        fifo = root / "fifo.csv"
+        os.mkfifo(fifo)
+        try:
+            with mod.open_manifest(fifo):
+                pass
+        except OSError:
+            pass
+        else:
+            check(False, "FIFO manifest를 허용했다")
+
+        manifest = root / "manifest.csv"
+        manifest.write_text("OLD", encoding="utf-8")
+        try:
+            with mod.open_manifest(manifest) as handle:
+                handle.write("PARTIAL")
+                raise RuntimeError("simulated writer crash")
+        except RuntimeError:
+            pass
+        check_equal(manifest.read_text(encoding="utf-8"), "OLD", "실패 중 반쪽 manifest를 게시했다")
+        with mod.open_manifest(manifest) as handle:
+            handle.write("NEW")
+        check_equal(manifest.read_text(encoding="utf-8-sig"), "NEW", "완성 manifest를 원자 게시하지 못했다")
+        direct = mod.open_manifest(manifest)
+        direct.write("DIRECT")
+        direct.close()
+        check_equal(manifest.read_text(encoding="utf-8-sig"), "DIRECT", "기존 직접 close API가 깨졌다")
+
+
+@regression(
+    item="security",
+    prevents="stage2가 파일명만 맞는 다른 타깃 JSON, symlink, 또는 여러 후보 중 첫 파일을 MSA 원본으로 고르는 버그.",
+)
+def test_stage2_source_requires_regular_unique_internal_identity():
+    mod = load_module("af3_stage2.py")
+    with tempfile.TemporaryDirectory(prefix="af3_stage2_identity_") as td:
+        root = Path(td)
+        out = root / "out"
+        target_dir = out / "wanted"
+        target_dir.mkdir(parents=True)
+        wrong = target_dir / "wanted_data.json"
+        wrong.write_text('{"name":"other","sequences":[]}', encoding="utf-8")
+        try:
+            mod.find_data_json("wanted", out, None)
+        except ValueError as exc:
+            check_in("내부 name", str(exc), "내부 identity 불일치 원인을 설명하지 않았다")
+        else:
+            check(False, "파일명만 맞는 다른 타깃 JSON을 허용했다")
+
+        wrong.unlink()
+        real = root / "real.json"
+        real.write_text('{"name":"wanted","sequences":[]}', encoding="utf-8")
+        wrong.symlink_to(real)
+        check(mod.find_data_json("wanted", out, None) is None, "symlink JSON을 원본으로 허용했다")
+        wrong.unlink()
+        os.mkfifo(wrong)
+        check(mod.find_data_json("wanted", out, None) is None, "FIFO JSON을 원본으로 허용했다")
+        wrong.unlink()
+
+        first = target_dir / "wanted_data.json"
+        first.write_text('{"name":"wanted","sequences":[]}', encoding="utf-8")
+        other_dir = root / "other-run"
+        other_dir.mkdir()
+        second = other_dir / "wanted_data.json"
+        second.write_text('{"name":"wanted","sequences":[]}', encoding="utf-8")
+        try:
+            mod.find_data_json("wanted", out, str(other_dir))
+        except ValueError as exc:
+            check_in("2개", str(exc), "다중 후보 수를 설명하지 않았다")
+        else:
+            check(False, "여러 matching source 중 첫 파일을 골랐다")
+
+
+@regression(
+    item="stage2",
+    prevents="stage2와 batch runner validator가 복사된 상수/문구만 같고 실제 accept/reject 계약은 달라지는 버그.",
+)
+def test_stage2_normalized_validator_contract_matches_runner_acceptance():
+    stage2 = load_module("af3_stage2.py")
+    runner = load_module("run_af3_batch_improved.py")
+    workspace = Workspace()
+    try:
+        valid = workspace.monomer("x")
+        corpus = [
+            valid,
+            {**valid, "dialect": "wrong"},
+            {**valid, "version": 99},
+            {**valid, "modelSeeds": []},
+            {**valid, "unknown": 1},
+            {**valid, "sequences": []},
+        ]
+        for obj in corpus:
+            stage_accepts, _code = stage2.normalized_validation_contract(obj)
+            runner_accepts = runner.validate_fold_job(obj) is None
+            check_equal(stage_accepts, runner_accepts, "stage2/runner validator acceptance가 갈라졌다")
+    finally:
+        workspace.cleanup()

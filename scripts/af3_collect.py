@@ -12,7 +12,8 @@ af3_collect.py - AlphaFold 3 출력 폴더를 훑어 타깃별 신뢰도 지표�
         seed-<S>_sample-<N>/              샘플별 동일 3종 파일
     최상위(타깃 폴더 바로 아래)의 파일이 'AF3가 1위로 뽑은 모델'이다.
     이 스크립트는 기본적으로 그 1위 모델을 타깃의 대표값으로 쓰고,
-    ranking_scores.csv 로 샘플 간 산포(재현성)를 함께 계산한다.
+    ranking_scores.csv 로 한 실행 내부 diffusion-sample 최고-최저 범위를 함께 계산한다.
+    이는 독립 반복 실행 간 재현성 추정치가 아니다.
 
 의존성
     표준 라이브러리만 쓴다. pandas/numpy 가 없는 서버에서도 그대로 돌아간다.
@@ -544,7 +545,10 @@ def collect_target(tdir, want_msa=True, info=None):
     row["pLDDT_70이상비율"] = r4(frac_ge(plddts, 70.0))
     row["pLDDT_90이상비율"] = r4(frac_ge(plddts, 90.0))
 
-    # ---- 샘플 간 산포 (같은 입력을 여러 번 뽑았을 때의 재현성) -----------
+    # ---- 한 AF3 실행 내부 diffusion sample 간 범위 ----------------------
+    # 호환성을 위해 기존 `ranking산포` 열 이름은 유지한다. 이는 서로 독립된
+    # 반복실험(run-to-run variability)이 아니라 한 run 안의 diffusion sample
+    # 최고-최저 범위이므로 재현성 추정치나 불확실성 구간으로 해석하면 안 된다.
     rs = read_ranking_csv(rank_p) if rank_p.exists() else None
     if rs:
         row["샘플수"] = len(rs)
@@ -613,7 +617,7 @@ GRADE_DOC = """등급 기준 (AlphaFold 계열의 통상적 해석 구간을 이
       충돌      has_clash > 0
       무질서    fraction_disordered >= 0.1
       MSA얕음   unpaired 깊이 < 100
-      샘플불안  ranking 산포 >= 0.05
+      샘플불안  (호환 이름) 한 실행 내부 diffusion-sample ranking 최고-최저 범위 >= 0.05
       버킷256   패딩 버킷이 256 이상 (128보다 큰 연산·메모리 구간; 배수는 장비별 측정)
 
 주의: 이 구간은 예측 신뢰도(모델이 자기 예측을 얼마나 확신하는가)이지
@@ -730,6 +734,8 @@ COLUMNS = ["조건", "타깃", "등급", "경고",
 #      상황을 만들지 않는다. 최신 판정은 도구가 하고 근거를 열에 적는다.
 #   3) 버린 실행을 감추지는 않는다. '실행수' 열에 몇 번 돌았는지 적고,
 #      화면 요약에 중복 타깃을 나열하고, --all-runs 로 전부 볼 수 있게 한다.
+# 여기서 '최신'은 가장 최근에 완료된 출력 폴더라는 뜻뿐이다. 현재 입력/provenance와
+# 일치하거나 품질이 가장 좋다는 뜻이 아니다. 그런 판정은 배치 러너 provenance가 맡는다.
 # 최신의 기준: 폴더명의 AF3 타임스탬프 접미사가 1순위(AF3 가 직접 찍은 값),
 #   없으면 산출물 파일 mtime. dir_run_time 참고.
 # 접미사 없는 폴더는 첫 실행이므로 접미사 있는 폴더보다 항상 오래된 것으로 취급된다
@@ -790,6 +796,8 @@ def walk_output_dir(root, label, want_msa=True, all_runs=False):
             elif all_runs:
                 row["중복정책"] = ("전체표시(최신=%s)" % runs[-1][0].name)
             else:
+                # 기존 CSV 값은 downstream 호환을 위해 유지한다. 정확한 의미는
+                # --run-policy 도움말과 위 정책 주석의 "latest completed output"이다.
                 row["중복정책"] = ("최신선택(%d개중)" % len(runs))
             rows.append(grade_row(row))
 
@@ -832,6 +840,12 @@ def main(argv=None):
                     help="같은 타깃이 여러 폴더에 있을 때 전부 집계표에 넣는다 "
                          "(기본은 최신 1건만). 어느 실행이 어떤 값이었는지 대조할 때 쓴다. "
                          "이 옵션을 켜면 같은 타깃이 여러 줄이 되므로 --top 순위가 왜곡된다")
+    ap.add_argument(
+        "--run-policy", choices=("latest", "all"), default="latest",
+        help="중복 실행 처리 정책. latest(기본)는 가장 최근 완료 출력 1건이며 "
+             "현재 입력 일치나 최고 품질을 뜻하지 않는다. all은 전부 표시한다. "
+             "--all-runs는 all의 호환 별칭이다",
+    )
     ap.add_argument("--no-msa-depth", action="store_true",
                     help="MSA 깊이 계산을 건너뛴다 (*_data.json 을 읽지 않아 빠르다)")
     ap.add_argument("--top", type=int, default=None,
@@ -844,6 +858,10 @@ def main(argv=None):
     ap.add_argument("--top-condition", default=None,
                     help="상위 N건을 이 조건(라벨)에서만 고른다. 여러 조건을 함께 집계했을 때 "
                          "같은 타깃이 중복 선정되는 것을 막는다")
+    ap.add_argument(
+        "--tie-policy", choices=("include-all", "error"), default="include-all",
+        help="--top 경계 동점 처리: 동점 전부 포함(기본) 또는 오류",
+    )
     ap.add_argument("--grade-doc", action="store_true",
                     help="등급 기준 설명만 출력하고 종료")
     args = ap.parse_args(argv)
@@ -855,6 +873,7 @@ def main(argv=None):
     if args.top is not None and args.top <= 0:
         log("오류: --top 은 1 이상이어야 한다.")
         return 2
+    all_runs = args.all_runs or args.run_policy == "all"
 
     missing_roots = []
     for spec in args.outputs:
@@ -870,7 +889,7 @@ def main(argv=None):
     for spec in args.outputs:
         label, path = parse_spec(spec)
         rows, inc = walk_output_dir(path, label, want_msa=not args.no_msa_depth,
-                                    all_runs=args.all_runs)
+                                    all_runs=all_runs)
         log("%-14s %s : 완료 %d건, 미완성/건너뜀 %d건" % (label, path, len(rows), len(inc)))
         all_rows += rows
         # inc 는 (타깃명, 폴더명) 쌍이다. 재시도에 필요한 것은 타깃명이다.
@@ -950,8 +969,25 @@ def main(argv=None):
                 "(각 타깃의 최고값 행만 남긴다)." % dropped)
         havekey = dedup
         top = havekey[:args.top]
+        if len(havekey) > args.top and havekey[args.top - 1][key] == havekey[args.top][key]:
+            boundary = havekey[args.top - 1][key]
+            if args.tie_policy == "error":
+                log(
+                    "오류: 상위 %d 경계값 %s 에 동점이 있다. "
+                    "--tie-policy include-all 로 전부 포함하거나 N을 바꿔라."
+                    % (args.top, boundary)
+                )
+                return 1
+            end = args.top
+            while end < len(havekey) and havekey[end][key] == boundary:
+                end += 1
+            top = havekey[:end]
         print()
-        print("상위 %d건 (%s 기준). 이 목록이 2단계 전략의 재실행 후보다." % (len(top), key))
+        print(
+            "상위 후보 요청 N=%d, 실현 N=%d (%s 기준, 경계동점=%s). "
+            "이 목록이 2단계 전략의 재실행 후보다."
+            % (args.top, len(top), key, args.tie_policy)
+        )
         for r in top[:20]:
             print("  %-10s %-24s %s=%-8s pLDDT=%-8s 등급=%-10s 폴더=%s"
                   % (r["조건"], r["타깃"], key, r[key], r["pLDDT평균"], r["등급"],

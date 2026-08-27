@@ -12,7 +12,8 @@
 #     bash af3run.sh vhh_001 screen    경량 스크리닝 (sample 1, recycle 3) - 전수용
 #     bash af3run.sh vhh_001 full      기본값 정밀 (sample 5, recycle 10) - 상위 후보용
 #     bash af3run.sh vhh_001 msa       MSA(CPU)만 미리 계산해서 보관 (GPU·가중치 불필요)
-#     bash af3run.sh vhh_001 infer     보관된 MSA로 추론(GPU)만 실행
+#     bash af3run.sh vhh_001 infer     보관된 MSA로 기본 정밀 추론(5 x 10)
+#     bash af3run.sh vhh_001 infer-screen  보관된 MSA로 경량 추론(1 x 3)
 #     bash af3run.sh vhh_001 oneshot   MSA+추론을 한 프로세스에서 (가장 단순)
 #     bash af3run.sh vhh_001 retry     실패한 것만 재시도
 #     bash af3run.sh vhh_001 bench     가장 짧은 20건을 경량 설정으로 돌리는 스모크
@@ -64,12 +65,25 @@ require_positive_int() {
   }
 }
 
+case "${AF3RUN_FILENAME_LANG:-en}" in
+  en|ko) ;;
+  *) echo "오류: AF3RUN_FILENAME_LANG 는 en 또는 ko 여야 한다: '${AF3RUN_FILENAME_LANG}'" >&2; exit 2 ;;
+esac
+
+if [[ "$PY" == */* ]]; then
+  [ -x "$PY" ] || { echo "오류: AF3_PYTHON 실행 파일을 사용할 수 없다: '${PY}'" >&2; exit 2; }
+elif ! command -v "$PY" >/dev/null 2>&1; then
+  echo "오류: AF3_PYTHON 명령을 찾을 수 없다: '${PY}'" >&2
+  exit 2
+fi
+
 WORKERS="${AF3_MSA_WORKERS:-1}"
 require_positive_int AF3_MSA_WORKERS "$WORKERS"
 
 # DB 검색 스레드: min(코어수/2, 8). AF3 기본값 min(코어수,8) 과 거의 같아서
 # 8코어 이상이면 손대지 않아도 최적에 가깝다.
 CORES="$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 8)"
+require_positive_int detected_logical_cores "$CORES"
 NCPU="${AF3_MSA_NCPU:-$(( CORES / 2 ))}"
 require_positive_int AF3_MSA_NCPU "$NCPU"
 [ "$NCPU" -lt 1 ] && NCPU=1
@@ -88,7 +102,10 @@ if [ "$MODE" = "check" ]; then
   fi
   echo "환경 진단을 실행한다. 결과는 af3_check.txt 에도 저장된다."
   bash "$CHECK" 2>&1 | tee af3_check.txt
-  exit "${PIPESTATUS[0]}"
+  STATUS=("${PIPESTATUS[@]}")
+  [ "${STATUS[0]}" -ne 0 ] && exit "${STATUS[0]}"
+  [ "${STATUS[1]}" -ne 0 ] && { echo "오류: af3_check.txt 기록 실패" >&2; exit "${STATUS[1]}"; }
+  exit 0
 fi
 
 if [ "$MODE" = "collect" ]; then
@@ -136,7 +153,8 @@ case "$MODE" in
   screen)  ARGS+=( --stage both --diffusion-samples 1 --recycles 3 ) ;;
   full)    ARGS+=( --stage both ) ;;                       # AF3 기본값(5 x 10) 사용
   msa)     ARGS+=( --stage msa ) ;;
-  infer)   ARGS+=( --stage infer --diffusion-samples 1 --recycles 3 ) ;;
+  infer)   ARGS+=( --stage infer ) ;;                       # AF3 기본값(5 x 10)
+  infer-screen) ARGS+=( --stage infer --diffusion-samples 1 --recycles 3 ) ;;
   oneshot) ARGS+=( --stage oneshot --diffusion-samples 1 --recycles 3 ) ;;
   retry)   ARGS+=( --stage both --retry ) ;;
   bench)   ARGS+=( --stage oneshot --limit 20 --diffusion-samples 1 --recycles 3 ) ;;
@@ -154,7 +172,10 @@ echo "==========================================================================
 
 # 오래 걸리므로 터미널이 끊겨도 살아남게 로그를 남긴다.
 LOGFILE="./${NAME}_work/af3run_$(date +%Y%m%d_%H%M%S).log"
-mkdir -p "./${NAME}_work"
+if ! mkdir -p "./${NAME}_work"; then
+  echo "오류: 작업 폴더를 만들 수 없다: ./${NAME}_work" >&2
+  exit 1
+fi
 
 if [ "$MODE" = "dry" ]; then
   "$PY" "$BATCH" "${ARGS[@]}"
@@ -165,7 +186,12 @@ echo "진행 로그: ${LOGFILE}"
 echo "(터미널이 끊겨도 계속 돌리려면: nohup bash af3run.sh ${NAME} ${MODE} &)"
 echo
 "$PY" "$BATCH" "${ARGS[@]}" 2>&1 | tee "$LOGFILE"
-RC="${PIPESTATUS[0]}"
+STATUS=("${PIPESTATUS[@]}")
+RC="${STATUS[0]}"
+if [ "${STATUS[1]}" -ne 0 ]; then
+  echo "오류: 로그 기록 실패: ${LOGFILE}" >&2
+  [ "$RC" -eq 0 ] && RC="${STATUS[1]}"
+fi
 
 echo
 if [ "$RC" -eq 0 ]; then

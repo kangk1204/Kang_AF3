@@ -996,14 +996,16 @@ def test_legacy_lock_protects_the_output_directory():
     mod = load_module("af3_batch.py")
     import inspect
 
-    source = inspect.getsource(mod.main)
-    pos = source.find("lock_path")
-    check(pos >= 0, "legacy 러너에 잠금이 없다")
-    window = source[pos : pos + 200]
+    source = inspect.getsource(mod.acquire_run_locks)
     check(
-        "output_dir" in window,
+        'output_dir / ".run_af3_batch.lock"' in source,
         "잠금이 공유 대상인 output-dir 을 보호하지 않는다",
-        window[:160],
+        source[:500],
+    )
+    check(
+        'work / ".run_af3_batch.work.lock"' in source,
+        "공유 work-dir 잠금이 없다",
+        source[:500],
     )
 
 
@@ -1030,7 +1032,7 @@ def test_stage2_does_not_borrow_another_targets_msa():
 
         # 이름이 맞으면 당연히 골라야 한다.
         good = tdir / "vhh_a_data.json"
-        good.write_text('{"msa": "mine"}', encoding="utf-8")
+        good.write_text('{"name": "vhh_a", "msa": "mine"}', encoding="utf-8")
         check_equal(
             mod.find_data_json("vhh_a", out_root, None),
             good,

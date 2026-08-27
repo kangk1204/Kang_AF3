@@ -29,7 +29,8 @@ af3_view3d.py - AlphaFold 3 출력 폴더를 브라우저에서 돌려 보는 HT
     _summary_confidences.json 에서 ranking score, pTM, ipTM, fraction_disordered,
     has_clash 를 읽어 구조 위에 같이 띄운다. 잔기 평균 pLDDT는 mmCIF의 원자별 값을
     잔기별로 평균한 뒤 각 잔기에 같은 가중치를 주어 다시 평균한 값이다.
-    ipTM 은 단량체에 없다 (JSON 에 null). 없으면 그 항목을 빼고 0 으로 쓰지 않는다.
+    ipTM null은 0이 아니다. 단일 사슬(해당 없음), 다중 사슬(계면 미평가), 사슬 수 불명을
+    구분해 표시하며 값이 있더라도 결합·affinity 또는 native pose의 증거로 해석하지 않는다.
 
 3D 라이브러리를 어디서 가져오는가 (읽고 고를 것)
     기본  --lib cdn    3Dmol.js 를 CDN 에서 불러온다. HTML 이 작다 (수백 KB).
@@ -101,6 +102,48 @@ from pathlib import Path
 MAX_CIF_BYTES = 256 * 1024 * 1024
 MAX_LIBRARY_BYTES = 16 * 1024 * 1024
 MAX_TARBALL_BYTES = 32 * 1024 * 1024
+REPO_ROOT = Path(__file__).resolve().parent.parent
+OUTPUT_DISTRIBUTION_FILES = (
+    "OUTPUT_NOTICE.md",
+    "OUTPUT_TERMS_OF_USE.md",
+    "LEGALLY_BINDING_TERMS_OF_USE.txt",
+)
+
+
+def propagate_output_terms(outdir):
+    """생성한 AF3-derived HTML 옆에 고지와 pinned 약관을 원자적으로 복사한다."""
+    destination = Path(outdir)
+    for name in OUTPUT_DISTRIBUTION_FILES:
+        source = REPO_ROOT / name
+        if not source.is_file():
+            raise RuntimeError("필수 AF3 출력물 고지 파일이 없다: %s" % source)
+        atomic_write_text(destination / name, source.read_text(encoding="utf-8"))
+
+
+def chain_count(rec):
+    """known-single/known-multi/unknown 계약에 쓸 사슬 수를 돌려준다."""
+    summary = rec.get("summary") or {}
+    for key in ("chain_ptm", "chain_iptm"):
+        values = summary.get(key)
+        if isinstance(values, list) and values:
+            return len(values)
+    matrix = summary.get("chain_pair_iptm")
+    if isinstance(matrix, list) and matrix:
+        return len(matrix)
+    observed = rec.get("chains") or []
+    return len(observed) if observed else None
+
+
+def iptm_display(rec):
+    value = fmt_num((rec.get("summary") or {}).get("iptm"), 3)
+    if value is not None:
+        return value, "measured"
+    count = chain_count(rec)
+    if count == 1:
+        return "해당 없음", "single"
+    if count is not None and count > 1:
+        return "누락", "multi_missing"
+    return "불명", "unknown"
 
 
 def log(msg):
@@ -975,11 +1018,7 @@ def fmt_num(v, nd=3):
 
 
 def metric_rows(rec):
-    """화면에 띄울 지표 목록. 값이 없는 항목은 넣지 않는다.
-
-    ipTM 은 단량체에 없다 (JSON 에 null). 그 경우 항목 자체를 뺀다.
-    0 으로 표시하면 '계면이 나쁘다' 로 읽히므로 절대 그렇게 하지 않는다.
-    """
+    """화면 지표. ipTM 누락은 single/multi/unknown을 반드시 구분한다."""
     s = rec["summary"]
     rows = []
 
@@ -990,9 +1029,15 @@ def metric_rows(rec):
     add("ranking score", fmt_num(s.get("ranking_score"), 3),
         "AF3 가 후보를 줄 세우는 값. 클수록 좋다")
     add("pTM", fmt_num(s.get("ptm"), 3), "구조 전체의 접힘 신뢰도 (0~1)")
-    if s.get("iptm") is not None:
-        add("ipTM", fmt_num(s.get("iptm"), 3),
-            "사슬 사이 계면 신뢰도 (0~1). 복합체에만 있다")
+    iptm, state = iptm_display(rec)
+    if state == "measured":
+        add("ipTM", iptm, "사슬 사이 AF3 계면 신뢰도 (0~1); 결합·친화도 증거가 아님")
+    elif state == "single":
+        add("ipTM", iptm, "단일 사슬에는 계면 지표가 적용되지 않는다 (0이 아님)")
+    elif state == "multi_missing":
+        add("ipTM", iptm, "다중 사슬인데 값이 없어 계면을 평가할 수 없다 (0이 아님)")
+    else:
+        add("ipTM", iptm, "사슬 수와 ipTM을 확인할 수 없어 계면 평가 상태가 불명이다")
     add("잔기 평균 pLDDT", fmt_num(rec["mean_plddt"], 1),
         "각 잔기에 같은 가중치를 준 평균 (0~100)")
     add("최저 잔기 pLDDT", fmt_num(rec["min_plddt"], 1),
@@ -1011,7 +1056,8 @@ def metric_rows(rec):
         txt = "%d개" % rec["n_sample"]
         if rec["sample_sd"] is not None:
             txt += " (ranking score 표준편차 %.3f)" % rec["sample_sd"]
-        add("확산 샘플", txt, "샘플 간 산포가 크면 재현성이 낮다")
+        add("확산 샘플", txt,
+            "같은 실행의 diffusion-sample variation; 독립 재현성/정확도 불확실성이 아님")
     return rows
 
 
@@ -1259,6 +1305,8 @@ h2 { font-size:13px; margin:14px 0 5px 0; padding-bottom:3px;
        border-radius:3px; font-size:13px; margin:8px 0; }
 .note { background:#f7f7f7; border:1px solid var(--bd); padding:8px 10px;
         border-radius:3px; font-size:12px; }
+.terms { background:#fff8db; border:1px solid #d8bd57; padding:8px 10px;
+         border-radius:3px; font-size:11px; margin-top:14px; }
 #status { position:absolute; left:50%; top:46%; transform:translateX(-50%);
           font-size:13px; color:var(--dim); text-align:center; max-width:80%; }
 ul.tight { margin:4px 0 0 18px; padding:0; }
@@ -1292,6 +1340,13 @@ __LIBHEAD__
     __LEGEND__
     __LOWBOX__
     __INDEXLINK__
+    <div class="terms"><b>AlphaFold 3 Output Terms 적용</b><br>
+    By using this information, you agree to AlphaFold 3 Output Terms of Use found at
+    <a href="https://github.com/google-deepmind/alphafold3/blob/main/OUTPUT_TERMS_OF_USE.md">the official terms</a>.
+    이 HTML은 AF3 출력 좌표·신뢰도를 재표현한 수정 산출물이다. 옆의
+    <code>OUTPUT_NOTICE.md</code>, <code>OUTPUT_TERMS_OF_USE.md</code>,
+    <code>LEGALLY_BINDING_TERMS_OF_USE.txt</code>를 함께 배포해야 한다.<br>
+    Citation: Abramson J et al., <i>Nature</i> (2024), doi:10.1038/s41586-024-07487-w.</div>
   </div>
   <div class="col">
     <div class="bar">
@@ -1619,6 +1674,11 @@ __ROWS__
 ipTM 칸의 '-' 는 값이 없다는 뜻이다 (0 이 아니다). 사슬이 하나면 원래 없는 값이고,<br>
 사슬이 여럿인데 '-' 이면 계면을 평가하지 못한 것이므로 그 건은 따로 확인해야 한다.<br>
 분포 막대는 왼쪽부터 __BANDTXT__ 순이다.
+<div class="terms"><b>AlphaFold 3 Output Terms 적용.</b>
+By using this information, you agree to AlphaFold 3 Output Terms of Use found at
+<a href="https://github.com/google-deepmind/alphafold3/blob/main/OUTPUT_TERMS_OF_USE.md">the official terms</a>.
+이 목록과 개별 HTML은 AF3 출력을 재표현한 수정 산출물이다. 동봉된 약관·고지 파일을 함께 배포한다.
+Citation: Abramson J et al., <i>Nature</i> (2024), doi:10.1038/s41586-024-07487-w.</div>
 </div>
 </body></html>
 """
@@ -1632,6 +1692,7 @@ def build_index(records, files, subtitle):
                                   r["label"]))
     rows = []
     bad = [r for r in records if r["problem"]]
+    iptm_states = {"single": 0, "multi_missing": 0, "unknown": 0}
     for rec in order:
         s = rec["summary"]
         hist = plddt_histogram(rec["residues"]) if rec["residues"] else []
@@ -1640,7 +1701,9 @@ def build_index(records, files, subtitle):
             bars = ('<span class="bars">%s</span>'
                     % "".join('<i style="background:%s;width:%.1f%%"></i>'
                               % (c, pct) for c, _l, _n, pct in hist))
-        iptm = fmt_num(s.get("iptm"), 3) or "-"
+        iptm, iptm_state = iptm_display(rec)
+        if iptm_state in iptm_states:
+            iptm_states[iptm_state] += 1
         link = html.escape(files.get(rec["label"], ""), quote=True)
         name_cell = ('<a href="%s">%s</a>' % (link, html.escape(rec["label"]))
                      if link else html.escape(rec["label"]))
@@ -1670,6 +1733,16 @@ def build_index(records, files, subtitle):
                   '<ul class="tight">%s</ul>'
                   '지표는 표에 그대로 보인다. 구조만 빠졌다.</div>'
                   % (len(bad), items))
+
+    missing_total = sum(iptm_states.values())
+    if missing_total:
+        badbox += (
+            '<div class="note"><b>ipTM tri-state</b>: 단일 사슬 해당 없음 %d건; '
+            '다중 사슬인데 누락되어 계면 미평가 %d건; 사슬 수 불명 %d건. '
+            '누락은 0이 아니며 결합·친화도 판단에 대입하지 않는다.</div>'
+            % (iptm_states["single"], iptm_states["multi_missing"],
+               iptm_states["unknown"])
+        )
 
     return fill_template(
         INDEX_TMPL,
@@ -1794,6 +1867,7 @@ def main(argv=None):
 
     outdir = Path(args.out)
     outdir.mkdir(parents=True, exist_ok=True)
+    propagate_output_terms(outdir)
 
     # 자료를 먼저 모은다. 정렬(--top)과 목록을 위해 전부 필요하다.
     records = []

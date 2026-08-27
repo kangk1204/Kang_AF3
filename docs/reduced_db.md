@@ -42,6 +42,11 @@ python3 scripts/af3_db.py verify \
   --db-dir ~/public_databases_full
 ```
 
+fallback full root에는 별도의 `af3_full_db_manifest.json` seal이 필요하다. 공식 설치기는 deep
+checksum 검증과 같은 pass에서 seal을 게시한다. 기존 수동 설치는 한 번만
+`python3 scripts/af3_db.py seal-full --db-dir ~/public_databases_full`을 실행한다. runtime은
+overlay manifest와 full seal을 서로 다른 계약으로 검증하며, full payload를 매번 재hash하지 않는다.
+
 `reduce`는 다음 불변식을 지킨다.
 
 - 7개 source FASTA를 모두 검사한 뒤에만 쓰기를 시작한다.

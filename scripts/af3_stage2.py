@@ -70,6 +70,7 @@ import json
 import math
 import os
 import shlex
+import stat
 import string
 import sys
 import tempfile
@@ -83,17 +84,101 @@ def csv_safe_cell(value):
     return value
 
 
-def open_manifest(path):
-    """선정내역 CSV 를 연다. symlink 는 따라가지 않는다.
+def _regular_destination_snapshot(path: Path):
+    """Return an existing safe destination's identity, or reject it.
 
-    결과 폴더 안에 링크만 심어 두면 임의 경로가 덮어써진다. 실제로 재현했다.
-    O_NOFOLLOW 는 대상이 symlink 이면 열기 자체를 거부한다.
+    Atomic replacement does not follow a symlink, but silently replacing a FIFO or a
+    hardlink is still surprising and can destroy another name's contents in older
+    direct-write implementations.  Refuse every non-regular destination and every
+    regular file with more than one link.
     """
-    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(path, flags, 0o644)
-    return os.fdopen(fd, "w", encoding="utf-8-sig", newline="")
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        raise OSError("manifest destination is not a regular file: %s" % path)
+    if info.st_nlink != 1:
+        raise OSError("manifest destination has %d hardlinks: %s" % (info.st_nlink, path))
+    return info.st_dev, info.st_ino
+
+
+class _AtomicManifest:
+    """File-like atomic publisher; ``close()`` preserves the old public API."""
+
+    def __init__(self, path):
+        self.destination = Path(path)
+        self.original = _regular_destination_snapshot(self.destination)
+        fd, temporary_name = tempfile.mkstemp(
+            prefix=".%s." % self.destination.name,
+            suffix=".tmp",
+            dir=str(self.destination.parent),
+        )
+        self.temporary = Path(temporary_name)
+        self.handle = os.fdopen(fd, "w", encoding="utf-8-sig", newline="")
+        self.closed = False
+
+    def write(self, value):
+        return self.handle.write(value)
+
+    def __getattr__(self, name):
+        return getattr(self.handle, name)
+
+    def _cleanup(self):
+        try:
+            self.temporary.unlink()
+        except FileNotFoundError:
+            pass
+
+    def close(self):
+        if self.closed:
+            return
+        self.closed = True
+        try:
+            self.handle.flush()
+            os.fsync(self.handle.fileno())
+            self.handle.close()
+            if _regular_destination_snapshot(self.destination) != self.original:
+                raise OSError("manifest destination changed while writing: %s" % self.destination)
+            os.replace(self.temporary, self.destination)
+            dir_fd = os.open(self.destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(dir_fd)
+            finally:
+                os.close(dir_fd)
+        finally:
+            if not self.handle.closed:
+                self.handle.close()
+            self._cleanup()
+
+    def abort(self):
+        if self.closed:
+            return
+        self.closed = True
+        self.handle.close()
+        self._cleanup()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, _exc, _traceback):
+        if exc_type is None:
+            self.close()
+        else:
+            self.abort()
+        return False
+
+
+def open_manifest(path):
+    """Atomically publish a manifest without following links or truncating victims.
+
+    The caller writes to a private regular file in the destination directory.  A
+    successful close/context exit fsyncs it, rechecks that the destination did not
+    change during the write, then publishes with ``os.replace``.  Exceptions leave
+    the old manifest intact.  The returned object deliberately remains file-like so
+    older callers that explicitly invoke ``close()`` keep working.
+    """
+    return _AtomicManifest(path)
 
 
 def atomic_write_json(path, obj, overwrite=False):
@@ -150,20 +235,6 @@ SORT_COLUMNS = (
     "pLDDT_90이상비율",
 )
 
-# AF3 folding_input 이 최상위에서 허용하는 키. 이 밖의 키는 AF3 가 거부한다.
-TOP_LEVEL_KEYS = frozenset(
-    {
-        "dialect",
-        "version",
-        "name",
-        "modelSeeds",
-        "sequences",
-        "bondedAtomPairs",
-        "userCCD",
-        "userCCDPath",
-    }
-)
-
 # MSA/템플릿을 담는 키. --strip-msa 로 지울 대상.
 MSA_KEYS = ("unpairedMsa", "pairedMsa", "unpairedMsaPath", "pairedMsaPath", "templates")
 
@@ -192,9 +263,24 @@ def sanitised_name(raw: str) -> str:
 
 def nonempty(path: Path) -> bool:
     try:
-        return path.is_file() and path.stat().st_size > 0
+        info = path.lstat()
+        return stat.S_ISREG(info.st_mode) and info.st_size > 0
     except OSError:
         return False
+
+
+def json_internal_name(path: Path) -> str | None:
+    """Return a safe JSON source's normalized internal name, else ``None``."""
+    if not nonempty(path):
+        return None
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            obj = json.load(handle)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(obj, dict) or not isinstance(obj.get("name"), str):
+        return None
+    return sanitised_name(obj["name"])
 
 
 def as_float(value):
@@ -254,7 +340,29 @@ def read_name_list(path: Path) -> list[str]:
 # ---------------------------------------------------------------------------
 # 후보 선별
 # ---------------------------------------------------------------------------
-def select_rows(rows, *, by, top, minimum, grades, condition, quiet=False, take_all=False):
+def include_boundary_ties(scored, limit, tie_policy):
+    """Select an ordered top-N under one explicit boundary-tie contract."""
+    if limit is None or limit >= len(scored):
+        return list(scored)
+    boundary = scored[limit - 1][0]
+    tied = scored[limit][0] == boundary
+    if tied and tie_policy == "error":
+        raise ValueError(
+            "상위 %d 경계값 %.12g 에 동점이 있다. --tie-policy include-all 로 "
+            "동점 전부를 포함하거나 컷오프를 바꿔라." % (limit, boundary)
+        )
+    if not tied:
+        return list(scored[:limit])
+    end = limit
+    while end < len(scored) and scored[end][0] == boundary:
+        end += 1
+    return list(scored[:end])
+
+
+def select_rows(
+    rows, *, by, top, minimum, grades, condition, quiet=False, take_all=False,
+    tie_policy="include-all",
+):
     """정렬 열 기준으로 상위 N 또는 컷오프 이상을 고른다.
 
     take_all=True 면 선별하지 않고 전건을 돌려준다. 이때는 정렬 열 값이 없는 행도
@@ -304,7 +412,7 @@ def select_rows(rows, *, by, top, minimum, grades, condition, quiet=False, take_
     if not scored:
         die("'%s' 열에 값이 있는 행이 없다. --by 를 다른 열로 바꿔라." % by)
 
-    # 내림차순. 동점은 타깃 이름으로 안정 정렬해서 실행마다 같은 결과가 나오게 한다.
+    # 이름 정렬은 표시 순서만 고정한다. N 경계 동점을 이름으로 잘라 표본을 바꾸지 않는다.
     scored.sort(key=lambda t: (-t[0], str(t[1].get(COL_TARGET, ""))))
 
     if minimum is not None:
@@ -315,9 +423,9 @@ def select_rows(rows, *, by, top, minimum, grades, condition, quiet=False, take_
                 % (minimum, by, scored[0][0])
             )
         if top is not None:
-            picked = picked[:top]
+            picked = include_boundary_ties(picked, top, tie_policy)
     else:
-        picked = scored[:top]
+        picked = include_boundary_ties(scored, top, tie_policy)
 
     return [r for _, r in picked], [v for v, _ in picked], scored
 
@@ -337,45 +445,55 @@ def find_data_json(target: str, out_root: Path | None, hint: str | None):
     if out_root is not None:
         candidates.append(out_root / target)
         candidates.append(out_root / sanitised_name(target))
+    wanted_name = sanitised_name(target)
+    matches = []
+    seen_paths = set()
     for tdir in candidates:
-        if not tdir.is_dir():
+        if tdir.is_symlink() or not tdir.is_dir():
             continue
-        exact = tdir / ("%s_data.json" % tdir.name)
-        if nonempty(exact):
-            return exact
         # 폴더 안 아무 _data.json 이나 고르면 안 된다. 그 폴더에 다른 타깃의 파일이
         # 섞여 있으면 남의 MSA 와 템플릿이 이 타깃의 추론에 들어간다. 그래서 접두어가
         # 이 타깃의 이름과 맞는 것만 받는다 (대소문자/정규화 차이는 허용한다).
-        wanted = {target.lower(), sanitised_name(target).lower(), tdir.name.lower()}
-        found = sorted(
-            p for p in tdir.glob("*_data.json")
-            if nonempty(p)
-            and not p.name.startswith("._")
-            and p.name[: -len("_data.json")].lower() in wanted
+        wanted_prefixes = {target.lower(), wanted_name.lower(), tdir.name.lower()}
+        for path in sorted(tdir.glob("*_data.json")):
+            if path.name.startswith("._") or not nonempty(path):
+                continue
+            if path.name[: -len("_data.json")].lower() not in wanted_prefixes:
+                continue
+            identity = (path.parent, path.name)
+            if identity in seen_paths:
+                continue
+            seen_paths.add(identity)
+            internal = json_internal_name(path)
+            if internal != wanted_name:
+                raise ValueError(
+                    "%s 내부 name=%r 이 요청 타깃 %r 과 일치하지 않는다"
+                    % (path, internal, wanted_name)
+                )
+            matches.append(path)
+    if len(matches) > 1:
+        raise ValueError(
+            "요청 타깃 %r 에 맞는 _data.json 이 %d개다: %s"
+            % (target, len(matches), ", ".join(str(path) for path in matches[:5]))
         )
-        if found:
-            return found[0]
-    return None
+    return matches[0] if matches else None
 
 
 def find_input_json(target: str, input_dir: Path):
     """원본 입력 JSON 을 찾는다. 파일명 규칙이 자유로우므로 name 값으로도 확인한다."""
-    for cand in (input_dir / ("%s.json" % target), input_dir / ("%s.json" % sanitised_name(target))):
-        if nonempty(cand):
-            return cand
-    # 파일명이 다를 수 있다 (af3_prepare.py 의 --no-index 여부 등). name 값으로 찾는다.
     want = sanitised_name(target)
+    matches = []
     for path in sorted(input_dir.glob("*.json")):
-        if path.name.startswith("._"):
+        if path.name.startswith("._") or not nonempty(path):
             continue
-        try:
-            with open(path, encoding="utf-8") as fh:
-                obj = json.load(fh)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            continue
-        if isinstance(obj, dict) and sanitised_name(str(obj.get("name", ""))) == want:
-            return path
-    return None
+        if json_internal_name(path) == want:
+            matches.append(path)
+    if len(matches) > 1:
+        raise ValueError(
+            "요청 타깃 %r 에 맞는 원본 JSON 이 %d개다: %s"
+            % (target, len(matches), ", ".join(str(path) for path in matches[:5]))
+        )
+    return matches[0] if matches else None
 
 
 # ---------------------------------------------------------------------------
@@ -493,26 +611,6 @@ TOP_LEVEL_KEYS = frozenset(
         "userCCDPath",
     }
 )
-KNOWN_FLAGS = frozenset(
-    {
-        "json_path",
-        "input_dir",
-        "output_dir",
-        "model_dir",
-        "db_dir",
-        "run_data_pipeline",
-        "run_inference",
-        "jax_compilation_cache_dir",
-    }
-)
-INFRASTRUCTURE_EXIT_CODES = frozenset({125, 126, 127})
-# 컨테이너 이름 규칙: <접두사><러너 PID>_<순번>.
-# `docker run` 으로 띄운 컨테이너는 러너가 죽어도 데몬이 계속 돌린다 (Ctrl-C, SIGTERM,
-# SSH 끊김 모두에서 확인). 이름에 PID 를 박아 두어야 나중에 "이 컨테이너를 띄운 실행이
-# 이미 끝났는가" 를 판정하고 --audit/--cleanup 이 안전하게 정리할 수 있다.
-CONTAINER_PREFIX = "af3run_"
-
-
 def _valid_seed(value: object) -> bool:
     return (
         isinstance(value, int)
@@ -586,10 +684,46 @@ def validate_fold_job(obj: object) -> str | None:
     return None
 
 
-def build_one(src_json: Path, *, seeds, name_suffix, do_strip, json_version):
+def normalized_validation_contract(obj: object) -> tuple[bool, str]:
+    """Stable, message-independent validator result used for equivalence tests.
+
+    The human error wording may evolve independently in the runner and stage-2
+    tool.  Tests should compare this normalized pair over a shared corpus rather
+    than infer equivalence from copied constants or docstrings.
+    """
+    problem = validate_fold_job(obj)
+    if problem is None:
+        return True, "ok"
+    prefixes = (
+        ("최상위", "top-level"),
+        ("AF3 가 모르는 최상위", "unknown-top-key"),
+        ("dialect", "dialect"),
+        ("version", "version"),
+        ("modelSeeds", "seeds"),
+        ("sequences", "sequences"),
+        ("중복 chain id", "chain-id"),
+    )
+    for prefix, code in prefixes:
+        if problem.startswith(prefix):
+            return False, code
+    return False, "sequence-entry"
+
+
+def build_one(
+    src_json: Path, *, seeds, name_suffix, do_strip, json_version,
+    expected_target: str | None = None,
+):
     """원본 JSON 을 읽어 2단계용으로 고친 dict 와 진단 정보를 돌려준다."""
     try:
-        with open(src_json, encoding="utf-8") as fh:
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(src_json, flags)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            os.close(fd)
+            return None, "일반 파일이 아니다"
+        with os.fdopen(fd, "r", encoding="utf-8") as fh:
             obj = json.load(fh)
     except UnicodeDecodeError:
         return None, "UTF-8 이 아니다 (macOS AppleDouble 껍데기일 수 있다)"
@@ -601,6 +735,11 @@ def build_one(src_json: Path, *, seeds, name_suffix, do_strip, json_version):
         return None, "최상위가 객체(dict)가 아니다"
     if not isinstance(obj.get("name"), str) or not obj["name"].strip():
         return None, "name 이 비어 있지 않은 문자열이 아니다"
+    if expected_target is not None and sanitised_name(obj["name"]) != sanitised_name(expected_target):
+        return None, (
+            "JSON 내부 name=%r 이 요청 타깃 %r 과 일치하지 않는다"
+            % (sanitised_name(obj["name"]), sanitised_name(expected_target))
+        )
     if not obj.get("sequences"):
         return None, "sequences 가 비어 있다 (AF3 가 거부한다)"
 
@@ -697,6 +836,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     g.add_argument("--grade", default=None, help="이 등급만 (쉼표로 여러 개. 예: A_높음,B_신뢰)")
     g.add_argument("--condition", default=None, help="이 조건(라벨) 행만 (여러 조건을 함께 집계했을 때)")
+    g.add_argument(
+        "--tie-policy",
+        choices=("include-all", "error"),
+        default="include-all",
+        help="상위 N 경계 동점 처리: 전부 포함(기본) 또는 오류",
+    )
 
     g = p.add_argument_group("원본 입력 찾기")
     g.add_argument(
@@ -771,16 +916,20 @@ def main(argv=None) -> int:
     scored_all = []
     if args.csv:
         rows = read_collect_csv(Path(args.csv))
-        picked, values, scored_all = select_rows(
-            rows,
-            by=args.by,
-            top=None if args.take_all else args.top,
-            minimum=args.minimum,
-            grades=args.grade,
-            condition=args.condition,
-            quiet=args.quiet,
-            take_all=args.take_all,
-        )
+        try:
+            picked, values, scored_all = select_rows(
+                rows,
+                by=args.by,
+                top=None if args.take_all else args.top,
+                minimum=args.minimum,
+                grades=args.grade,
+                condition=args.condition,
+                quiet=args.quiet,
+                take_all=args.take_all,
+                tie_policy=args.tie_policy,
+            )
+        except ValueError as exc:
+            die(str(exc))
         targets = [(r[COL_TARGET], r.get(COL_PATH) or None, v) for r, v in zip(picked, values)]
     else:
         names = read_name_list(Path(args.name_list))
@@ -795,12 +944,20 @@ def main(argv=None) -> int:
     plan, skipped = [], []
     for target, hint, value in targets:
         data_p = None
-        if args.source in ("auto", "data"):
-            data_p = find_data_json(target, out_root, hint)
+        try:
+            if args.source in ("auto", "data"):
+                data_p = find_data_json(target, out_root, hint)
+        except ValueError as exc:
+            skipped.append((target, str(exc)))
+            continue
         input_p = None
-        if args.source in ("auto", "input") and (data_p is None or args.source == "input"):
-            if input_dir is not None:
-                input_p = find_input_json(target, input_dir)
+        try:
+            if args.source in ("auto", "input") and (data_p is None or args.source == "input"):
+                if input_dir is not None:
+                    input_p = find_input_json(target, input_dir)
+        except ValueError as exc:
+            skipped.append((target, str(exc)))
+            continue
 
         if args.source == "data":
             src, kind = data_p, "data"
@@ -836,6 +993,7 @@ def main(argv=None) -> int:
             name_suffix=args.name_suffix,
             do_strip=args.strip_msa,
             json_version=args.json_version,
+            expected_target=target,
         )
         if built is None:
             skipped.append((target, err))
@@ -896,6 +1054,11 @@ def main(argv=None) -> int:
             print("  선정 구간: %s = %.4g ~ %.4g (컷오프 %.4g)" % (args.by, min(vals), max(vals), min(vals)))
         elif vals:
             print("  %s 범위: %.4g ~ %.4g" % (args.by, min(vals), max(vals)))
+        if args.top is not None:
+            print(
+                "  상위 경계 동점 정책: %s (요청 N=%d, 실현 N=%d)"
+                % (args.tie_policy, args.top, len(targets))
+            )
     print("  원본: _data.json %d건, 원본 입력 JSON %d건" % (n_data, n_input))
     if args.strip_msa:
         print("  --strip-msa: MSA/템플릿을 지웠다. 2단계에서 MSA 를 다시 검색한다 (--mode full).")
@@ -977,6 +1140,9 @@ def main(argv=None) -> int:
                 "2단계_출력폴더이름",
                 "MSA문자수",
                 "modelSeeds",
+                "상위동점정책",
+                "요청N",
+                "실현N",
             ]
         )
         for rank, item in enumerate(plan, 1):
@@ -993,6 +1159,9 @@ def main(argv=None) -> int:
                     item["output_name"],
                     item["msa_chars"],
                     ",".join(str(s) for s in seeds),
+                    args.tie_policy if args.csv and args.top is not None else "",
+                    args.top if args.csv and args.top is not None else "",
+                    len(targets) if args.csv and args.top is not None else "",
                 ]]
             )
 

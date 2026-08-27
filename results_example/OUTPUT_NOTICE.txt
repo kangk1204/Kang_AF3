@@ -1,4 +1,15 @@
-이 폴더의 파일은 AlphaFold 3 로 만든 결과물이다.
-AlphaFold 3 Output Terms of Use 가 적용되며, 이 저장소가 원본 출력에 가한
-수정 사항은 최상위 OUTPUT_NOTICE.md 에 적혀 있다.
-약관 원문: https://github.com/google-deepmind/alphafold3/blob/main/OUTPUT_TERMS_OF_USE.md
+이 폴더의 CSV는 AF3 confidence-derived 집계, 실행시간·자원 측정, 그리고 산술
+projection을 포함한다. confidence-derived 값에는 AlphaFold 3 Output Terms of Use가
+적용되며 계산된 평균·등급·경고·비교·projection은 AF3 원출력이 아니라 이 저장소의
+수정/파생 표현이다. ARTIFACT_MANIFEST.json과 최상위 OUTPUT_NOTICE.md에 종류별
+source/generator/status를 기록한다.
+
+By using this information, you agree to AlphaFold 3 Output Terms of Use found at
+https://github.com/google-deepmind/alphafold3/blob/main/OUTPUT_TERMS_OF_USE.md.
+
+동봉 약관/필수 고지: ../OUTPUT_TERMS_OF_USE.md,
+../LEGALLY_BINDING_TERMS_OF_USE.txt
+
+Required citation: Abramson J, et al. Accurate structure prediction of
+biomolecular interactions with AlphaFold 3. Nature. 2024.
+doi:10.1038/s41586-024-07487-w.

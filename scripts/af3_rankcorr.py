@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import csv
 import math
+import random
 import statistics
 import sys
 from pathlib import Path
@@ -198,27 +199,110 @@ def _betainc_half(a, b, x):
     return front * (f - 1.0)
 
 
-def topn_overlap(ref_pairs, test_pairs, n):
-    """기준 상위 n건 중 경량 상위 n건에 들어 있는 비율 (recall)."""
-    ref_top = [t for t, _ in ref_pairs[:n]]
-    test_top = {t for t, _ in test_pairs[:n]}
+def top_with_boundary_ties(pairs, n, tie_policy="include-all"):
+    """Return top-N under the repository-wide explicit boundary-tie policy."""
+    if n <= 0:
+        raise ValueError("N must be positive")
+    if n >= len(pairs):
+        return list(pairs)
+    boundary = pairs[n - 1][1]
+    if pairs[n][1] != boundary:
+        return list(pairs[:n])
+    if tie_policy == "error":
+        raise ValueError("top-%d boundary score %r is tied" % (n, boundary))
+    end = n
+    while end < len(pairs) and pairs[end][1] == boundary:
+        end += 1
+    return list(pairs[:end])
+
+
+def topn_overlap(ref_pairs, test_pairs, n, tie_policy="include-all"):
+    """Recall of tie-policy-defined reference top-N in test top-N."""
+    ref_top = [t for t, _ in top_with_boundary_ties(ref_pairs, n, tie_policy)]
+    test_top = {t for t, _ in top_with_boundary_ties(test_pairs, n, tie_policy)}
     if not ref_top:
         return None, 0, 0
     hit = sum(1 for t in ref_top if t in test_top)
     return hit / len(ref_top), hit, len(ref_top)
 
 
-def safety_factor(ref_pairs, test_pairs, n):
+def safety_factor(ref_pairs, test_pairs, n, tie_policy="include-all"):
     """기준 상위 n건을 전부 잡으려면 경량 상위 몇 건까지 봐야 하는가."""
-    ref_top = {t for t, _ in ref_pairs[:n]}
+    ref_selected = top_with_boundary_ties(ref_pairs, n, tie_policy)
+    ref_top = {t for t, _ in ref_selected}
     if not ref_top:
         return None, None
-    pos = {t: i + 1 for i, (t, _) in enumerate(test_pairs)}
-    depths = [pos[t] for t in ref_top if t in pos]
-    if len(depths) != len(ref_top):
+    scores = {t: score for t, score in test_pairs}
+    if any(t not in scores for t in ref_top):
         return None, None
-    need = max(depths)
+    threshold = min(scores[t] for t in ref_top)
+    need = sum(1 for _t, score in test_pairs if score >= threshold)
+    # Keep the historical definition relative to the requested N.  The realized
+    # reference N is reported separately when include-all expands a boundary tie.
     return need, need / float(n)
+
+
+def percentile_interval(values, alpha=0.05):
+    """Deterministic linear-interpolation percentile interval."""
+    if not values:
+        return None, None
+    q = quantiles(values, (alpha / 2.0, 1.0 - alpha / 2.0))
+    return q[alpha / 2.0], q[1.0 - alpha / 2.0]
+
+
+def bootstrap_intervals(pairs, top_ns, tie_policy, replicates, seed):
+    """Target-level nonparametric bootstrap CIs for screening statistics.
+
+    Resampling units are targets.  Duplicate draws receive synthetic identifiers so
+    a target drawn twice contributes twice, as required by an ordinary pairs
+    bootstrap, without collapsing in set operations.
+    """
+    if replicates <= 0:
+        return {"rho": (None, None), "tau": (None, None), "tops": {}}
+    rng = random.Random(seed)
+    n = len(pairs)
+    rho_values = []
+    tau_values = []
+    top_values = {nn: {"recall": [], "depth": []} for nn in top_ns if nn <= n}
+    for _ in range(replicates):
+        sampled = [pairs[rng.randrange(n)] for _j in range(n)]
+        xs = [row[1] for row in sampled]
+        ys = [row[2] for row in sampled]
+        rho = spearman(xs, ys)
+        if rho is not None:
+            rho_values.append(rho)
+        tau = kendall_tau_b(xs, ys)
+        if tau is not None:
+            tau_values.append(tau)
+        ref_sorted = sorted(
+            (("%d:%s" % (i, row[0]), row[1]) for i, row in enumerate(sampled)),
+            key=lambda value: (-value[1], value[0]),
+        )
+        test_sorted = sorted(
+            (("%d:%s" % (i, row[0]), row[2]) for i, row in enumerate(sampled)),
+            key=lambda value: (-value[1], value[0]),
+        )
+        for nn, values in top_values.items():
+            try:
+                recall, _hit, _total = topn_overlap(ref_sorted, test_sorted, nn, tie_policy)
+                depth, _factor = safety_factor(ref_sorted, test_sorted, nn, tie_policy)
+            except ValueError:
+                continue
+            if recall is not None:
+                values["recall"].append(recall)
+            if depth is not None:
+                values["depth"].append(depth)
+    return {
+        "rho": percentile_interval(rho_values),
+        "tau": percentile_interval(tau_values),
+        "tops": {
+            nn: {
+                "recall": percentile_interval(values["recall"]),
+                "depth": percentile_interval(values["depth"]),
+            }
+            for nn, values in top_values.items()
+        },
+    }
 
 
 def quantiles(values, qs=(0.5, 0.9, 1.0)):
@@ -279,6 +363,18 @@ def as_float(v):
     except ValueError:
         return None
     return value if math.isfinite(value) else None
+
+
+def structure_kind(row):
+    """Classify the molecular unit from chain count, never from missing ipTM."""
+    raw_count = row.get("체인수", row.get("n_chain"))
+    count = as_float(raw_count)
+    if count is not None and count.is_integer() and count >= 1:
+        return "monomer" if int(count) == 1 else "complex"
+    # Compatibility with older complex-only exports that did not carry 체인수.
+    if as_float(row.get("ipTM")) is not None:
+        return "complex"
+    return "unknown"
 
 
 def strip_suffix(name, suffix):
@@ -376,6 +472,13 @@ def build_parser():
         "--all-metrics", action="store_true", help="쓸 수 있는 지표를 전부 계산한다"
     )
     g.add_argument(
+        "--population",
+        choices=("complete-case", "metric-specific"),
+        default="complete-case",
+        help="--all-metrics 모집단: 모든 해당 지표가 있는 동일 타깃(기본) 또는 "
+             "지표마다 다른 타깃(명시적 탐색 분석)",
+    )
+    g.add_argument(
         "--top-n", default="5,10,20,50", help="겹침률을 잴 N 값들 (쉼표. 기본 5,10,20,50)"
     )
     g.add_argument(
@@ -388,6 +491,27 @@ def build_parser():
         action="store_true",
         help="양쪽 타깃 집합이 달라도 공통 교집합만 분석한다 (기본은 불일치 거부)",
     )
+    g.add_argument(
+        "--structure-policy", choices=("stratify", "error", "pool"), default="stratify",
+        help="단량체/복합체 혼합 처리: 별도 층 분석(기본), 혼합 오류, 또는 명시적 pooled 탐색",
+    )
+    g.add_argument(
+        "--allow-structure-mismatch", action="store_true",
+        help="같은 타깃이 한 조건에서는 단량체, 다른 조건에서는 복합체이면 제외하고 계속 "
+             "(기본은 설계/집계 오류로 거부)",
+    )
+    g.add_argument(
+        "--tie-policy", choices=("include-all", "error"), default="include-all",
+        help="top-N 경계 동점 처리: 동점 전부 포함(기본) 또는 해당 분석 오류",
+    )
+    g.add_argument(
+        "--bootstrap", type=int, default=2000,
+        help="target bootstrap 반복 수 (기본 2000, 0이면 CI 생략)",
+    )
+    g.add_argument(
+        "--bootstrap-seed", type=int, default=20260827,
+        help="재현 가능한 bootstrap 난수 seed (기본 20260827)",
+    )
     g.add_argument("-o", "--out", default=None, help="결과를 이 CSV 로 저장")
     g.add_argument("--pairs-out", default=None, help="타깃별 순위/값 대응표를 이 CSV 로 저장")
     g.add_argument("--selftest", action="store_true", help="알려진 값으로 구현을 검산하고 종료")
@@ -399,6 +523,9 @@ def main(argv=None):
 
     if args.selftest:
         return selftest()
+
+    if args.bootstrap < 0:
+        die("--bootstrap 은 0 이상이어야 한다.")
 
     if args.csv:
         rows = read_collect_csv(Path(args.csv))
@@ -471,133 +598,240 @@ def main(argv=None):
             "30~50건 규모를 권한다." % len(common)
         )
 
+    mismatch = [
+        target for target in common
+        if structure_kind(ref_idx[target]) != structure_kind(test_idx[target])
+    ]
+    if mismatch:
+        message = (
+            "단량체/복합체 유형이 조건 사이에서 바뀐 타깃 %d건: %s"
+            % (len(mismatch), ", ".join(mismatch[:8]))
+        )
+        if not args.allow_structure_mismatch:
+            die(message + ". 입력/집계를 고치거나 --allow-structure-mismatch 로 명시적으로 제외하라.")
+        log("경고: " + message + " (분석에서 제외)")
+        common = [target for target in common if target not in set(mismatch)]
+
+    unknown = [
+        target
+        for target in common
+        if "unknown" in {structure_kind(ref_idx[target]), structure_kind(test_idx[target])}
+    ]
+    if unknown:
+        die(
+            "구조 유형을 판정할 수 없는 타깃 %d건: %s. af3_collect.py의 체인수 열이 필요하다."
+            % (len(unknown), ", ".join(unknown[:8]))
+        )
+
+    kinds = sorted({structure_kind(ref_idx[target]) for target in common})
+    if len(kinds) > 1 and args.structure_policy == "error":
+        die("단량체와 복합체가 섞여 있다. 기본 --structure-policy stratify 또는 명시적 pool을 써라.")
+    if args.structure_policy == "pool" or len(kinds) <= 1:
+        strata = [(kinds[0] if len(kinds) == 1 else "pooled", common)]
+    else:
+        strata = [
+            (kind, [target for target in common if structure_kind(ref_idx[target]) == kind])
+            for kind in kinds
+        ]
+    print(
+        "구조 모집단: %s"
+        % ", ".join("%s %d건" % (label, len(targets)) for label, targets in strata)
+    )
+
     results = []
     pairs_dump = []
-    for metric in metrics:
-        pairs = []
-        for t in common:
-            a = as_float(ref_idx[t].get(metric))
-            b = as_float(test_idx[t].get(metric))
-            if a is None or b is None:
-                continue
-            pairs.append((t, a, b))
-        if len(pairs) < 3:
-            if not args.all_metrics:
-                die("'%s' 값이 양쪽에 다 있는 타깃이 %d건뿐이다." % (metric, len(pairs)))
-            log("건너뜀: '%s' 값이 양쪽에 다 있는 타깃이 %d건뿐이다." % (metric, len(pairs)))
-            continue
+    analysis_index = 0
+    for stratum, stratum_names in strata:
+        stratum_metrics = list(metrics)
+        if args.all_metrics and stratum == "monomer" and "ipTM" in stratum_metrics:
+            stratum_metrics.remove("ipTM")
+            log("알림: monomer 층에는 정의되지 않는 ipTM을 --all-metrics complete-case 집합에서 제외했다.")
 
-        names = [p[0] for p in pairs]
-        xs = [p[1] for p in pairs]  # 기준
-        ys = [p[2] for p in pairs]  # 비교
-        n = len(pairs)
-
-        rho = spearman(xs, ys)
-        tau = kendall_tau_b(xs, ys)
-        pval = spearman_p_approx(rho, n)
-        r_lin = pearson(xs, ys)
-
-        ref_sorted = sorted(zip(names, xs), key=lambda t: (-t[1], t[0]))
-        test_sorted = sorted(zip(names, ys), key=lambda t: (-t[1], t[0]))
-
-        diffs = [y - x for x, y in zip(xs, ys)]
-        absd = [abs(d) for d in diffs]
-        q = quantiles(absd)
-
-        print()
-        print("=" * 68)
-        print("지표: %s   (기준 %s <- 비교 %s, 공통 %d건)" % (metric, ref_label, test_label, n))
-        print("=" * 68)
-        print(
-            "  Spearman rho  %s   %s"
-            % (
-                "%.4f" % rho if rho is not None else "계산불가",
-                ("(p ~ %.3g, t근사)" % pval) if pval is not None else "",
-            )
-        )
-        print("  Kendall tau_b %s" % ("%.4f" % tau if tau is not None else "계산불가"))
-        print("  Pearson r     %s  (값 자체의 선형 상관. 순위와는 다르다)"
-              % ("%.4f" % r_lin if r_lin is not None else "계산불가"))
-        print(
-            "  값 차이 (비교 - 기준): 중앙값 %+.4f, 절대차 중앙값 %.4f, p90 %.4f, 최대 %.4f"
-            % (
-                statistics.median(diffs),
-                q.get(0.5, float("nan")),
-                q.get(0.9, float("nan")),
-                q.get(1.0, float("nan")),
-            )
-        )
-        print()
-        print("  상위 N 겹침 - 2단계 전략에서 실제로 중요한 숫자")
-        print("    %-6s %-14s %-10s %s" % ("N", "겹침률(recall)", "놓친건수", "안전배수(기준N을 다 잡는 경량깊이)"))
-        row_tops = {}
-        for nn in top_ns:
-            if nn > n:
-                continue
-            tied_boundary = any(
-                nn < len(values) and values[nn - 1][1] == values[nn][1]
-                for values in (ref_sorted, test_sorted)
-            )
-            if tied_boundary:
-                print(
-                    "    %-6d %-14s %-10s %s"
-                    % (nn, "판정불가(동점)", "-", "경계 동점으로 순위 집합이 유일하지 않음")
+        shared_names = None
+        if args.all_metrics and args.population == "complete-case":
+            shared_names = [
+                target for target in stratum_names
+                if all(
+                    as_float(ref_idx[target].get(metric)) is not None
+                    and as_float(test_idx[target].get(metric)) is not None
+                    for metric in stratum_metrics
                 )
-                row_tops[nn] = (None, None, None, None)
+            ]
+            log(
+                "%s 층 --all-metrics 공통 complete-case 모집단: %d/%d건"
+                % (stratum, len(shared_names), len(stratum_names))
+            )
+
+        for metric in stratum_metrics:
+            population_names = shared_names if shared_names is not None else stratum_names
+            pairs = []
+            for t in population_names:
+                a = as_float(ref_idx[t].get(metric))
+                b = as_float(test_idx[t].get(metric))
+                if a is None or b is None:
+                    continue
+                pairs.append((t, a, b))
+            if len(pairs) < 3:
+                if not args.all_metrics and len(strata) == 1:
+                    die("'%s' 값이 양쪽에 다 있는 타깃이 %d건뿐이다." % (metric, len(pairs)))
+                log("건너뜀: %s/'%s' 분석 가능 타깃이 %d건뿐이다." % (stratum, metric, len(pairs)))
                 continue
-            rec, hit, tot = topn_overlap(ref_sorted, test_sorted, nn)
-            need, fac = safety_factor(ref_sorted, test_sorted, nn)
-            missed = [t for t, _ in ref_sorted[:nn] if t not in {x for x, _ in test_sorted[:nn]}]
+
+            names = [p[0] for p in pairs]
+            xs = [p[1] for p in pairs]  # 기준
+            ys = [p[2] for p in pairs]  # 비교
+            n = len(pairs)
+
+            rho = spearman(xs, ys)
+            tau = kendall_tau_b(xs, ys)
+            pval = spearman_p_approx(rho, n)
+            r_lin = pearson(xs, ys)
+
+            ref_sorted = sorted(zip(names, xs), key=lambda t: (-t[1], t[0]))
+            test_sorted = sorted(zip(names, ys), key=lambda t: (-t[1], t[0]))
+            analysis_index += 1
+            ci = bootstrap_intervals(
+                pairs, top_ns, args.tie_policy, args.bootstrap,
+                args.bootstrap_seed + analysis_index * 1000003,
+            )
+
+            diffs = [y - x for x, y in zip(xs, ys)]
+            absd = [abs(d) for d in diffs]
+            q = quantiles(absd)
+
+            print()
+            print("=" * 76)
             print(
-                "    %-6d %-14s %-10s %s"
+                "지표: %s / 구조층: %s (기준 %s <- 비교 %s, 공통 %d건)"
+                % (metric, stratum, ref_label, test_label, n)
+            )
+            print("=" * 76)
+            rho_ci = ci["rho"]
+            tau_ci = ci["tau"]
+            print(
+                "  Spearman rho  %s   %s%s"
                 % (
-                    nn,
-                    "%.3f (%d/%d)" % (rec, hit, tot),
-                    "%d" % len(missed),
-                    "%.2f배 (상위 %d건)" % (fac, need) if fac else "계산불가",
+                    "%.4f" % rho if rho is not None else "계산불가",
+                    ("(p ~ %.3g, t근사)" % pval) if pval is not None else "",
+                    (", target-bootstrap 95%% CI %.4f~%.4f" % rho_ci
+                     if rho_ci[0] is not None else ""),
                 )
             )
-            if missed:
-                print("           놓친 타깃: %s" % ", ".join(missed[:6]))
-            row_tops[nn] = (rec, len(missed), need, fac)
+            print(
+                "  Kendall tau_b %s%s"
+                % (
+                    "%.4f" % tau if tau is not None else "계산불가",
+                    (", target-bootstrap 95%% CI %.4f~%.4f" % tau_ci
+                     if tau_ci[0] is not None else ""),
+                )
+            )
+            print("  Pearson r     %s  (값 자체의 선형 상관. 순위와는 다르다)"
+                  % ("%.4f" % r_lin if r_lin is not None else "계산불가"))
+            print(
+                "  값 차이 (비교 - 기준): 중앙값 %+.4f, 절대차 중앙값 %.4f, p90 %.4f, 최대 %.4f"
+                % (
+                    statistics.median(diffs), q.get(0.5, float("nan")),
+                    q.get(0.9, float("nan")), q.get(1.0, float("nan")),
+                )
+            )
+            print()
+            print("  상위 N 겹침 (경계 동점 정책=%s)" % args.tie_policy)
+            print("    %-6s %-12s %-12s %-18s %s" % ("요청N", "기준 실현N", "비교 실현N", "겹침률(recall)", "안전깊이"))
+            row_tops = {}
+            for nn in top_ns:
+                if nn > n:
+                    continue
+                try:
+                    ref_top = top_with_boundary_ties(ref_sorted, nn, args.tie_policy)
+                    test_top = top_with_boundary_ties(test_sorted, nn, args.tie_policy)
+                    rec, hit, tot = topn_overlap(ref_sorted, test_sorted, nn, args.tie_policy)
+                    need, fac = safety_factor(ref_sorted, test_sorted, nn, args.tie_policy)
+                except ValueError as exc:
+                    die("%s/%s: %s" % (stratum, metric, exc))
+                missed = [t for t, _ in ref_top if t not in {x for x, _ in test_top}]
+                top_ci = ci["tops"].get(nn, {})
+                recall_ci = top_ci.get("recall", (None, None))
+                depth_ci = top_ci.get("depth", (None, None))
+                print(
+                    "    %-6d %-12d %-12d %-18s %s"
+                    % (
+                        nn, len(ref_top), len(test_top),
+                        "%.3f (%d/%d)" % (rec, hit, tot),
+                        "%d (%.2f배)" % (need, fac) if fac is not None else "계산불가",
+                    )
+                )
+                if recall_ci[0] is not None:
+                    print(
+                        "           bootstrap 95%% CI: recall %.3f~%.3f, 안전깊이 %.1f~%.1f"
+                        % (recall_ci[0], recall_ci[1], depth_ci[0], depth_ci[1])
+                    )
+                if missed:
+                    print("           놓친 타깃: %s" % ", ".join(missed[:6]))
+                row_tops[nn] = {
+                    "recall": rec, "missed": len(missed), "need": need, "factor": fac,
+                    "ref_realized": len(ref_top), "test_realized": len(test_top),
+                    "recall_ci": recall_ci, "depth_ci": depth_ci,
+                }
 
-        results.append(
-            {
+            result = {
+                "구조층": stratum,
+                "모집단정책": args.population if args.all_metrics else "single-metric",
+                "경계동점정책": args.tie_policy,
+                "bootstrap반복": args.bootstrap,
+                "bootstrapSeed": args.bootstrap_seed,
                 "지표": metric,
                 "공통건수": n,
                 "기준조건": ref_label,
                 "비교조건": test_label,
                 "Spearman_rho": None if rho is None else round(rho, 4),
+                "Spearman_rho_CI95하한": None if rho_ci[0] is None else round(rho_ci[0], 4),
+                "Spearman_rho_CI95상한": None if rho_ci[1] is None else round(rho_ci[1], 4),
                 "Kendall_tau_b": None if tau is None else round(tau, 4),
+                "Kendall_tau_b_CI95하한": None if tau_ci[0] is None else round(tau_ci[0], 4),
+                "Kendall_tau_b_CI95상한": None if tau_ci[1] is None else round(tau_ci[1], 4),
                 "Spearman_p_t근사": None if pval is None else float("%.4g" % pval),
                 "Pearson_r": None if r_lin is None else round(r_lin, 4),
                 "값차_중앙값": round(statistics.median(diffs), 4),
                 "절대값차_중앙값": round(q.get(0.5, 0.0), 4),
                 "절대값차_p90": round(q.get(0.9, 0.0), 4),
                 "절대값차_최대": round(q.get(1.0, 0.0), 4),
-                **{
-                    "top%d_겹침률" % nn: (None if v[0] is None else round(v[0], 4))
-                    for nn, v in row_tops.items()
-                },
-                **{"top%d_안전배수" % nn: (None if v[3] is None else round(v[3], 3)) for nn, v in row_tops.items()},
             }
-        )
+            for nn, value in row_tops.items():
+                result.update({
+                    "top%d_요청N" % nn: nn,
+                    "top%d_기준실현N" % nn: value["ref_realized"],
+                    "top%d_비교실현N" % nn: value["test_realized"],
+                    "top%d_겹침률" % nn: round(value["recall"], 4),
+                    "top%d_겹침률_CI95하한" % nn: (
+                        None if value["recall_ci"][0] is None else round(value["recall_ci"][0], 4)
+                    ),
+                    "top%d_겹침률_CI95상한" % nn: (
+                        None if value["recall_ci"][1] is None else round(value["recall_ci"][1], 4)
+                    ),
+                    "top%d_안전깊이" % nn: value["need"],
+                    "top%d_안전깊이_CI95하한" % nn: value["depth_ci"][0],
+                    "top%d_안전깊이_CI95상한" % nn: value["depth_ci"][1],
+                    "top%d_안전배수" % nn: round(value["factor"], 3),
+                })
+            results.append(result)
 
-        ref_pos = {t: i + 1 for i, (t, _) in enumerate(ref_sorted)}
-        test_pos = {t: i + 1 for i, (t, _) in enumerate(test_sorted)}
-        for t, a, b in pairs:
-            pairs_dump.append(
-                {
-                    "지표": metric,
-                    "타깃": t,
-                    "기준값": a,
-                    "비교값": b,
-                    "값차": round(b - a, 4),
-                    "기준순위": ref_pos[t],
-                    "비교순위": test_pos[t],
-                    "순위차": test_pos[t] - ref_pos[t],
-                }
-            )
+            ref_ranks = dict(zip(names, rankdata([-value for value in xs])))
+            test_ranks = dict(zip(names, rankdata([-value for value in ys])))
+            for t, a, b in pairs:
+                pairs_dump.append(
+                    {
+                        "구조층": stratum,
+                        "모집단정책": args.population if args.all_metrics else "single-metric",
+                        "지표": metric,
+                        "타깃": t,
+                        "기준값": a,
+                        "비교값": b,
+                        "값차": round(b - a, 4),
+                        "기준순위": ref_ranks[t],
+                        "비교순위": test_ranks[t],
+                        "순위차": test_ranks[t] - ref_ranks[t],
+                    }
+                )
 
     if not results:
         die("계산할 수 있는 지표가 없다.")
@@ -605,8 +839,8 @@ def main(argv=None):
     print()
     print("-" * 68)
     print("이 숫자로 컷오프를 정하는 방법")
-    print("  1. rho 와 tau_b 가 낮으면(대략 0.8 미만) 경량 설정이 순위를 보존하지 못한다는 뜻이다.")
-    print("     그러면 2단계 전략 자체를 재검토하라. 경량 설정을 덜 경량하게 바꾸는 편이 낫다.")
+    print("  1. rho/tau_b에는 보편적인 합격선이 없다. 목적별 손실 허용도와 bootstrap CI를")
+    print("     사전에 정한 기준과 비교하라. 관측값 하나만으로 순위 보존을 선언하지 말라.")
     print("  2. rho 가 높아도 top-N 겹침률이 낮으면 상위권에서 순위가 섞이는 것이다.")
     print("     2단계에서 중요한 것은 rho 가 아니라 겹침률이다. 겹침률을 우선 보라.")
     print("  3. '안전배수' 가 재실행 규모를 정한다. 최종적으로 상위 K건을 원한다면")

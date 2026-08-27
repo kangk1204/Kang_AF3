@@ -9,10 +9,12 @@
 from __future__ import annotations
 
 import csv
+import hashlib
 import json
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 from harness import (
@@ -23,6 +25,7 @@ from harness import (
     check,
     check_equal,
     check_in,
+    check_not_in,
     load_module,
     regression,
 )
@@ -618,7 +621,8 @@ def test_summary_scatter_uses_the_interface_metric_for_complexes():
                 "계면이 실패한 건을 pTM 으로 그려 좋은 후보처럼 보이게 했다")
 
     # 단량체만 있으면 pTM 이 맞다 (ipTM 이 없다).
-    monomers = [{"name": "vhh", "ptm": 0.9, "iptm": None, "mean_atom_plddt": 92.4}]
+    monomers = [{"name": "vhh", "ptm": 0.9, "iptm": None,
+                 "mean_atom_plddt": 92.4, "n_chain": 1}]
     xs, ys, names, key = mod.scatter_metric(monomers)
     check_equal(key, "ptm", "단량체인데 pTM 을 쓰지 않았다")
     check_equal(xs, [0.9], "단량체의 pTM 을 그리지 않았다")
@@ -653,3 +657,161 @@ def test_scatter_does_not_treat_a_multichain_target_as_a_monomer():
         f"그려진 것={names}",
     )
     check_in("정상 단량체", names, "진짜 단량체까지 빼 버렸다")
+
+
+@regression(
+    item="reporting",
+    prevents="ipTM null을 단량체로 단정하거나 다중 사슬/사슬 수 불명 omission을 조용히 숨기는 버그.",
+)
+def test_missing_iptm_uses_one_tri_state_contract_everywhere():
+    vis = load_module("af3_visualize.py")
+    rows = [
+        {"name": "single", "ptm": 0.8, "iptm": None,
+         "mean_atom_plddt": 90.0, "n_chain": 1},
+        {"name": "multi", "ptm": 0.9, "iptm": None,
+         "mean_atom_plddt": 91.0, "n_chain": 2},
+        {"name": "unknown", "ptm": 0.7, "iptm": None,
+         "mean_atom_plddt": 89.0, "n_chain": None},
+    ]
+    xs, _ys, names, key, omitted = vis.scatter_metric_details(rows)
+    check_equal(xs, [0.8], "known single만 pTM으로 그려야 한다")
+    check_equal(names, ["single"], "multi/unknown missing-ipTM을 산점도에서 제외하지 않았다")
+    check_equal(key, "ptm", "known single의 축은 pTM이어야 한다")
+    check_equal(
+        omitted,
+        [("multi", "다중 사슬; ipTM 누락"), ("unknown", "사슬 수 불명; ipTM 누락")],
+        "산점도 omission 이유가 tri-state 계약과 다르다",
+    )
+    check_equal(vis.infer_chain_count({}), None, "근거 없는 사슬 수를 0/1로 만들었다")
+    check_equal(vis.infer_chain_count({"chain_pair_iptm": [[1, 0], [0, 1]]}), 2,
+                "chain-pair 행렬에서 known-multi를 복원하지 못했다")
+
+    viewer = load_module("af3_view3d.py")
+    base = {"summary": {"iptm": None}, "chains": [], "residues": [],
+            "mean_plddt": None, "min_plddt": None, "n_sample": 0,
+            "sample_sd": None, "n_atom": 0}
+    single = dict(base, chains=["A"])
+    multi = dict(base, chains=["A", "B"])
+    unknown = dict(base)
+    check_equal(viewer.iptm_display(single), ("해당 없음", "single"), "single 상태 오류")
+    check_equal(viewer.iptm_display(multi), ("누락", "multi_missing"), "multi 상태 오류")
+    check_equal(viewer.iptm_display(unknown), ("불명", "unknown"), "unknown 상태 오류")
+    check_in("계면을 평가할 수 없다", str(viewer.metric_rows(multi)),
+             "개별 viewer가 다중 사슬 missing-ipTM 이유를 숨긴다")
+
+
+@regression(
+    item="reporting",
+    prevents="AF3-derived figure/viewer를 생성하면서 Output Terms 사본과 정확한 법적 고지를 떼어내는 버그.",
+)
+def test_output_terms_are_pinned_exact_and_propagated_by_generators():
+    required = ["OUTPUT_NOTICE.md", "OUTPUT_TERMS_OF_USE.md",
+                "LEGALLY_BINDING_TERMS_OF_USE.txt"]
+    terms = (REPO_ROOT / "OUTPUT_TERMS_OF_USE.md").read_text(encoding="utf-8")
+    check_in("Last Modified: 2024-11-09", terms, "pinned Output Terms 판본이 없다")
+    legal = (REPO_ROOT / "LEGALLY_BINDING_TERMS_OF_USE.txt").read_text(encoding="utf-8")
+    exact = (
+        "By using this information, you agree to AlphaFold 3 Output Terms of\n"
+        "Use found at\n"
+        "https://github.com/google-deepmind/alphafold3/blob/main/OUTPUT_TERMS_OF_USE.md."
+    )
+    check_in(exact, legal, "약관 5항의 exact legally-binding notice가 없다")
+    check_in("Abramson J", (REPO_ROOT / "OUTPUT_NOTICE.md").read_text(encoding="utf-8"),
+             "필수 AF3 논문 인용이 없다")
+    check((REPO_ROOT / "examples" / "OUTPUT_NOTICE.txt").is_file(),
+          "examples sidecar notice가 없다")
+    check_in("AlphaFold 3 Output Terms 적용",
+             (REPO_ROOT / "examples" / "view3d_example.html").read_text(encoding="utf-8"),
+             "배포 예시 viewer 내부에 conspicuous notice가 없다")
+
+    for script in ("af3_visualize.py", "af3_view3d.py"):
+        mod = load_module(script)
+        with tempfile.TemporaryDirectory(prefix="af3_terms_") as directory:
+            mod.propagate_output_terms(directory)
+            for name in required:
+                generated = Path(directory) / name
+                check(generated.is_file(), f"{script}가 {name}을 전달하지 않았다")
+                check_equal(generated.read_bytes(), (REPO_ROOT / name).read_bytes(),
+                            f"{script}가 {name} 내용을 바꿨다")
+
+
+@regression(
+    item="reporting",
+    prevents="tracked figure의 source/generator/hash를 잃거나 원자료 없는 역사적 artifact를 재현 가능하다고 꾸미는 버그.",
+)
+def test_artifact_manifest_closes_lineage_without_fabricating_sources():
+    manifest_path = REPO_ROOT / "ARTIFACT_MANIFEST.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    records = {item["path"]: item for item in manifest["artifacts"]}
+    tracked = {str(path.relative_to(REPO_ROOT)) for path in (REPO_ROOT / "figures").glob("*.png")}
+    check_equal(set(records) & tracked, tracked, "manifest에서 tracked PNG가 빠졌다")
+    for path in sorted(tracked):
+        record = records[path]
+        actual = hashlib.sha256((REPO_ROOT / path).read_bytes()).hexdigest()
+        check_equal(record["sha256"], actual, f"artifact hash가 stale이다: {path}")
+        if record["status"] == "reproducible_from_tracked_sources":
+            check(record["sources"], f"재현 가능 artifact에 source가 없다: {path}")
+            for source in record["sources"]:
+                source_path = REPO_ROOT / source["path"]
+                check(source_path.is_file(), f"manifest source가 없다: {source['path']}")
+                check_equal(source["sha256"], hashlib.sha256(source_path.read_bytes()).hexdigest(),
+                            f"source hash가 stale이다: {source['path']}")
+        else:
+            check_equal(record["status"], "historical_not_reproducible",
+                        f"알 수 없는 artifact status: {path}")
+            check(record.get("reason"), f"역사적 artifact의 비재현 이유가 없다: {path}")
+    check_equal(records["figures/view3d_screenshot.png"]["sources"], [],
+                "원 browser capture가 없는 screenshot에 source를 꾸며 넣었다")
+    builder = (REPO_ROOT / "scripts" / "build_reference_artifacts.py").read_text(encoding="utf-8")
+    check_in("Peak VRAM (MiB)", builder, "baseline builder가 MiB 단위를 고정하지 않았다")
+    check_not_in('set_ylabel("Peak VRAM (GB)")', builder, "baseline builder에 GB 혼용이 남았다")
+    checked = subprocess.run(
+        [sys.executable, str(REPO_ROOT / "scripts" / "build_reference_artifacts.py"), "--check"],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    check_equal(checked.returncode, 0, "artifact --check가 실패했다", checked.stdout + checked.stderr)
+
+
+@regression(
+    item="reporting",
+    prevents="문서가 selection-biased 소표본을 grade 안정성/후보 필터 validation으로 승격하거나 stale path를 유지하는 버그.",
+)
+def test_scientific_claim_gates_and_document_paths_are_explicit():
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    guide = (REPO_ROOT / "docs" / "researcher_guide.md").read_text(encoding="utf-8")
+    report = (REPO_ROOT / "docs" / "benchmark_report.md").read_text(encoding="utf-8")
+    combined = readme + "\n" + guide
+    check_not_in("거르는 용도로는 그래서 쓸 만하다", combined,
+                 "selection-biased 표본을 filtering validation으로 주장한다")
+    check_not_in("거르는 용도로 overlay 를 쓰는 근거", combined,
+                 "grade 비전환을 filtering 근거로 주장한다")
+    for phrase in ("exploratory prioritization", "target(입력 분자 조합)",
+                   "binder recovery", "Kd/IC50", "native interface accuracy"):
+        check_in(phrase, readme, f"estimand/claim boundary가 빠졌다: {phrase}")
+    check_in("calibration되지 않은 local heuristic", readme,
+             "atom-weighted grade의 local heuristic 고지가 없다")
+    check_in("within-run diffusion-sample", readme,
+             "diffusion range를 재현성 uncertainty와 구분하지 않았다")
+    check_not_in("`af3_결과요약.csv`", report, "존재하지 않는 historical path가 남았다")
+    check_in("`results_example/af3_summary.csv`", report, "canonical summary path가 없다")
+
+
+@regression(
+    item="docs",
+    prevents="수동 model 설치가 checksum 검증 전에 기존 af3.bin을 덮어쓰는 버그.",
+)
+def test_manual_model_download_verifies_staging_before_atomic_publish():
+    readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+    start = readme.index("### 3-3. 모델 가중치 확보")
+    end = readme.index("### 3-4.", start)
+    section = readme[start:end]
+    check_not_in("zstd -d -f ~/af3_models/af3.bin.zst -o ~/af3_models/af3.bin", section,
+                 "검증 전에 최종 model을 직접 덮는다")
+    check_in("mktemp ~/af3_models/.af3.bin.", section, "same-directory staging이 없다")
+    check_in("sha256sum -c -", section, "staged model SHA-256 검증이 없다")
+    check_in("mv -T --no-clobber", section, "검증 뒤 no-clobber atomic publish가 없다")
+    check(section.index("sha256sum -c -") < section.index("mv -T --no-clobber"),
+          "SHA-256 검증보다 publish가 먼저다")

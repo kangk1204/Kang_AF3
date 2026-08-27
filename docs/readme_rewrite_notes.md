@@ -164,7 +164,7 @@ PyMOL/ChimeraX 를 쓰라고 안내한다. 도구가 완성되면 9-3 을 채우
 |---|---|
 | `summary_confidences.json` 예시값 0.68 / 0.65 (실물은 0.75) | 0건. README 는 예시값을 적지 않고 필드 이름만 적는다 |
 | VRAM 2,942~2,963 MiB 를 "18런" 으로 표기 (실제는 두 파일 합쳐 23런) | "23런" 으로 적었다 |
-| `figures/baseline_gpu5070ti.png` 패널 (c) 의 GB 환산 기준 혼용 (5.3 대 5.2, 16.3 대 15.9) | 그림을 그대로 쓰되 본문에 MiB 원값을 적고 "정확한 값이 필요하면 MiB 를 쓰라" 고 명시했다 |
+| `figures/baseline_gpu5070ti.png`의 GB 환산 기준 혼용 | tracked builder로 MiB 단위만 사용해 재생성했다. source/generator/hash는 `ARTIFACT_MANIFEST.json`에 기록한다 |
 | 130 aa 가 128 버킷이라는 오표기 | 128 에 들어가는 것은 116 aa 이고 130 aa 는 256 이라고 적었다 (실제 6종 측정값 기준) |
 | 구 스크립트명 `run_af3_batch.py` | 0건. 전부 `run_af3_batch_improved.py` 다 |
 | 근거 없는 허용치 0.0105 | 0건 |

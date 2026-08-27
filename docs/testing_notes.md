@@ -193,7 +193,7 @@ python3 tests/verify_tests_catch_bugs.py
 | 집계 결과가 없어도 0 을 돌려준다 | `test_empty_collection_exits_nonzero` |
 | 시각화에서 숨은/관리 폴더 제외를 없앤다 | `test_managed_dirs_are_excluded_from_visualization` |
 | 타임스탬프 접미사 결과 폴더 탐색을 없앤다 | `test_batch_finds_timestamp_suffix_result_dirs` |
-| 이미지 능력 검증을 errexit 의존 형태로 되돌린다 | `test_installer_image_capability_gate_fails_on_every_check` |
+| AF3 이미지 버전 검증 실패를 무시한다 | `test_installer_image_capability_gate_fails_on_every_check` |
 | legacy 러너가 단계와 무관하게 가중치를 요구하게 되돌린다 | `test_legacy_preflight_requires_only_what_the_stage_uses` |
 | 뷰어 템플릿을 순차 치환으로 되돌린다 | `test_viewer_page_placeholders_survive_target_names_that_look_like_placeholders` |
 | af3.bin 크기 핀의 우회 수단을 없앤다 | `test_model_size_pin_is_overridable_and_says_so` |
@@ -301,7 +301,10 @@ def test_무엇을_확인하는지():
         workspace.cleanup()
 ```
 
-새 모듈을 만들면 `tests/run_tests.py` 의 `TEST_MODULES` 에 이름을 넣어라.
+새 `test_*.py` 모듈은 자동 발견된다. `@regression` 함수를 가진 모듈은 registry suite로,
+그렇지 않은 모듈은 `if __name__ == "__main__"` entrypoint가 있는 standalone suite로 실행된다.
+두 분류 어디에도 들지 않거나 registered 모듈 안에 undecorated top-level `test_*`가 생기면
+release discovery gate가 실패해야 한다.
 
 ### 지킬 것
 

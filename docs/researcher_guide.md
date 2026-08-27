@@ -131,9 +131,9 @@ python3 scripts/af3_prepare.py --fasta my_vhhs.fasta --partner antigen.fasta -o 
 
 검토 순서는 이렇게 한다.
 
-1. `D_낮음` 과 `C_계면실패` 를 뺀다.
+1. local heuristic 등급은 정렬·표시에만 쓰고, validation 전에는 후보를 제거하지 않는다.
 2. `경고` 에 `충돌` 이 있는 건은 구조를 직접 열어 본다.
-3. `샘플불안` 이 있는 건은 시드를 늘려 다시 돌린다.
+3. `샘플불안`은 within-run diffusion-sample range cutoff일 뿐 재현성 판정이 아니다.
 4. 남은 것을 ipTM(복합체) 또는 pTM(단량체) 내림차순으로 정렬한다.
 5. 상위 수십 건만 3D 뷰어로 눈으로 본다.
 6. 그중에서 실험할 것을 고른다.
@@ -149,12 +149,12 @@ pTM, ipTM, pLDDT)를 같은 표에 함께 실어 두었으니 기준이 마음�
 같은 복합체가 overlay 0.85 / 전체 DB 0.90 으로 낮게 나온 경우도 있었고, 반대로 overlay
 0.59 / 전체 DB 0.20 으로 **높게** 나온 경우도 있었다. 방향이 일정하지 않다.
 
-**`MSA_unpaired깊이` 를 함께 본다.** 이 값이 수백 이상이면 overlay 결과가 전체 DB 와
-거의 같았다. 한 자리에서 열 자리 수준이면 계면 지표를 그대로 믿을 수 없다. 그런 건은
-거르는 데만 쓰고, 남긴 후보는 전체 DB 로 다시 돌린다.
-
-대조한 복합체 7건에서 등급이 뒤집힌 적은 없다. 거르는 용도로 overlay 를 쓰는 근거가
-이것이다. 다만 7건은 규칙을 세우기에 적은 수다.
+**`MSA_unpaired깊이`는 계산 조건을 설명하는 진단값이다.** 현재 조건부 재실행 표본에서
+깊이와 confidence 변화가 함께 관찰됐지만 후보 제거 cutoff로 calibration하지 않았다.
+대조한 복합체 7건에서 등급이 뒤집히지 않았다는 관찰도 표본 선택이 overlay 결과에
+의존하므로 sensitivity, false-negative rate, enrichment 또는 grade stability의 근거가 아니다.
+축소 DB 결과는 exploratory prioritization으로만 남기고 대표 common panel의 held-out
+validation 전에는 이 값만으로 후보를 버리지 않는다.
 
 ## 시간과 용량
 

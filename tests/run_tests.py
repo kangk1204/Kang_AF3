@@ -8,13 +8,14 @@
   python3 tests/run_tests.py --list       # 목록만 보기 (실행하지 않음)
   python3 tests/run_tests.py --strict     # '현재 버전 실패 예상' 항목도 실패로 계산
 
-필요한 것: Python 3.9 이상. 외부 패키지 없음. Docker 없음.
+필요한 것: Python 3.8 이상. 외부 패키지 없음. Docker 없음.
 Docker 는 tests/fake_docker.py 스텁이 가로챈다 (스텁의 근거는 그 파일 주석 참고).
 """
 
 from __future__ import annotations
 
 import argparse
+import ast
 import importlib
 import platform
 import sys
@@ -27,20 +28,29 @@ if str(TESTS_DIR) not in sys.path:
 
 import harness  # noqa: E402  (sys.path 조정 후에 불러와야 한다)
 
-TEST_MODULES = (
-    "test_completion",
-    "test_inputs",
-    "test_state",
-    "test_reporting",
-    "test_database",
-    "test_workflow_safety",
-    "test_security",
-    "test_analysis_safety",
-)
+def registered_test_modules() -> tuple[str, ...]:
+    """Discover modules containing @regression tests instead of a stale hand list."""
+    modules = []
+    for path in sorted(TESTS_DIR.glob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        found = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                target = decorator.func if isinstance(decorator, ast.Call) else decorator
+                if isinstance(target, ast.Name) and target.id == "regression":
+                    found = True
+                    break
+            if found:
+                break
+        if found:
+            modules.append(path.stem)
+    return tuple(modules)
 
 
 def load_all() -> None:
-    for name in TEST_MODULES:
+    for name in registered_test_modules():
         importlib.import_module(name)
 
 
@@ -73,6 +83,7 @@ def main(argv=None) -> int:
     )
     args = parser.parse_args(argv)
 
+    harness.activate_hermetic_environment()
     load_all()
     tests = harness.REGISTRY
     if args.filter:

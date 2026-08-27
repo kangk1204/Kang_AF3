@@ -30,8 +30,10 @@ VHH/나노바디 2000건을 AlphaFold 3 로 스크리닝할 때, 전수를 기�
 `--min` 을 주지 않으면 거부한다. 근거 없는 숫자를 기본값으로 넣으면, 사용자는 그것이
 측정된 값이라고 믿고 2000건을 날린다.
 
-대신 절차를 준다. 40건 규모 예비실험으로 자기 데이터의 순위 보존을 직접 재고,
-그 숫자로 컷오프를 정한다. 4절이 그 절차다.
+대신 discovery와 validation을 분리하는 절차를 준다. score를 보기 전에 representative
+common panel을 고정하고 모든 target을 두 설정에서 계산한다. discovery subset에서 metric과
+후보 multiplier를 탐색했다면 별도의 held-out subset에서 top-K recall lower confidence bound와
+허용 miss-rate를 확인한다. 40건은 workflow smoke/pilot일 뿐 2,000건 cutoff의 validation이 아니다.
 
 ---
 
@@ -121,8 +123,10 @@ MSA 문자수, 시드)가 들어간다. 나중에 "이 후보가 왜 뽑혔나" 
 - **원자적 쓰기.** `.json.tmp` 에 쓰고 `os.replace` 로 옮긴다. 도중에 끊겨도 반쪽 JSON 이
   남지 않는다 (반쪽 JSON 하나가 `load_fold_inputs_from_dir` 제너레이터를 멈추게 하면
   그 뒤 입력 전부가 처리되지 않는다).
-- **동점 안정 정렬.** ranking_score 는 소수 둘째 자리로 반올림돼 동점이 흔하다.
-  동점은 타깃 이름으로 정렬해서 실행마다 같은 후보가 뽑히게 했다.
+- **경계 동점 보존.** ranking_score는 반올림돼 top-N 경계 동점이 생길 수 있다.
+  기본 `--tie-policy include-all`은 경계 동점을 전부 포함하므로 실제 선택 수가 N보다
+  커질 수 있다. 정확히 N개가 필요한 작업은 `--tie-policy error`로 중단한 뒤 cutoff를
+  사전 재정의한다. 이름 정렬은 표시 순서만 정하며 표본을 자르는 규칙이 아니다.
 
 ---
 
@@ -273,7 +277,7 @@ D2 의 첫 타깃만 91.70초가 걸렸고 나머지 3건은 9.09~9.26초였다.
 
 | 값 | 뜻 | 2단계 전략에서의 의미 |
 |---|---|---|
-| Spearman rho | 순위의 전반적 일치 (동점 보정) | 낮으면(대략 0.8 미만) 전략 자체를 재검토 |
+| Spearman rho | 순위의 전반적 일치 (동점 보정) | 보편적 합격선은 없다. 사전 지정한 miss cost와 CI로 판단 |
 | Kendall tau-b | 쌍 단위 일치율 (동점 보정) | rho 보다 이상치에 덜 흔들린다 |
 | **top-N 겹침률(recall)** | 정밀 상위 N건 중 경량 상위 N건에 든 비율 | **가장 중요한 숫자.** 0.95 면 20건 중 1건을 놓친다 |
 | **top-N 안전배수** | 정밀 상위 N건을 전부 잡으려면 경량 상위 몇 건까지 봐야 하는가 | **재실행 규모를 정한다.** 1.5 면 상위 100건을 원하면 150건 재실행 |
@@ -284,8 +288,10 @@ rho 가 높아도 겹침률이 낮을 수 있다. 전체 순위는 맞는데 상
 
 ### 예비실험 절차
 
-**1단계. 예비실험 집합을 고른다.** 40건 정도. 전수 2000건에서 무작위로 뽑는 편이
-좋다. 상위권만 뽑으면 순위 상관이 과소평가된다(점수 범위가 좁아지므로).
+**1단계. score-blind common panel을 고정한다.** target이 분석 단위다. monomer/complex,
+길이, family, ligand와 예상 난이도를 층화하고 failed/missing target도 intention-to-screen
+분모에 남긴다. 40건 정도 pilot은 구현 점검용이며, metric 선택용 discovery와 최종
+held-out validation을 같은 행에 쓰지 않는다.
 
 **2단계. 두 설정으로 돌린다.** 같은 서열, 설정만 다르게.
 
@@ -330,16 +336,14 @@ python3 scripts/af3_rankcorr.py --ref pilot_정밀.csv --test pilot_경량.csv \
     -o 순위상관.csv --pairs-out 순위대응.csv
 ```
 
-**5단계. 숫자를 보고 컷오프를 정한다.** 판단 기준:
+**5단계. discovery 결과를 기술하고 held-out validation 계약을 고정한다.** 판단 기준:
 
-- rho 와 tau_b 가 낮으면(대략 0.8 미만) 경량 설정이 순위를 보존하지 못한다.
-  경량 설정을 덜 경량하게 바꾼다(recycle 을 3 대신 5로, 샘플을 1 대신 2로).
-- 겹침률이 목표에 못 미치면 **안전배수**를 쓴다. 최종적으로 상위 K건을 원하고
-  안전배수가 1.5 라면 경량 기준 K x 1.5 건을 재실행한다.
-- 안전배수는 예비실험 규모에서 측정된 값이다. 2000건에 그대로 외삽하는 것은 **추정**이다.
-  집합이 커지면 상위권 경쟁이 심해져 안전배수가 커질 가능성이 있다(미측정).
-- 어느 지표로 고를지도 여기서 정한다. `--all-metrics` 로 지표별 겹침률을 비교해
-  가장 잘 보존되는 지표를 `af3_stage2.py --by` 에 쓴다.
+- primary metric, top-K, tie policy와 허용 miss-rate를 held-out 점수를 열기 전에 고정한다.
+- rho/tau/top-K overlap은 target-level paired bootstrap confidence interval과 함께 보고한다.
+- `--all-metrics`의 metric별 missingness가 다르면 공통 analysis population을 별도로 보고한다.
+- discovery에서 가장 좋아 보이는 metric과 maximum-rank safety multiplier를 고른 뒤 같은
+  pilot로 성능을 주장하지 않는다. held-out panel에서 top-K recall lower bound를 확인한다.
+- held-out 근거가 없으면 safety multiplier는 descriptive pilot statistic이며 후보 제거에 쓰지 않는다.
 
 ### 구현 검산
 
@@ -438,9 +442,10 @@ python3 scripts/af3_stage2.py --list 준비목록.txt \
     --source data --from-out vhh_out -o vhh_light_in
 ```
 
-경량 설정(`--num_diffusion_samples 1 --num_recycles 3`)은 현재
-`run_af3_batch_improved.py` 에 옵션이 없다. `af3_batch.py --stage infer
---diffusion-samples 1 --recycles 3` 을 쓰거나 `run_alphafold.py` 를 직접 부른다.
+`af3_batch.py --stage infer`는 준비된 `_data.json`으로 **data pipeline만 건너뛰는 stage
+semantics**다. fidelity를 암묵적으로 바꾸지 않는다. `--diffusion-samples`와 `--recycles`를
+생략하면 pinned AF3 기본값을 쓰고, 경량 exploratory run은 두 값을 명시한다. 따라서 기록과
+비교에서는 stage(`infer`)와 fidelity parameters를 별도 열로 남긴다.
 
 예상 소요: 기본 설정 추론이 5.39초/건이므로 2000건 = 3.0시간. 샘플 1 + recycle 3 은
 그보다 짧을 것이다(**미측정** - 경량 설정의 추론 시간은 재지 않았다).
@@ -457,7 +462,8 @@ python3 scripts/af3_collect.py 경량=vhh_light_out -o 1단계요약.csv --top 2
 
 판단: 등급 분포를 본다. `A_높음`/`B_신뢰` 가 몇 건인가. `MSA얕음` 경고가 몇 건인가.
 `ranking검산차` 가 전건 일치인가(아니면 다른 실행의 파일이 섞인 것이다).
-0단계에서 얻은 안전배수를 곱해 재실행 건수를 정한다.
+validation을 통과한 사전 지정 multiplier가 있을 때만 재실행 건수에 적용한다. 그렇지 않으면
+이 단계는 exploratory ranking을 기록할 뿐 후보를 제거하지 않는다.
 
 ### 4단계. 상위 후보를 정밀 설정으로 재실행 (예상 1시간 이내)
 
@@ -468,8 +474,9 @@ python3 scripts/run_af3_batch_improved.py --mode inference \
     --input-dir vhh_2단계_in --output-dir vhh_2단계_out --yes
 ```
 
-`--seeds 1,2,3` 으로 시드를 늘리면 샘플 간 산포를 볼 수 있다
-(`af3_collect.py` 의 `ranking산포` 열).
+`--seeds 1,2,3`으로 같은 모델/입력의 seed sensitivity를 기술할 수 있다. 집계기의
+`ranking산포`는 각 실행 안 diffusion sample의 max-min range이며 독립 재현성이나 native
+correctness uncertainty가 아니다.
 
 예상 소요: 200건 x 5.39초 x 시드 3 = **약 54분** (MSA 는 건너뛴다).
 MSA 를 다시 하면 축소 DB 에서 200건 x 1.98초 = 7분, 전체 DB 급에서

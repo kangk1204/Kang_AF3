@@ -20,10 +20,51 @@
 set -u
 
 FAIL_COUNT=0
+DOCKER=()
+PROBE_TIMEOUT_SECONDS="${AF3_CHECK_PROBE_TIMEOUT:-120}"
+readonly PROBE_PREFIX="kang-af3-check-${UID:-0}-$$"
+PROBE_CONTAINERS=(
+  "${PROBE_PREFIX}-gpu"
+  "${PROBE_PREFIX}-jax"
+  "${PROBE_PREFIX}-help"
+  "${PROBE_PREFIX}-hmmer"
+)
 fail() {
   echo "[실패] $*"
   FAIL_COUNT=$((FAIL_COUNT + 1))
 }
+if ! [[ "$PROBE_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]] || \
+   [ "$PROBE_TIMEOUT_SECONDS" -gt 900 ]; then
+  PROBE_TIMEOUT_SECONDS=120
+  fail "AF3_CHECK_PROBE_TIMEOUT 은 1~900초 정수여야 한다. 기본값 120초를 쓴다."
+fi
+readonly PROBE_TIMEOUT_SECONDS
+
+docker_display() {
+  printf '%q ' "${DOCKER[@]}"
+}
+
+# shellcheck disable=SC2329  # invoked by the EXIT trap
+cleanup_probe_containers() {
+  local name
+  ((${#DOCKER[@]})) || return 0
+  for name in "${PROBE_CONTAINERS[@]}"; do
+    timeout --signal=TERM --kill-after=5s 30s \
+      "${DOCKER[@]}" rm -f -- "$name" >/dev/null 2>&1 || true
+  done
+}
+
+run_container_probe() {
+  local suffix="$1"
+  local name="${PROBE_PREFIX}-${suffix}"
+  shift
+  timeout --signal=TERM --kill-after=5s "${PROBE_TIMEOUT_SECONDS}s" \
+    "${DOCKER[@]}" run --name "$name" --rm "$@"
+}
+
+trap cleanup_probe_containers EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # 이 스크립트가 있는 폴더. 7d 에서 옆에 있는 파이썬 스크립트를 점검할 때 쓴다.
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" 2>/dev/null && pwd)"
@@ -103,26 +144,36 @@ fi
 # -----------------------------------------------------------------------------
 head1 "3. Docker 접근성 (sudo 없이 쓸 수 있는가)"
 # -----------------------------------------------------------------------------
-DOCKER="${AF3_DOCKER:-}"
-if [ -n "$DOCKER" ]; then
-  if $DOCKER info >/dev/null 2>&1; then
-    echo "[측정] 지정 Docker 명령 사용 가능: ${DOCKER}"
+if [ -n "${AF3_DOCKER:-}" ]; then
+  read -r -a DOCKER_CANDIDATE <<< "$AF3_DOCKER"
+  if [ "${#DOCKER_CANDIDATE[@]}" -eq 1 ]; then
+    DOCKER=("${DOCKER_CANDIDATE[0]}")
+  elif [ "${#DOCKER_CANDIDATE[@]}" -eq 3 ] && \
+       [ "${DOCKER_CANDIDATE[0]}" = sudo ] && \
+       [ "${DOCKER_CANDIDATE[1]}" = -n ]; then
+    DOCKER=(sudo -n "${DOCKER_CANDIDATE[2]}")
   else
-    fail "AF3_DOCKER 로 지정한 Docker 명령을 사용할 수 없다: ${DOCKER}"
-    DOCKER=""
+    fail "AF3_DOCKER 는 단일 실행 파일 또는 'sudo -n 실행파일' 형식이어야 한다."
+  fi
+  if ((${#DOCKER[@]})) && command -v -- "${DOCKER[0]}" >/dev/null 2>&1 && \
+     "${DOCKER[@]}" info >/dev/null 2>&1; then
+    echo "[측정] 지정 Docker 명령 사용 가능: $(docker_display)"
+  else
+    fail "AF3_DOCKER 로 지정한 Docker 명령을 사용할 수 없다: ${AF3_DOCKER}"
+    DOCKER=()
   fi
 elif ! command -v docker >/dev/null 2>&1; then
   fail "docker 명령을 찾을 수 없다. 이후 도커 관련 점검은 모두 건너뛴다."
 else
   echo "[측정] docker 버전  : $(docker --version 2>&1 | head -1)"
   if docker info >/dev/null 2>&1; then
-    DOCKER="docker"
+    DOCKER=(docker)
     echo "[측정] sudo 없이 docker 사용 가능: 예"
   elif sudo -n docker info >/dev/null 2>&1; then
-    DOCKER="sudo -n docker"
+    DOCKER=(sudo -n docker)
     echo "[측정] sudo 없이 docker 사용 가능: 아니오 (비대화형 sudo 는 됨)"
   else
-    DOCKER=""
+    DOCKER=()
     fail "docker 데몬에 비대화형으로 접근할 수 없다. docker 그룹/rootless 설정이 필요하다."
   fi
   echo "[측정] 내 그룹 목록 : $(id -nG 2>/dev/null)"
@@ -138,21 +189,23 @@ fi
 head1 "4. 도커 이미지와 컨테이너 내부 설정"
 # -----------------------------------------------------------------------------
 HELP_TXT=""
-if [ -n "$DOCKER" ]; then
-  if $DOCKER image inspect "$IMAGE" >/dev/null 2>&1; then
+if ((${#DOCKER[@]})); then
+  if ! command -v timeout >/dev/null 2>&1; then
+    fail "컨테이너 probe를 제한할 timeout 명령이 없다."
+  elif "${DOCKER[@]}" image inspect "$IMAGE" >/dev/null 2>&1; then
     echo "[측정] 이미지 '${IMAGE}' 존재: 예"
-    $DOCKER image inspect "$IMAGE" \
+    "${DOCKER[@]}" image inspect "$IMAGE" \
       --format '         생성시각={{.Created}}  크기={{.Size}} bytes  아키텍처={{.Architecture}}' 2>/dev/null
     echo
     echo "[측정] 이미지에 박혀 있는 XLA/메모리 관련 환경변수:"
-    $DOCKER image inspect "$IMAGE" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
+    "${DOCKER[@]}" image inspect "$IMAGE" --format '{{range .Config.Env}}{{println .}}{{end}}' 2>/dev/null \
       | grep -E 'XLA|TF_FORCE|CUDA|JAX' | sed 's/^/         /' || echo "         (해당 항목 없음)"
     echo
     echo "[측정] 컨테이너 안에서 GPU가 보이는가 (--gpus all 로 확인):"
     # 호스트에서 nvidia-smi 가 도는 것과 컨테이너 안에서 GPU 를 쓰는 것은 다르다.
     # 그 사이에 nvidia-container-toolkit, 런타임 설정, 드라이버/CUDA 조합이 있다.
     # 파이프로 넘기면 head/sed 가 성공해서 docker 의 종료코드가 묻히므로 먼저 받는다.
-    if ! GPU_IN_CONTAINER="$($DOCKER run --rm --gpus all "$IMAGE" \
+    if ! GPU_IN_CONTAINER="$(run_container_probe gpu --gpus all "$IMAGE" \
           nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader 2>&1)"; then
       fail "컨테이너 안에서 GPU 를 쓸 수 없다. 호스트의 nvidia-smi 가 돌아도 이럴 수 있다 (nvidia-container-toolkit/런타임 설정)."
       printf '%s\n' "$GPU_IN_CONTAINER" | head -5 | sed 's/^/         /'
@@ -164,20 +217,29 @@ if [ -n "$DOCKER" ]; then
     # 드라이버/CUDA 조합이 어긋나면 nvidia-smi 는 되는데 JAX 가 CPU 로 떨어진다.
     # 그 상태로 배치를 돌리면 추론이 몇십 배 느려지거나 그대로 죽는다.
     echo "[측정] 컨테이너 안에서 JAX 가 GPU 를 잡는가:"
-    if JAX_BACKEND="$($DOCKER run --rm --gpus all --entrypoint python3 "$IMAGE" -c \
-          'import jax; print(jax.default_backend()); assert jax.devices()' 2>&1)"; then
+    if JAX_BACKEND="$(run_container_probe jax --gpus all --entrypoint python3 "$IMAGE" -c \
+          'import jax; backend=jax.default_backend(); devices=jax.devices(); assert backend == "gpu"; assert devices and all(device.platform == "gpu" for device in devices); print("backend=gpu devices=%d" % len(devices))' 2>&1)"; then
       printf '%s\n' "$JAX_BACKEND" | tail -3 | sed 's/^/         /'
-      if ! printf '%s' "$JAX_BACKEND" | grep -qw gpu; then
-        fail "JAX 가 GPU 대신 다른 백엔드를 쓴다. 드라이버와 CUDA 조합을 확인하라."
-      fi
     else
-      fail "컨테이너 안에서 JAX 를 초기화하지 못했다. 아래 출력을 확인하라."
+      fail "컨테이너 안에서 JAX GPU backend/device 검증에 실패했다. 아래 출력을 확인하라."
       printf '%s\n' "$JAX_BACKEND" | tail -5 | sed 's/^/         /'
     fi
     echo
 
     echo "[측정] 이 이미지의 run_alphafold.py 가 지원하는 주요 플래그 (실제 --help 에서 추출):"
-    HELP_TXT="$($DOCKER run --rm "$IMAGE" python run_alphafold.py --help 2>&1)"
+    if HELP_TXT="$(run_container_probe help "$IMAGE" python run_alphafold.py --help 2>&1)"; then
+      HELP_RC=0
+    else
+      HELP_RC=$?
+    fi
+    if [ "$HELP_RC" -ne 0 ] && [ "$HELP_RC" -ne 1 ]; then
+      fail "run_alphafold.py --help probe가 실패했다 (종료코드 ${HELP_RC})."
+      printf '%s\n' "$HELP_TXT" | tail -5 | sed 's/^/         /'
+      HELP_TXT=""
+    elif ! printf '%s' "$HELP_TXT" | grep -Fq -- '--output_dir' || \
+         ! printf '%s' "$HELP_TXT" | grep -Eq -- '--(\[no\])?run_data_pipeline'; then
+      fail "run_alphafold.py --help 출력에 필수 플래그가 없다. 이미지/entrypoint를 확인하라."
+    fi
     for f in input_dir json_path output_dir buckets num_diffusion_samples num_recycles \
              num_seeds jax_compilation_cache_dir run_data_pipeline run_inference \
              jackhmmer_n_cpu nhmmer_n_cpu flash_attention_implementation save_embeddings; do
@@ -196,18 +258,18 @@ if [ -n "$DOCKER" ]; then
       | sed 's/^[[:space:]]*/         /' | head -40
     if ! grep -Eq -- '--[a-z_]*database_path' <<< "$HELP_TXT"; then
       echo "         (추출 실패 - 아래 명령으로 직접 확인)"
-      echo "         ${DOCKER} run --rm ${IMAGE} python run_alphafold.py --help | grep database"
+      echo "         $(docker_display)run --rm ${IMAGE} python run_alphafold.py --help | grep database"
     fi
   else
     fail "이미지 '${IMAGE}' 를 찾을 수 없다. 이름이 다를 수 있으니 아래 목록에서 확인하라."
-    $DOCKER images 2>/dev/null | head -15 | sed 's/^/         /'
+    "${DOCKER[@]}" images 2>/dev/null | head -15 | sed 's/^/         /'
   fi
 fi
 
 # Docker 실행 경로가 실제로 쓰는 patched HMMER 를 컨테이너 안에서 확인한다.
-if [ -n "$DOCKER" ] && $DOCKER image inspect "$IMAGE" >/dev/null 2>&1; then
-  HMMER_TXT="$($DOCKER run --rm "$IMAGE" jackhmmer -h 2>&1)"
-  if printf '%s' "$HMMER_TXT" | grep -q -- '--seq_limit'; then
+if ((${#DOCKER[@]})) && "${DOCKER[@]}" image inspect "$IMAGE" >/dev/null 2>&1; then
+  if HMMER_TXT="$(run_container_probe hmmer "$IMAGE" jackhmmer -h 2>&1)" && \
+     printf '%s' "$HMMER_TXT" | grep -q -- '--seq_limit'; then
     echo "[측정] 컨테이너 HMMER : jackhmmer --seq_limit 패치 확인"
   else
     fail "컨테이너 jackhmmer -h 에 --seq_limit 이 없다. AF3 patched HMMER 이미지가 아니다."
@@ -307,11 +369,15 @@ fi
 
 DB_PY="${AF3_PYTHON:-$(command -v python3 2>/dev/null || command -v python 2>/dev/null || true)}"
 if [ -n "$DB_PY" ] && [ -f "${SCRIPT_DIR}/af3_db.py" ]; then
+  DB_ROOTS=("$DB_DIR")
   DB_VERIFY_ARGS=(verify --db-dir "$DB_DIR")
   if [ -n "${AF3_DB_FALLBACK_DIRS:-}" ]; then
     IFS=':' read -r -a DB_FALLBACKS <<< "$AF3_DB_FALLBACK_DIRS"
     for fallback in "${DB_FALLBACKS[@]}"; do
-      [ -n "$fallback" ] && DB_VERIFY_ARGS+=(--db-dir "$fallback")
+      if [ -n "$fallback" ]; then
+        DB_ROOTS+=("$fallback")
+        DB_VERIFY_ARGS+=(--db-dir "$fallback")
+      fi
     done
   fi
   if "$DB_PY" "${SCRIPT_DIR}/af3_db.py" "${DB_VERIFY_ARGS[@]}" >/dev/null 2>&1; then
@@ -319,6 +385,23 @@ if [ -n "$DB_PY" ] && [ -f "${SCRIPT_DIR}/af3_db.py" ]; then
   else
     fail "AF3 DB 필수 9항목이 ordered root에서 모두 확인되지 않는다. af3_db.py verify 를 실행하라."
   fi
+  for db_root in "${DB_ROOTS[@]}"; do
+    overlay_manifest="${db_root}/af3_db_manifest.json"
+    full_manifest="${db_root}/af3_full_db_manifest.json"
+    if { [ -e "$overlay_manifest" ] || [ -L "$overlay_manifest" ]; } && \
+       { [ -e "$full_manifest" ] || [ -L "$full_manifest" ]; }; then
+      fail "한 DB root에 reduced/full manifest가 함께 있다: ${db_root}"
+    elif [ -e "$overlay_manifest" ] || [ -L "$overlay_manifest" ]; then
+      echo "[측정] reduced DB manifest: ${db_root} (내용 hash는 runner가 실행 전에 검증)"
+    elif SEAL_OUT="$("$DB_PY" "${SCRIPT_DIR}/af3_db.py" validate-full-seal \
+          --db-dir "$db_root" 2>&1)"; then
+      echo "[측정] full DB seal       : ${db_root} (${SEAL_OUT})"
+    else
+      fail "full DB seal 검증 실패: ${db_root}"
+      printf '%s\n' "$SEAL_OUT" | tail -3 | sed 's/^/         /'
+      echo "         one-time deep 검증: python3 scripts/af3_db.py seal-full --db-dir ${db_root}"
+    fi
+  done
 fi
 
 # -----------------------------------------------------------------------------
@@ -334,17 +417,24 @@ else
   if [ -n "$BIG" ]; then
     echo "[측정] 400MB 이상 파일(가중치 본체로 추정):"
     printf '%s\n' "$BIG" | sed 's/^/         /'
-  else
+  elif [ -z "${AF3_MODEL_BYTES:-}" ]; then
     fail "400MB 이상 파일이 없다. 가중치가 제대로 놓이지 않았을 수 있다."
     echo "       (AlphaFold 3 가중치는 1 GB 급 단일 파일이다.)"
+  else
+    echo "[측정] 400MB 휴리스틱 : AF3_MODEL_BYTES override 때문에 생략"
   fi
   MODEL_FILE="${MODEL_DIR}/af3.bin"
+  MODEL_BYTES_EXPECTED="${AF3_MODEL_BYTES:-1146811260}"
+  if ! [[ "$MODEL_BYTES_EXPECTED" =~ ^[1-9][0-9]*$ ]]; then
+    fail "AF3_MODEL_BYTES 는 양의 정수여야 한다: ${MODEL_BYTES_EXPECTED}"
+    MODEL_BYTES_EXPECTED=1146811260
+  fi
   if [ ! -f "$MODEL_FILE" ] || [ -L "$MODEL_FILE" ]; then
     fail "일반 파일 af3.bin 이 없다: ${MODEL_FILE}"
   else
     MODEL_BYTES="$(wc -c < "$MODEL_FILE" 2>/dev/null || echo 0)"
-    if [ "$MODEL_BYTES" -ne 1146811260 ]; then
-      fail "af3.bin 크기가 pinned release 값과 다르다: ${MODEL_BYTES} (기대 1146811260)"
+    if [ "$MODEL_BYTES" -ne "$MODEL_BYTES_EXPECTED" ]; then
+      fail "af3.bin 크기가 기대값과 다르다: ${MODEL_BYTES} (기대 ${MODEL_BYTES_EXPECTED})"
     else
       echo "[측정] af3.bin 크기   : ${MODEL_BYTES} bytes (정상)"
       if ! command -v sha256sum >/dev/null 2>&1; then

@@ -53,6 +53,8 @@ h2 { font-size:13px; margin:14px 0 5px 0; padding-bottom:3px;
 ul.tight { margin:4px 0 0 18px; padding:0; }
 ul.tight li { margin-bottom:3px; }
 a { color:#0053D6; }
+.terms { background:#fff8db; border:1px solid #d8bd57; padding:8px 10px;
+         border-radius:3px; font-size:11px; margin-top:14px; }
 </style>
 </head><body>
 <header>
@@ -65,14 +67,14 @@ a { color:#0053D6; }
     <table class="m">
 <tr><td class="k">ranking score<br><span class="hint">AF3 가 후보를 줄 세우는 값. 클수록 좋다</span></td><td class="v">0.850</td></tr>
 <tr><td class="k">pTM<br><span class="hint">구조 전체의 접힘 신뢰도 (0~1)</span></td><td class="v">0.730</td></tr>
-<tr><td class="k">ipTM<br><span class="hint">사슬 사이 계면 신뢰도 (0~1). 복합체에만 있다</span></td><td class="v">0.850</td></tr>
+<tr><td class="k">ipTM<br><span class="hint">AF3 계면 confidence (0~1). 결합·친화도 증거가 아니다</span></td><td class="v">0.850</td></tr>
 <tr><td class="k">잔기 평균 pLDDT<br><span class="hint">각 잔기에 같은 가중치를 준 평균 (0~100)</span></td><td class="v">87.7</td></tr>
 <tr><td class="k">최저 잔기 pLDDT<br><span class="hint">가장 자신 없는 잔기의 값</span></td><td class="v">37.4</td></tr>
 <tr><td class="k">무질서 비율<br><span class="hint">구조가 풀린 부분의 비율 (0~1)</span></td><td class="v">0.050</td></tr>
 <tr><td class="k">원자 충돌<br><span class="hint">0 이 정상이다</span></td><td class="v">없다</td></tr>
 <tr><td class="k">사슬</td><td class="v">2개 (A, B)</td></tr>
 <tr><td class="k">잔기 / 원자</td><td class="v">277 / 2101</td></tr>
-<tr><td class="k">확산 샘플<br><span class="hint">샘플 간 산포가 크면 재현성이 낮다</span></td><td class="v">5개 (ranking score 표준편차 0.008)</td></tr>
+<tr><td class="k">확산 샘플<br><span class="hint">같은 실행의 diffusion-sample variation; 재현성/정확도 불확실성이 아니다</span></td><td class="v">5개 (ranking score 표준편차 0.008)</td></tr>
 </table>
     <div id="leg-plddt">
 <h2>pLDDT 색 구간</h2>
@@ -99,7 +101,13 @@ a { color:#0053D6; }
 <li>사슬 A: 134~148 (15잔기, 평균 48.8)</li>
 </ul>
 <div class="hint">VHH 는 CDR3(대략 95~115번 근처)이 낮게 나오는 것이 흔하다. 루프라서 원래 유연한 것이고, 그것만으로 실패는 아니다. 뼈대(프레임워크)까지 낮으면 의심해라.</div>
-    
+    <div class="terms"><b>AlphaFold 3 Output Terms 적용</b><br>
+    By using this information, you agree to AlphaFold 3 Output Terms of Use found at
+    <a href="https://github.com/google-deepmind/alphafold3/blob/main/OUTPUT_TERMS_OF_USE.md">the official terms</a>.
+    이 HTML은 AF3 출력 좌표·신뢰도를 재표현한 수정 산출물이다. 옆의
+    <code>OUTPUT_NOTICE.md</code>, <code>OUTPUT_TERMS_OF_USE.md</code>,
+    <code>LEGALLY_BINDING_TERMS_OF_USE.txt</code>를 함께 배포해야 한다.<br>
+    Citation: Abramson J et al., <i>Nature</i> (2024), doi:10.1038/s41586-024-07487-w.</div>
   </div>
   <div class="col">
     <div class="bar">
