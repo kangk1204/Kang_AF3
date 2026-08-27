@@ -1571,6 +1571,8 @@ def test_quick_start_sets_expectations_before_the_first_long_run():
         "figures/example_complex_plddt.png",
         "figures/example_complex_pae.png",
         "figures/example_summary_6targets.png",
+        "figures/view3d_index_table.png",
+        "figures/view3d_molstar_target.png",
     ):
         check_in(preview, quick_start, "설치 전 미리보기 경로가 Quick Start 에 없다")
         check(

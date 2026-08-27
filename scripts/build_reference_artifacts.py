@@ -46,6 +46,8 @@ HISTORICAL = {
     "figures/example_summary_6targets.png": "original raw AF3 output is absent",
     "figures/quickstart_a_multifasta.png": "original raw AF3 output is absent",
     "figures/quickstart_b_homodimer_pae.png": "original raw AF3 output is absent",
+    "figures/view3d_index_table.png": "cropped from retained browser/session screenshot",
+    "figures/view3d_molstar_target.png": "cropped from retained browser/session screenshot",
     "figures/view3d_screenshot.png": "browser/session capture source is absent",
     "examples/view3d_example.html": "embedded AF3 output is retained, but original generator inputs/session are absent",
 }

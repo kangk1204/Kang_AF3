@@ -7,6 +7,8 @@ FASTA나 CSV에 서열을 준비하면 입력 JSON 생성부터 AlphaFold 3 실�
 처음 사용한다면 바로 아래 [Quick Start](#quick-start)만 순서대로 따라가세요. 후보를 고르는
 방법만 먼저 보고 싶다면 [wet-lab 연구자용 요약](docs/researcher_guide.md)을 먼저 보세요.
 
+현재 공개 버전은 `v0.1.1`입니다. 변경 메모는 [RELEASES.md](RELEASES.md)에서 볼 수 있습니다.
+
 이 저장소는 AlphaFold 3로 만든 예제 결과물(집계 CSV, 그림, 뷰어)도 함께 제공합니다.
 그 결과물에는 AF3 Output Terms 가 적용되고, 이 저장소가 원본 출력에 무엇을 더했는지는
 [OUTPUT_NOTICE.md](OUTPUT_NOTICE.md)에서 확인할 수 있습니다.
@@ -118,11 +120,27 @@ python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 
 #### 실제 browser 결과 예시
 
-아래 screenshot의 **아래쪽 표(e)**가 `index.html`입니다. 타깃 이름을 누르면 **위쪽의 개별
-Mol* 화면(a–c)**이 열립니다. 개별 화면에서는 구조를 회전·확대하고, `pLDDT`와 `사슬별`
-버튼으로 색상을 바꿀 수 있습니다. 이미지를 누르면 원본 크기로 볼 수 있습니다.
+아래 화면을 먼저 보면, 전체 Table에서 개별 Mol* View로 어떻게 이동하는지 바로 잡힙니다.
 
-![전체 타깃 표에서 개별 Mol* 3D 구조로 이동하는 실제 browser 화면](figures/view3d_screenshot.png)
+![전체 Table에서 개별 Mol* View까지 이어지는 실제 Chrome 화면](figures/view3d_screenshot.png)
+
+**1) 전체 Table — `index.html`**
+
+ranking score 순으로 타깃이 보입니다. 파란색 타깃 이름을 누르세요.
+
+![브라우저에서 연 전체 AF3 타깃 Table](figures/view3d_index_table.png)
+
+**↓ 타깃 이름 클릭**
+
+**2) 개별 Mol* View — `<타깃>.html`**
+
+구조를 마우스로 회전·확대할 수 있습니다. `pLDDT`와 `사슬별` 버튼으로 색상을 바꾸고,
+왼쪽에서 ranking score, pTM, ipTM, 평균 pLDDT와 경고를 함께 확인합니다.
+
+![전체 Table에서 타깃을 눌렀을 때 열리는 개별 MolStar 3D View](figures/view3d_molstar_target.png)
+
+위의 두 이미지는 실제 Chrome 검증 screenshot에서 오른쪽/아래 영역을 잘라낸 것입니다.
+원본 전체 화면은 바로 위에 있습니다.
 
 ### 4. 내 서열을 실행합니다
 
