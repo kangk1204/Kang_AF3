@@ -1,21 +1,24 @@
-# Kang_AF3: AlphaFold 3 대량 스크리닝 도구 모음
+# Kang_AF3: wet-lab 연구자를 위한 AlphaFold 3 배치 가이드
 
-VHH/나노바디처럼 짧은 단백질 수백에서 수천 건을 AlphaFold 3로 한 번에 돌리기 위한
-스크립트와 한국어 문서다. 설치, 입력 준비, 배치 실행, 결과 해석, 시각화 순서로 정리했다.
+FASTA나 CSV에 서열을 준비하면 입력 JSON 생성부터 AlphaFold 3 실행, 결과표, 2D 그림,
+3D 구조 확인까지 한 흐름으로 처리합니다. VHH·나노바디 패널처럼 비슷한 단백질을 수십~수천
+건 비교할 때 사용하기 좋습니다.
 
-실험을 하는 사람이라면 [docs/researcher_guide.md](docs/researcher_guide.md) 를 먼저 읽어도 된다.
-후보를 고르는 데 필요한 것만 추린 요약이다.
+처음 사용한다면 바로 아래 [Quick Start](#quick-start)만 순서대로 따라가세요. 후보를 고르는
+방법만 먼저 보고 싶다면 [wet-lab 연구자용 요약](docs/researcher_guide.md)을 읽으세요.
 
-이 저장소는 AlphaFold 3 로 만든 결과물(집계 CSV, 그림, 뷰어)을 함께 담아 배포한다.
+이 저장소는 AlphaFold 3로 만든 예제 결과물(집계 CSV, 그림, 뷰어)도 함께 제공합니다.
 그 결과물에는 AF3 Output Terms 가 적용되고, 이 저장소가 원본 출력에 무엇을 더했는지는
-[OUTPUT_NOTICE.md](OUTPUT_NOTICE.md) 에 적었다.
+[OUTPUT_NOTICE.md](OUTPUT_NOTICE.md)에서 확인할 수 있습니다.
 
-성능 수치는 실제로 측정한 값이다. 측정하지 않은 것은 `(미측정)` 또는 `(추정)` 으로
-표시했다. 측정 환경과 한계는 [12절](#12-측정-조건과-한계)에 있다.
+성능 수치는 실제 측정값과 추정값을 구분해 표시합니다. 측정 환경과 한계는
+[12절](#12-측정-조건과-한계)에서 확인할 수 있습니다.
 
 ---
 
 ## Quick Start
+
+처음 한 번은 아래 순서대로만 따라가면 된다. 설치, 예제 실행, 결과 확인 순서로 되어 있고, 각 단계는 다음 단계로 넘어가기 전에 바로 확인할 수 있게 묶어 두었다.
 
 Kang_AF3는 여러 AlphaFold 3 입력을 한 컨테이너에서 연속 실행하는 연구용 작업 흐름이다.
 입력 JSON 생성, 중단 작업 재개, 결과 CSV 집계, 2D 그림과 3D 뷰어 생성을 함께 제공한다.
@@ -23,7 +26,7 @@ AF3 소스, Google 이용약관이 적용되는 모델 가중치, 공식 DB root
 ([3-1 다운로드 목록](#3-1-다운로드-목록)). 성능 측정값은 [7절](#7-속도-개선의-근거)에
 정리했다.
 
-### 0. 설치 전에 결과물부터 보기 (다운로드 0바이트)
+### 0. 설치 전에 예시 결과부터 보기
 
 아래 파일은 이 저장소에 그대로 들어 있다. AF3 나 데이터베이스 없이 열린다.
 전부 실제로 돌려서 나온 결과다.
@@ -38,7 +41,7 @@ AF3 소스, Google 이용약관이 적용되는 모델 가중치, 공식 DB root
 
 설치는 1절부터다.
 
-### 1. 설치
+### 1. 설치하기
 
 Ubuntu에서 처음 설치할 때는 저장소를 먼저 내려받는다.
 
@@ -105,7 +108,7 @@ full DB를 아직 받지 않을 때는 `bash scripts/install_af3_ubuntu.sh`만 �
 모드는 Docker/GPU, AF3 이미지와 그림 환경까지만 설치한다. 새로 docker 그룹에 들어간
 경우 설치가 끝난 뒤 한 번 로그아웃·로그인한다.
 
-### 2. 예제로 배치 실행
+### 2. 예제로 한 번 실행해 보기
 
 설치가 끝나면 저장소의 단량체 JSON으로 1건을 실행한다.
 
@@ -201,7 +204,7 @@ python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 full DB의 confidence 순위 보존을 score-blind representative panel에서 검증하기 전에는
 축소 DB만으로 후보를 제외하지 않는다. 비교와 한계는 [3-5절](#3-5-데이터베이스-선택)에 있다.
 
-### 3. 결과 읽기
+### 3. 결과를 읽는 법 보기
 
 배치가 끝나면 타깃마다 폴더 하나가 생긴다. 안에 들어 있는 것은 이렇다.
 
@@ -260,7 +263,7 @@ pLDDT 그림에서 파란 구간은 믿을 만하고, 주황으로 떨어지는 
 
 지표의 정의와 판정 근거는 [8절](#8-결과-해석)에 있다.
 
-### 4. 본인 입력 준비
+### 4. 내 입력 준비하기
 
 AlphaFold 3는 JSON을 입력으로 받는다. `af3_prepare.py`는 FASTA 또는 CSV/TSV 서열표를
 읽어 레코드마다 AF3 JSON 하나를 만든다. 이미 AF3 형식의 JSON이 있다면 변환하지 않고
@@ -302,7 +305,7 @@ CSV/TSV도 사용할 수 있다. 첫 줄에는 열 이름이 있어야 하며 �
 multi-FASTA의 각 레코드는 서로 독립된 예측 작업이며, 여러 레코드를 한 복합체로 합치지
 않는다.
 
-### 5. 입력 유형별 실행 예제
+### 5. 입력 유형별 실행 예시
 
 A~D는 `--dry-run` 확인 후 JSON을 만들고, E는 제공 JSON의 문법을 확인한 뒤 같은 배치
 러너로 실행한다. 필요한 입력 유형만 선택해서 실행하면 된다.
@@ -443,7 +446,7 @@ CSV의 `등급` 열로 1차 선별하고, 단량체는 pTM과 pLDDT평균, 복�
 
 ## 1. 이 저장소의 범위
 
-AlphaFold 3 대량 실행을 위한 설치·입력·DB·후처리·artifact 스크립트 13개를 제공한다.
+이 저장소는 AF3를 여러 타깃에 안정적으로 돌리고, 입력을 만들고, 결과를 모으고, 다시 확인하는 데 필요한 스크립트 모음이다. 처음 보는 분은 Quick Start만 따라가도 전체 흐름을 잡을 수 있다.
 
 | 스크립트 | 하는 일 |
 |----------|---------|
@@ -544,7 +547,7 @@ tokamax 0.0.12 조합이었다. 두 경로 모두 시스템 `nvcc`를 따로 설
 
 ## 3. 설치
 
-설치 경로는 두 갈래이고 갈리는 지점은 데이터베이스다.
+설치 경로는 두 갈래다. 차이는 데이터베이스를 지금 같이 받을지, 나중에 따로 받을지다.
 
 | 경로 | 실작업 시간 | 디스크 | 어떤 경우에 |
 |------|-------------|--------|-------------|
@@ -579,9 +582,7 @@ tokamax 0.0.12 조합이었다. 두 경로 모두 시스템 `nvcc`를 따로 설
 ### 3-2. Ubuntu 단일 설치기
 
 지원 범위는 Ubuntu 22.04/24.04/26.04 amd64와 이미 동작하는 NVIDIA 드라이버다.
-드라이버 설치·업그레이드는 재부팅과 장비별 판단이 필요하므로 이 스크립트가 건드리지
-않는다. 먼저 `nvidia-smi`가 성공하는지 확인한다. 설치기는 이 저장소 안의 진단·DB 검증
-도구를 함께 쓰므로 스크립트 파일 하나만 따로 받지 말고 저장소 전체를 clone한다.
+드라이버 설치·업그레이드는 재부팅과 장비별 판단이 필요하므로 이 스크립트가 대신 건드리지 않는다. 먼저 `nvidia-smi`가 성공하는지 확인한다. 설치기는 이 저장소 안의 진단·DB 검증 도구를 함께 쓰므로 스크립트 파일 하나만 따로 받지 말고 저장소 전체를 clone한다.
 
 full 설치는 약 1TB의 빈 공간과 수 시간의 다운로드가 필요하다. Google의
 [현재 가중치 약관](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)을
@@ -994,8 +995,7 @@ raw JSON과 full DB를 쓴 현재 Docker 실측은 35.5분이었다. 그중 MSA�
 
 ## 5. 입력 파일 준비
 
-AF3 는 **타깃 하나당 JSON 파일 하나**를 입력으로 받는다. 2000건이면 JSON 2000개이므로
-`af3_prepare.py` 로 만들고, 만들어진 JSON 은 `<이름>_in/` 에 둔다
+AF3 는 **타깃 하나당 JSON 파일 하나**를 입력으로 받는다. 많은 서열을 한 번에 처리할 때는 `af3_prepare.py` 로 JSON을 만들고, 만들어진 파일은 `<이름>_in/` 에 두면 된다
 ([3-6](#3-6-폴더-관례)).
 
 ### 5-1. 입력 JSON 의 구조
@@ -1130,7 +1130,7 @@ find vhh_001_in -name '._*' -delete    # macOS 유래 사이드카를 지운다
 
 ## 6. 배치 실행
 
-### 6-1. 권장 방법: `run_af3_batch_improved.py`
+### 6-1. 먼저 써 볼 방법: `run_af3_batch_improved.py`
 
 ```bash
 cd ~/af3_work/Kang_AF3
@@ -1409,7 +1409,7 @@ GPU 추론 단계의 **5.93배**다. 189시간과 서로 다른 조건의 4~40�
 
 ### 8-0. 이 수치로 말할 수 있는 것과 없는 것
 
-실험을 설계하기 전에 이 구분을 먼저 본다.
+결과를 실험에 쓰기 전에 먼저 이 구분부터 보면 된다.
 
 | 질문 | 이 파이프라인이 답하는가 |
 |---|---|
@@ -1426,19 +1426,11 @@ AF3 는 주어진 사슬을 어떻게든 배치하며, 실제로는 결합하지
 `examples/three_protein_complex.json` 은 ipTM 0.15 로 낮게 나왔지만
 (`C_계면실패`), 낮게 나오는 것이 항상 보장되지는 않는다.
 
-그래서 이 도구는 **AF3 내부 confidence를 이용한 미검증 exploratory prioritization**에만
-쓴다. 현재 관찰 단위와 추론 단위는 각각 하나의 target(입력 분자 조합)이다. diffusion
-sample은 target 안의 stochastic measurement이지 독립 biological replicate가 아니다.
-현재 비교의 estimand는 같은 target의 두 AF3 계산 설정 사이 confidence/rank 차이이며,
-binder recovery, Kd/IC50, native interface accuracy, epitope truth 또는 mutation effect가 아니다.
-실험할 대상을 고르는 최종 규칙으로 사용하려면 독립 assay/native truth validation이 필요하다.
-예측을 근거로 삼아 논문에 쓸 때는
-[11절](#11-라이선스와-인용)의 출력물 약관과 [OUTPUT_NOTICE.md](OUTPUT_NOTICE.md)
-도 함께 확인한다.
+그래서 이 도구는 **먼저 볼 후보를 고르는 용도**로만 쓰고, 최종 결론은 실험 검증이 있어야 한다. 현재 관찰 단위와 추론 단위는 각각 하나의 target(입력 분자 조합)이다. diffusion sample은 target 안의 stochastic measurement이지 독립 biological replicate가 아니다. 현재 비교의 estimand는 같은 target의 두 AF3 계산 설정 사이 confidence/rank 차이이며, binder recovery, Kd/IC50, native interface accuracy, epitope truth 또는 mutation effect가 아니다. 예측을 근거로 논문에 쓸 때는 [11절](#11-라이선스와-인용)의 출력물 약관과 [OUTPUT_NOTICE.md](OUTPUT_NOTICE.md) 도 함께 확인한다.
 
 ### 8-1. 지표 읽는 순서
 
-신뢰도 수치만으로 구조 정확도를 확정할 수 없다. 수치 해석과 [구조 확인](#9-결과-보기)을 함께 수행한다.
+신뢰도 수치만으로 구조 정확도를 확정할 수는 없다. 먼저 수치를 보고, 그다음 [구조 확인](#9-결과-보기)으로 넘어가면 된다.
 
 ### 8-2. 출력 폴더의 구성
 
@@ -1634,9 +1626,7 @@ parameter/data uncertainty 또는 correctness calibration이 아니다. 단량�
 
 ### 9-1. `af3_visualize.py`: 그림 만들기
 
-먼저 [3-9절](#3-9-결과-그림용-python-환경)의 분리 환경이 준비됐는지 확인한다. 단일
-설치기를 사용했다면 이미 설치돼 있다. 세부 옵션은
-`~/af3_plot_env/bin/python scripts/af3_visualize.py --help`로 확인한다.
+먼저 [3-9절](#3-9-결과-그림용-python-환경)의 분리 환경이 준비됐는지 확인한다. 단일 설치기를 사용했다면 이미 설치돼 있다. 세부 옵션은 `~/af3_plot_env/bin/python scripts/af3_visualize.py --help`로 확인한다.
 
 ```bash
 ~/af3_plot_env/bin/python scripts/af3_visualize.py vhh_001_out/vhh_A01 -o figs  # 타깃 하나
@@ -1654,8 +1644,7 @@ parameter/data uncertainty 또는 correctness calibration이 아니다. 단량�
 
 ### 9-2. `af3_view3d.py`: 브라우저 3D 뷰어
 
-AF3 출력 폴더를 HTML로 만들어 브라우저에서 확인한다. 파일을 열면 구조를 회전·확대할 수 있다.
-파이썬 표준 라이브러리만 사용하므로 추가 설치는 필요 없다.
+AF3 출력 폴더를 HTML로 바꾸면 브라우저에서 바로 볼 수 있다. 파일을 열면 구조를 회전·확대할 수 있고, 파이썬 표준 라이브러리만 쓰므로 추가 설치는 필요 없다.
 
 ```bash
 # 타깃 하나만 본다
@@ -1823,7 +1812,7 @@ ChimeraX 버전은 `palette alphafold`를 0~1 범위로 해석하므로, 생성�
 
 ---
 
-## 10. 자주 만나는 문제
+## 10. 자주 겪는 문제
 
 | 증상 | 원인 | 해결 |
 |------|------|------|
