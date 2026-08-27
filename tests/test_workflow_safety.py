@@ -176,6 +176,21 @@ def test_markdown_local_links_resolve():
         "### 5. 결과는 이 순서로 읽습니다",
     ):
         check_in(quick_heading, quick_summary, "Quick Start의 설치·실행·해석 순서가 불완전하다")
+    detailed_inputs = "## 다양한 입력 유형별 실행 예시"
+    check_in(detailed_inputs, readme, "다양한 input 실행 예시 절이 README에서 사라졌다")
+    check(
+        readme.index("</details>") < readme.index(detailed_inputs),
+        "다양한 input 실행 예시가 접힌 설치 설명 안에 숨었다",
+    )
+    for example_heading in (
+        "### A. multi-FASTA의 단백질을 각각 예측",
+        "### B. 같은 단백질 2부로 homodimer 예측",
+        "### C. 여러 대상에 같은 항원 추가",
+        "### D. 공통 파트너를 2부 추가",
+        "### E. 서로 다른 단백질 사슬 3종 예측",
+        "### F. protein에 ligand 추가",
+    ):
+        check_in(example_heading, readme, "중요한 input 유형별 실행 예제가 빠졌다")
     # 해석 절은 글로만 설명하지 말고 실제 산출물을 보여 준다.
     for shown in ("figures/example_complex_plddt.png", "figures/example_complex_pae.png",
                   "figures/view3d_screenshot.png"):

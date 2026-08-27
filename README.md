@@ -116,10 +116,31 @@ python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 | `quick_figures/` | pLDDT·PAE 그림 | 이미지 뷰어 |
 | `quick_viewer/index.html` | 타깃 목록과 회전 가능한 3D 구조 | 브라우저 |
 
+#### 실제 browser 결과 예시
+
+아래 screenshot의 **아래쪽 표(e)**가 `index.html`입니다. 타깃 이름을 누르면 **위쪽의 개별
+Mol* 화면(a–c)**이 열립니다. 개별 화면에서는 구조를 회전·확대하고, `pLDDT`와 `사슬별`
+버튼으로 색상을 바꿀 수 있습니다. 이미지를 누르면 원본 크기로 볼 수 있습니다.
+
+![전체 타깃 표에서 개별 Mol* 3D 구조로 이동하는 실제 browser 화면](figures/view3d_screenshot.png)
+
 ### 4. 내 서열을 실행합니다
 
-아래 예시는 FASTA의 각 서열을 **서로 독립된 단량체**로 예측합니다. FASTA 파일에 `>이름`과
-아미노산 서열을 적습니다.
+먼저 만들려는 입력 유형을 고르세요.
+
+| 만들려는 구조 | 준비할 파일 | `af3_prepare.py`에서 사용할 옵션 |
+|---|---|---|
+| 여러 서열을 각각 단량체로 예측 | multi-FASTA 또는 CSV/TSV | `--fasta` 또는 `--csv` |
+| 같은 단백질 N부로 homomer 예측 | 단일 FASTA | `--copies N` |
+| 여러 대상에 같은 항원 추가 | 대상 FASTA/CSV + 항원 FASTA | `--partner-fasta antigen.fasta` |
+| 같은 파트너를 N부 추가 | 대상 FASTA + 파트너 FASTA | `--partner-fasta ... --partner-copies N` |
+| ATP 같은 ligand 추가 | 대상 FASTA | `--ligand-ccd ATP` 또는 `--ligand-smiles 'SMILES'` |
+| 서로 다른 단백질 사슬 3종 이상 | AF3 JSON | `sequences` 배열을 직접 작성 |
+| DNA/RNA가 포함된 복합체 | AF3 JSON | `sequences`에 `dna` 또는 `rna`를 직접 작성 |
+
+multi-FASTA의 각 레코드는 **서로 독립된 예측 작업**입니다. 여러 레코드가 자동으로 한
+복합체가 되지는 않습니다. 아래는 가장 단순한 단량체 입력 예시입니다. FASTA 파일에
+`>이름`과 아미노산 서열을 적으세요.
 
 ```text
 >sample_01
@@ -140,7 +161,7 @@ python3 scripts/run_af3_batch_improved.py \
 python3 scripts/af3_collect.py my_project_out -o my_project_summary.csv
 ```
 
-CSV/TSV, homomer, 공통 항원, ligand, 3개 이상 사슬 입력은
+각 입력 유형의 전체 명령과 실제 예제 파일은 [접힌 상세 튜토리얼](#처음부터-자세히-따라하기)과
 [5-3절](#5-3-af3_preparepy-fastacsv-에서-json-만들기)을 참고하세요. 복합체 후보를 줄일 때는
 reduced overlay의 score 보존이 검증되지 않았으므로 full DB 결과를 기준으로 판단하세요.
 
@@ -166,6 +187,7 @@ reduced overlay의 score 보존이 검증되지 않았으므로 full DB 결과�
 ## 목차
 
 - [처음부터 자세히 따라하기](#처음부터-자세히-따라하기)
+- [다양한 입력 유형별 실행 예시](#다양한-입력-유형별-실행-예시)
 - [저장소 범위와 공식 upstream 관계](#1-이-저장소의-범위)
 - [설치 상세](#3-설치)
 - [입력 JSON과 FASTA/CSV 준비](#5-입력-파일-준비)
@@ -461,13 +483,15 @@ CSV/TSV도 사용할 수 있다. 첫 줄에는 열 이름이 있어야 하며 �
 multi-FASTA의 각 레코드는 서로 독립된 예측 작업이며, 여러 레코드를 한 복합체로 합치지
 않는다.
 
-### 5. 입력 유형별 실행 예시
+</details>
 
-A~D는 `--dry-run` 확인 후 JSON을 만들고, E는 제공 JSON의 문법을 확인한 뒤 같은 배치
-러너로 실행한다. 필요한 입력 유형만 선택해서 실행하면 된다.
+## 다양한 입력 유형별 실행 예시
 
-실제 입력 데이터는 다음 파일에서 확인할 수 있다. 파일 이름을 누르면 GitHub에서 전체
-내용을 볼 수 있으며 그대로 내려받아 실행할 수 있다.
+A~D와 F는 `--dry-run` 확인 후 JSON을 만들고, E는 제공 JSON의 문법을 확인한 뒤 같은 배치
+러너로 실행합니다. 필요한 입력 유형만 골라서 따라가세요.
+
+실제 입력 데이터는 아래 파일에서 확인할 수 있습니다. 파일 이름을 누르면 GitHub에서 전체
+내용을 보거나 그대로 내려받을 수 있습니다.
 
 | 작업 | 입력 데이터 예제 | 파일 안의 구성 |
 |---|---|---|
@@ -476,14 +500,15 @@ A~D는 `--dry-run` 확인 후 JSON을 만들고, E는 제공 JSON의 문법을 �
 | 모든 대상에 같은 항원 추가 | [multi-FASTA 6종](examples/vhh_panel.fasta) + [공통 항원 FASTA](examples/antigen.fasta) | 대상 6개 + lysozyme 1개 |
 | 공통 파트너 N부 추가 | [단일 VHH FASTA](examples/vhh_single.fasta) + [공통 항원 FASTA](examples/antigen.fasta) | 대상 1개 + 반복할 파트너 1개 |
 | 서로 다른 단백질 3종 | [서로 다른 단백질 3사슬 JSON](examples/three_protein_complex.json) | `sequences` 배열의 A, B, C protein |
-| 실제로 결합하는 3사슬 복합체 | [트랜스듀신 헤테로3량체 JSON](examples/gprotein_heterotrimer_1got.json) | PDB 1GOT 의 Gα 350 + Gβ1 340 + Gγ1 73 잔기. 계면이 실제로 잡히는 대조군이다 |
+| 실제로 결합하는 3사슬 복합체 | [트랜스듀신 헤테로3량체 JSON](examples/gprotein_heterotrimer_1got.json) | PDB 1GOT의 Gα 350 + Gβ1 340 + Gγ1 73 잔기. 알려진 복합체 대조군입니다 |
+| protein + ATP ligand | [단일 VHH FASTA](examples/vhh_single.fasta) | protein A 사슬 + ATP ligand L |
 
-FASTA 예제는 공개 PDB 유래 서열이고, 3사슬 JSON은 입력 형식 확인용 조합이다. 실제 연구
-서열은 같은 형식으로 별도 파일에 준비하며 Git에는 추가하지 않는다.
+FASTA 예제는 공개 PDB 유래 서열입니다. 3사슬 JSON에는 입력 형식 확인용 조합과 알려진
+복합체 대조군이 함께 있습니다. 실제 연구 서열은 별도 파일에 준비하고 Git에는 추가하지 마세요.
 
-#### A. multi-FASTA의 단백질을 각각 예측
+### A. multi-FASTA의 단백질을 각각 예측
 
-한 FASTA에 여러 서열을 넣되, 서로 합치지 않고 단백질별로 하나씩 예측할 때 사용한다.
+한 FASTA에 여러 서열을 넣고, 각 단백질을 별도 작업으로 예측할 때 사용합니다.
 
 ```bash
 python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta -o panel_in --dry-run
@@ -502,10 +527,10 @@ pTM은 0.82~0.90, 원자 평균 pLDDT는 82.9~92.7이었다. 다른 입력에서
 
 ![A. multi-FASTA 6종 실제 실행 결과](figures/quickstart_a_multifasta.png)
 
-#### B. 같은 단백질 2부로 homodimer 예측
+### B. 같은 단백질 2부로 homodimer 예측
 
-동일한 단백질 두 부가 함께 있는 구조를 예측할 때 `--copies 2`를 사용한다. 만들어지는
-JSON에는 같은 서열의 A, B 사슬이 들어간다.
+동일한 단백질 두 부가 함께 있는 구조를 예측하려면 `--copies 2`를 사용하세요. 생성되는
+JSON에는 같은 서열의 A, B 사슬이 들어갑니다.
 
 ```bash
 python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
@@ -526,10 +551,10 @@ python3 scripts/af3_view3d.py homodimer_out --out-dir homodimer_viewer
 
 ![B. homodimer 실제 실행의 PAE](figures/quickstart_b_homodimer_pae.png)
 
-#### C. 여러 대상에 같은 항원 추가
+### C. 여러 대상에 같은 항원 추가
 
-VHH 6개에 같은 lysozyme을 하나씩 붙여 복합체 후보 6개를 계산한다. 파트너 FASTA에
-레코드가 여러 개 있으면 첫 번째 레코드만 사용하고 경고를 출력한다.
+VHH 6개에 같은 lysozyme을 하나씩 붙여 복합체 후보 6개를 만들 때 사용합니다. 파트너
+FASTA에 레코드가 여러 개 있으면 첫 번째 레코드만 사용하고 경고를 보여 줍니다.
 
 ```bash
 python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta \
@@ -544,10 +569,10 @@ python3 scripts/af3_collect.py antigen_panel_out -o antigen_panel_summary.csv
 python3 scripts/af3_view3d.py antigen_panel_out --out-dir antigen_panel_viewer
 ```
 
-#### D. 공통 파트너를 2부 추가
+### D. 공통 파트너를 2부 추가
 
-대상 한 부와 동일한 파트너 두 부를 한 복합체로 계산한다. `--partner-copies 2`를 주면
-대상 A와 같은 파트너 B, C 사슬이 만들어진다.
+대상 한 부와 동일한 파트너 두 부를 한 복합체로 계산하려면 `--partner-copies 2`를 사용하세요.
+대상 A와 같은 파트너 B, C 사슬이 만들어집니다.
 
 ```bash
 python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
@@ -564,11 +589,11 @@ python3 scripts/af3_collect.py partner_dimer_out -o partner_dimer_summary.csv
 python3 scripts/af3_view3d.py partner_dimer_out --out-dir partner_dimer_viewer
 ```
 
-#### E. 서로 다른 단백질 사슬 3종 예측
+### E. 서로 다른 단백질 사슬 3종 예측
 
-현재 `af3_prepare.py`는 서로 다른 protein 3종을 자동 조합하지 않는다. 이 경우 A, B, C
-사슬이 들어 있는 AF3 JSON을 입력 폴더에 직접 둔다. 제공 파일은 JSON 문법과 3사슬 실행을
-확인하기 위한 예제이며, 실제 생물학적 복합체를 뜻하지 않는다.
+현재 `af3_prepare.py`는 서로 다른 protein 3종을 자동으로 조합하지 않습니다. A, B, C 사슬이
+들어 있는 AF3 JSON을 입력 폴더에 직접 넣으세요. `three_protein_complex.json`은 형식 확인용
+조합이며, 실제 생물학적 복합체를 뜻하지 않습니다.
 
 ```bash
 python3 -m json.tool examples/three_protein_complex.json >/dev/null
@@ -582,12 +607,29 @@ python3 scripts/af3_collect.py three_chain_out -o three_chain_summary.csv
 python3 scripts/af3_view3d.py three_chain_out --out-dir three_chain_viewer
 ```
 
-CSV의 `등급` 열로 1차 선별하고, 단량체는 pTM과 pLDDT평균, 복합체는 ipTM을 본다.
-신뢰도는 정답 일치도가 아니라 후보를 줄이기 위한 순위 지표로 사용한다
-(판정 기준은 [8절](#8-결과-해석)). 처음 사용하는 경우에는 2절 요구 사양부터
-8절 결과 해석까지 순서대로 확인한다.
+### F. protein에 ligand 추가
 
-</details>
+CCD 코드가 있는 ligand는 `--ligand-ccd`, 직접 가진 SMILES는 `--ligand-smiles`를 사용합니다.
+아래 예시는 protein 한 사슬과 ATP를 같은 JSON에 넣습니다.
+
+```bash
+python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
+    --ligand-ccd ATP -o ligand_in --dry-run
+python3 scripts/af3_prepare.py --fasta examples/vhh_single.fasta \
+    --ligand-ccd ATP -o ligand_in
+python3 scripts/run_af3_batch_improved.py \
+    --input-dir ligand_in --output-dir ligand_out \
+    --db-dir ~/public_databases_full --yes
+python3 scripts/af3_collect.py ligand_out -o ligand_summary.csv
+python3 scripts/af3_view3d.py ligand_out --out-dir ligand_viewer
+```
+
+DNA/RNA가 포함된 입력은 [AF3 JSON 구조 설명](#5-1-입력-json-의-구조)을 참고해
+`sequences` 배열에 직접 추가하세요.
+
+CSV의 `등급`과 `경고`를 먼저 확인하세요. 단량체는 pTM과 pLDDT평균, 복합체는 ipTM을
+함께 봅니다. 이 값은 정답이나 결합 여부가 아니라 후보를 정리하는 순위 지표입니다.
+자세한 기준은 [8절](#8-결과-해석)을 참고하세요.
 
 ---
 
