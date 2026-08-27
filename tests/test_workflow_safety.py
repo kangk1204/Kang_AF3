@@ -168,8 +168,13 @@ def test_markdown_local_links_resolve():
     check(quick_summary, "README 상단 Quick Start가 없다")
     # Quick Start 하나로 설치 -> 실행 -> 해석 -> 본인 입력까지 끝나야 한다.
     # 결과 읽는 법이 빠지면 사용자는 표를 받고도 무엇을 골라야 할지 모른다.
-    for quick_heading in ("### 1. 설치", "### 2. 예제로 배치 실행",
-                          "### 3. 결과 읽기", "### 4. 본인 입력 준비"):
+    for quick_heading in (
+        "### 1. 한 번만 설치합니다",
+        "### 2. 예제 1건으로 설치를 확인합니다",
+        "### 3. 표와 구조를 만듭니다",
+        "### 4. 내 서열을 실행합니다",
+        "### 5. 결과는 이 순서로 읽습니다",
+    ):
         check_in(quick_heading, quick_summary, "Quick Start의 설치·실행·해석 순서가 불완전하다")
     # 해석 절은 글로만 설명하지 말고 실제 산출물을 보여 준다.
     for shown in ("figures/example_complex_plddt.png", "figures/example_complex_pae.png",
@@ -1577,7 +1582,7 @@ def test_quick_start_sets_expectations_before_the_first_long_run():
         "Quick Start 예제가 overlay 우선 ordered root 로 실행되지 않는다",
     )
     check_in(
-        "overlay는 full DB를 **대체하지 않는다.**",
+        "overlay는 full DB를 **대체하지 않습니다.**",
         quick_start,
         "overlay 가 다운로드를 줄여준다는 오해를 막지 않는다",
     )

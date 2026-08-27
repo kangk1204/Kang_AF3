@@ -29,7 +29,8 @@ FASTA나 CSV에 서열을 준비하면 입력 JSON 생성부터 AlphaFold 3 실�
 | 모델 가중치 이용약관 동의 | [Google DeepMind 원문](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)을 먼저 읽습니다 |
 | 공개 가능한 작업 폴더 | 미공개 서열, 모델 가중치, DB는 Git에 올리지 않습니다 |
 
-이 도구는 구조와 confidence를 예측합니다. **점수가 높아도 실제 결합, affinity/Kd, epitope를
+이 도구는 구조와 confidence(예측 신뢰도)를 계산합니다. **점수가 높아도 실제 결합,
+affinity/Kd, epitope를
 증명하지는 않습니다.** 후보를 정리한 뒤 실험으로 확인하는 용도로 사용하세요.
 
 ### 설치 전에 결과 화면부터 보기
@@ -67,8 +68,8 @@ bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
 
 ### 2. 예제 1건으로 설치를 확인합니다
 
-먼저 약 2GB의 reduced-MSA overlay를 만듭니다. overlay는 서열 검색을 빠르게 하지만 템플릿은
-full DB에서 가져옵니다. overlay는 full DB를 **대체하지 않습니다.**
+먼저 약 2GB의 reduced-MSA overlay(서열 검색용 작은 사본)를 만듭니다. overlay는 서열 검색을
+빠르게 하지만 템플릿은 full DB에서 가져옵니다. overlay는 full DB를 **대체하지 않습니다.**
 
 ```bash
 python3 scripts/af3_db.py reduce \
@@ -110,8 +111,8 @@ python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 
 | 위치 | 무엇이 들어 있나요? | 무엇으로 여나요? |
 |---|---|---|
-| `quick_summary.csv` | 모든 타깃의 confidence와 경고 | Excel·스프레드시트 |
-| `quick_out/vhh_7mfv_1/` | 구조, confidence JSON, MSA, provenance | 후속 분석용 원본 |
+| `quick_summary.csv` | 모든 타깃의 예측 신뢰도와 경고 | Excel·스프레드시트 |
+| `quick_out/vhh_7mfv_1/` | 구조, 신뢰도 JSON, MSA, provenance(실행 조건 기록) | 후속 분석용 원본 |
 | `quick_figures/` | pLDDT·PAE 그림 | 이미지 뷰어 |
 | `quick_viewer/index.html` | 타깃 목록과 회전 가능한 3D 구조 | 브라우저 |
 
@@ -157,7 +158,8 @@ reduced overlay의 score 보존이 검증되지 않았으므로 full DB 결과�
 4. 단량체는 pTM, 복합체는 ipTM을 사용합니다. ipTM이 없는 복합체는 낮은 신뢰로 따로 봅니다.
 5. 최종 후보는 binding assay나 기능 실험으로 확인합니다.
 
-`등급`은 이 저장소가 후보 정리를 돕기 위해 붙이는 local heuristic입니다. 진단, 결합 판정,
+`등급`은 이 저장소가 후보 정리를 돕기 위해 붙이는 local heuristic(내부 분류 규칙)입니다.
+진단, 결합 판정,
 독립 검증을 뜻하지 않습니다. 즉, 이 단계는 검증된 screening이 아니라 미검증
 `exploratory prioritization`입니다. 지표의 정확한 정의는 [8절](#8-결과-해석)을 참고하세요.
 
