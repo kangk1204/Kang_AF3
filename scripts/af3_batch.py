@@ -281,6 +281,8 @@ def image_identity(docker, image, dry_run=False):
     if result.returncode != 0 or not digest:
         raise RuntimeError("도커 이미지 identity 확인 실패(exit=%d): %s"
                            % (result.returncode, (result.stderr or "").strip()))
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", digest):
+        raise RuntimeError("도커 이미지 identity가 immutable SHA-256 ID가 아니다: %s" % digest)
     return {"reference": image, "digest": digest}
 
 
@@ -311,10 +313,10 @@ def probe_flags(docker, image):
     """이 이미지의 run_alphafold.py 가 실제로 지원하는 플래그 집합을 --help 에서 추출.
 
     버전마다 플래그가 다르므로, 없는 플래그를 넘겨서 즉시 죽는 사고를 막는다.
-    탐지가 실패하면 None 을 돌려주고, 호출부는 '전부 지원' 으로 가정한다.
+    탐지가 실패하면 None 을 돌려주고, 호출부는 추측 실행 없이 중단한다.
     """
     try:
-        r = subprocess.run(docker + ["run", "--rm", image,
+        r = subprocess.run(docker + ["run", "--rm", "--network", "none", image,
                                      "python", "run_alphafold.py", "--help"],
                            capture_output=True, text=True, timeout=600)
         text = (r.stdout or "") + (r.stderr or "")
@@ -1149,7 +1151,7 @@ def teardown_containers():
 def build_cmd(args, docker, stage, input_dir, output_dir, buckets,
               extra_env=None, n_cpu=None, flags=None, container=None):
     """docker run 명령을 조립한다. stage 에 따라 GPU 사용/파이프라인 on-off 가 다르다."""
-    cmd = list(docker) + ["run", "--rm"]
+    cmd = list(docker) + ["run", "--rm", "--network", "none"]
     if container:
         cmd += ["--name", container]
     user = container_user()
@@ -2272,6 +2274,9 @@ def main(argv=None):
     except RuntimeError as exc:
         print("오류: %s" % exc)
         return 1
+    if not args.dry_run:
+        # Run the exact local image inspected above, never the mutable tag.
+        args.image = image_record["digest"]
     try:
         db_record = (
             database_identity(

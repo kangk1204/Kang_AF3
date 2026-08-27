@@ -72,6 +72,19 @@ class ProvenanceTests(unittest.TestCase):
         finally:
             workspace.cleanup()
 
+    def test_embedded_nul_sidecar_path_is_a_per_file_validation_error(self):
+        runner = load_module(RUNNER, "nul_sidecar_path_runner")
+        workspace = Workspace()
+        try:
+            payload = workspace.monomer("vhh_nul")
+            payload["sequences"][0]["protein"]["unpairedMsaPath"] = "bad\0.a3m"
+            path = workspace.write_json("nul.json", payload)
+            job, error = runner.read_job(path, workspace.input_dir)
+            self.assertIsNone(job)
+            self.assertIn("sidecar snapshot", error)
+        finally:
+            workspace.cleanup()
+
     def test_symlink_swap_during_json_snapshot_fails_closed(self):
         runner = load_module(RUNNER, "input_snapshot_symlink_race_runner")
         workspace = Workspace()
@@ -244,6 +257,12 @@ class ProvenanceTests(unittest.TestCase):
             self.assertIn("database_fingerprints", first_provenance)
             self.assertIn("model_checksum", first_provenance)
             self.assertIn("image_identity", first_provenance)
+            run_calls = [
+                call for call in workspace.stub_calls() if call.get("call") == "run"
+            ]
+            self.assertTrue(run_calls)
+            self.assertEqual(run_calls[-1].get("network"), "none")
+            self.assertIn("@sha256:", run_calls[-1].get("image", ""))
 
             changed = workspace.monomer("vhh_a", sequence="CHANGEDSEQUENCE")
             workspace.write_json("a.json", changed)
@@ -490,6 +509,26 @@ class ProvenanceTests(unittest.TestCase):
         finally:
             workspace.cleanup()
 
+    def test_image_inspect_failure_stops_before_probe_or_run(self):
+        workspace = Workspace()
+        try:
+            workspace.write_json("a.json", workspace.monomer("vhh_a"))
+            result = run_script(
+                RUNNER,
+                default_args(workspace, "--yes"),
+                workspace,
+                env_extra={"AF3_STUB_INSPECT_FAIL": "1"},
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("immutable ID/digest", result.stdout)
+            calls = workspace.stub_calls()
+            self.assertTrue(any(call.get("call") == "inspect" for call in calls))
+            self.assertFalse(
+                any(call.get("call") in {"help", "run"} for call in calls)
+            )
+        finally:
+            workspace.cleanup()
+
 
 class GPUReservationTests(unittest.TestCase):
     @staticmethod
@@ -680,6 +719,22 @@ class GPUReservationTests(unittest.TestCase):
         self.assertEqual(code, 124)
         self.assertLess(time.monotonic() - started, 3)
 
+    def test_watchdog_signature_is_limited_to_current_targets(self):
+        runner = load_module(RUNNER, "bounded_watchdog_signature_runner")
+        with tempfile.TemporaryDirectory(prefix="af3_watchdog_scope_") as td:
+            root = Path(td)
+            current = root / "current"
+            unrelated = root / "already_complete"
+            current.mkdir()
+            unrelated.mkdir()
+            (current / "progress.bin").write_bytes(b"a")
+            (unrelated / "large-history.bin").write_bytes(b"history")
+            before = runner._progress_signature((current,))
+            (unrelated / "large-history.bin").write_bytes(b"changed history")
+            self.assertEqual(runner._progress_signature((current,)), before)
+            (current / "progress.bin").write_bytes(b"current progress")
+            self.assertNotEqual(runner._progress_signature((current,)), before)
+
     def test_no_progress_watchdog_returns_failure(self):
         runner = load_module(RUNNER, "gpu_no_progress_runner")
         with tempfile.TemporaryDirectory(prefix="af3_no_progress_") as td:
@@ -711,6 +766,17 @@ def registered_private_input_snapshot_consistency():
     _run_case(
         ProvenanceTests,
         "test_private_snapshot_drives_parse_provenance_and_staging",
+    )
+
+
+@regression(
+    item="input-snapshot",
+    prevents="JSON sidecar 경로의 NUL 문자가 전체 batch를 uncaught ValueError로 중단하는 버그",
+)
+def registered_embedded_nul_sidecar_rejection():
+    _run_case(
+        ProvenanceTests,
+        "test_embedded_nul_sidecar_path_is_a_per_file_validation_error",
     )
 
 
@@ -825,6 +891,17 @@ def registered_final_artifact_hashes():
 
 @regression(
     item="provenance-v2",
+    prevents="도커 image inspect 실패 뒤 mutable tag로 계산해 provenance identity를 잃는 버그",
+)
+def registered_image_identity_fail_closed():
+    _run_case(
+        ProvenanceTests,
+        "test_image_inspect_failure_stops_before_probe_or_run",
+    )
+
+
+@regression(
+    item="provenance-v2",
     prevents="provenance symlink를 따라 외부 파일을 덮어쓰는 버그",
 )
 def registered_atomic_provenance_symlink_rejection():
@@ -902,6 +979,17 @@ def registered_configurable_run_timeout():
 )
 def registered_no_progress_watchdog():
     _run_case(GPUReservationTests, "test_no_progress_watchdog_returns_failure")
+
+
+@regression(
+    item="watchdog",
+    prevents="watchdog가 2,000건의 과거 완료 tree를 반복 scan해 실행시간이 누적되는 버그",
+)
+def registered_watchdog_current_target_scope():
+    _run_case(
+        GPUReservationTests,
+        "test_watchdog_signature_is_limited_to_current_targets",
+    )
 
 
 if __name__ == "__main__":

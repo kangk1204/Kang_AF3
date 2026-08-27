@@ -1,5 +1,17 @@
 # Releases
 
+## v0.1.2
+
+공동연구자에게 전달하기 전 최종 감사에서 확인된 실행·설치 경계를 보강한 버전입니다.
+
+- 공식 AF3가 같은 서열의 사슬 ID를 묶어 쓰거나 MSA 기본값을 채워도 정상 결과를 올바르게 인식합니다.
+- Docker 이미지는 검사한 immutable digest로 실행하고 계산 컨테이너의 외부 네트워크를 차단합니다.
+- DB seal·overlay 동시 생성, 결과 폴더 symlink, 잘못된 sidecar 경로를 fail-closed로 처리합니다.
+- 대량 배치 watchdog은 현재 대상만 확인하며, installer download와 clean-Ubuntu probe에는 중단 한계를 둡니다.
+- Quick Start를 초보 wet-lab 연구자용 공손체로 다듬고, 실제 Table → Mol* 화면을 클릭 가능한 이미지로 보여 줍니다.
+- AF3 결과 이미지의 source hash와 crop 좌표를 manifest에 기록해 같은 바이트로 재생성할 수 있습니다.
+- 구조 confidence는 결합·affinity·epitope·native 정확도·SOTA의 실험 검증이 아니라는 경계를 유지합니다.
+
 ## v0.1.1
 
 첫 공개 미리보기 버전입니다.

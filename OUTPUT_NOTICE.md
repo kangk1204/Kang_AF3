@@ -33,6 +33,7 @@
 | `figures/*_plddt.png`, `*_pae.png`, confidence/structure 그림 | AF3 confidence JSON·mmCIF | residue/atom 집계, 색, 축, 범례와 주석을 추가했다. local grade와 cutoff는 AF3가 정의하거나 보정한 값이 아니다 |
 | `figures/*benchmark*.png`, `baseline_gpu5070ti.png`, `msa_threads_scaling.png` | runtime CSV | 측정값을 축·단위·주석과 함께 재표현했다. builder와 입력 hash는 `ARTIFACT_MANIFEST.json`에 기록한다 |
 | `figures/view3d_screenshot.png` | 생성 viewer의 화면 | viewer UI를 캡처한 역사적 screenshot이다. 원본 browser/session capture가 없어 byte 재현 불가로 표시한다 |
+| `figures/view3d_index_table.png`, `view3d_molstar_target.png` | 위의 retained screenshot | README에서 Table → 개별 Mol* 흐름을 읽기 쉽게 보여 주도록 픽셀 crop만 했다. 좌표와 source hash는 `ARTIFACT_MANIFEST.json`에 기록한다 |
 | `examples/view3d_example.html` | `*_model.cif` 와 요약 지표 | mmCIF를 base64로 넣고 계산 지표·색·설명을 추가했다. 좌표/B-factor를 재작성하지 않았지만 HTML 전체는 수정 표현이다 |
 
 `ranking_score`, `pTM`, `ipTM`은 AF3 JSON scalar를 그대로 전사한다. `pLDDT평균`,

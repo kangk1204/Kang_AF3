@@ -215,7 +215,7 @@ validate_path "AF3_DB_DIR" "$DB_DIR"
 validate_path "AF3_PLOT_ENV" "$PLOT_ENV"
 validate_path "AF3_DB_DIR.partial" "$DB_PARTIAL"
 validate_path "AF3 source directory" "$SOURCE_DIR"
-managed_paths=("$MODEL_DIR" "$DB_DIR" "$PLOT_ENV" "$SOURCE_DIR")
+managed_paths=("$MODEL_DIR" "$DB_DIR" "$DB_PARTIAL" "$PLOT_ENV" "$SOURCE_DIR")
 for ((left_index = 0; left_index < ${#managed_paths[@]}; left_index++)); do
   for ((right_index = left_index + 1; right_index < ${#managed_paths[@]}; right_index++)); do
     paths_overlap "${managed_paths[$left_index]}" "${managed_paths[$right_index]}" && \
@@ -686,6 +686,7 @@ install_weights() {
     archive_source="$WEIGHT_STAGE_DIR/af3.bin.zst"
     curl --proto '=https' --proto-redir '=https' -L --fail \
       --retry 20 --retry-delay 5 --retry-all-errors \
+      --connect-timeout 30 --speed-limit 1024 --speed-time 300 \
       --output "$archive_source" "$MODEL_URL"
     zstd -q -t "$archive_source" || die "downloaded model archive failed zstd integrity"
   fi

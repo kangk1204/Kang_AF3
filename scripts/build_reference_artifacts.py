@@ -37,6 +37,13 @@ REPRODUCIBLE = {
         "results_example/db_confidence_comparison.csv"
     ],
     "figures/confidence_overview.png": ["results_example/af3_summary.csv"],
+    "figures/view3d_index_table.png": ["figures/view3d_screenshot.png"],
+    "figures/view3d_molstar_target.png": ["figures/view3d_screenshot.png"],
+}
+
+CROPS = {
+    "figures/view3d_index_table.png": (520, 1930, 3440, 2260),
+    "figures/view3d_molstar_target.png": (535, 75, 1920, 960),
 }
 
 HISTORICAL = {
@@ -46,8 +53,6 @@ HISTORICAL = {
     "figures/example_summary_6targets.png": "original raw AF3 output is absent",
     "figures/quickstart_a_multifasta.png": "original raw AF3 output is absent",
     "figures/quickstart_b_homodimer_pae.png": "original raw AF3 output is absent",
-    "figures/view3d_index_table.png": "cropped from retained browser/session screenshot",
-    "figures/view3d_molstar_target.png": "cropped from retained browser/session screenshot",
     "figures/view3d_screenshot.png": "browser/session capture source is absent",
     "examples/view3d_example.html": "embedded AF3 output is retained, but original generator inputs/session are absent",
 }
@@ -240,11 +245,27 @@ def build_confidence(plt):
     save(fig, "confidence_overview.png")
 
 
+def build_viewer_crops():
+    """Rebuild the README's exact browser crops from the retained screenshot."""
+    from PIL import Image
+
+    source = Image.open(FIGURES / "view3d_screenshot.png")
+    try:
+        for artifact, box in CROPS.items():
+            cropped = source.crop(box)
+            try:
+                cropped.save(ROOT / artifact)
+            finally:
+                cropped.close()
+    finally:
+        source.close()
+
+
 def write_manifest():
     artifacts = []
     for artifact, inputs in sorted(REPRODUCIBLE.items()):
         path = ROOT / artifact
-        artifacts.append({
+        record = {
             "path": artifact,
             "sha256": sha256(path),
             "status": "reproducible_from_tracked_sources",
@@ -253,7 +274,13 @@ def write_manifest():
             "generator_version": BUILDER_VERSION,
             "af3_revision": AF3_REVISION,
             "output_terms": "notice_and_pinned_terms_distributed",
-        })
+        }
+        if artifact in CROPS:
+            record["transform"] = {
+                "operation": "pixel_crop",
+                "box": list(CROPS[artifact]),
+            }
+        artifacts.append(record)
     for artifact, reason in sorted(HISTORICAL.items()):
         path = ROOT / artifact
         artifacts.append({
@@ -384,6 +411,7 @@ def main(argv=None):
         build_msa_depth(plt)
         build_db_comparison(plt)
         build_confidence(plt)
+        build_viewer_crops()
     write_manifest()
     return 0
 

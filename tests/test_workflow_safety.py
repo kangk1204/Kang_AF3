@@ -155,7 +155,7 @@ def test_markdown_local_links_resolve():
     # 커밋하면 되돌릴 수 없다는 것.
     check_in("저장소 공개 여부와 관계없이 Git에 추가하지", readme,
              "커밋하면 안 되는 것을 공개 여부와 무관하게 못박지 않았다")
-    check_in("이력에 남는다", readme,
+    check_in("이력에 남", readme,
              "한 번 커밋하면 되돌릴 수 없다는 점을 말하지 않았다")
     check(
         "비공개 연구 협업 저장소" not in readme,
@@ -199,7 +199,7 @@ def test_markdown_local_links_resolve():
     # --accept-weights-terms 를 붙이기 전에 무엇에 동의하는지 알 수 있어야 한다.
     check_in("WEIGHTS_TERMS_OF_USE.md", quick_summary,
              "Quick Start가 가중치 약관 원문을 링크하지 않는다")
-    check_in("설치기가 자동으로 내려받는다", quick_summary,
+    check_in("설치기가 자동으로 내려받", quick_summary,
              "Quick Start가 가중치를 어디서 받는지 답하지 않는다")
     for input_step in (
         "cp examples/vhh_monomer.json quick_in/",
@@ -480,6 +480,31 @@ def test_installer_help_dry_run_and_safety_gates():
         check(overlap_proc.returncode != 0, "겹치는 관리 경로를 허용했다")
         check_in("overlap", overlap_proc.stdout + overlap_proc.stderr, "경로 충돌 원인이 없다")
 
+        env.update(
+            {
+                "AF3_WORK_DIR": str(root / "work"),
+                "AF3_MODEL_DIR": str(root / "db.partial" / "models"),
+                "AF3_DB_DIR": str(root / "db"),
+                "AF3_PLOT_ENV": str(root / "plot"),
+            }
+        )
+        partial_overlap = subprocess.run(
+            ["bash", str(installer), "--dry-run", "--full", "--accept-weights-terms"],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        check(
+            partial_overlap.returncode != 0,
+            "DB staging 경로와 겹치는 managed path를 허용했다",
+        )
+        check_in(
+            "overlap",
+            partial_overlap.stdout + partial_overlap.stderr,
+            "DB staging 경로 충돌 원인이 없다",
+        )
+
     with tempfile.TemporaryDirectory(prefix="af3_installer_bad_db_") as td:
         root = Path(td)
         bad_db = root / "bad_db"
@@ -718,6 +743,8 @@ def test_installer_help_dry_run_and_safety_gates():
     check("DB_PARTIAL_MARKER_NAME" in source, "installer-owned DB partial 표식이 없다")
     check("PLOT_ENV_MARKER_NAME" in source, "installer-owned plotting venv 표식이 없다")
     check("--proto '=https'" in source, "curl redirect를 HTTPS로 제한하지 않는다")
+    for option in ("--connect-timeout", "--speed-limit", "--speed-time"):
+        check(option in source, f"model download curl에 {option} 제한이 없다")
     check("hello-world@sha256:" in source and "ubuntu@sha256:" in source, "검증 컨테이너 tag가 mutable하다")
     check("capability-validated but unlabeled" not in source, "출처 label 없는 기존 AF3 이미지를 재사용한다")
     check("eval " not in source, "installer가 eval을 사용한다")

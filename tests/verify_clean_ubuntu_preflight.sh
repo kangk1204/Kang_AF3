@@ -31,6 +31,17 @@ IMAGE_UBUNTU="${AF3_CLEAN_UBUNTU_IMAGE:-ubuntu:24.04}"
 IMAGE_OTHER="${AF3_NON_UBUNTU_IMAGE:-debian:12}"
 PASS=0
 FAIL=0
+CASE_INDEX=0
+CASE_TIMEOUT="${AF3_PREFLIGHT_CASE_TIMEOUT:-300}"
+ACTIVE_CONTAINERS=()
+
+cleanup_containers() {
+  local container
+  for container in "${ACTIVE_CONTAINERS[@]}"; do
+    docker rm -f -- "$container" >/dev/null 2>&1 || true
+  done
+}
+trap cleanup_containers EXIT
 
 command -v docker >/dev/null 2>&1 || {
   printf '건너뜀: docker 명령이 없다. 이 검증은 실제 Docker 가 필요하다.\n'
@@ -44,9 +55,15 @@ docker info >/dev/null 2>&1 || {
 # run_case <이름> <기대 종료코드> <기대 문구> <이미지> <컨테이너 안에서 돌릴 셸 코드>
 run_case() {
   local name="$1" want_code="$2" want_text="$3" image="$4" script="$5"
-  local out code
-  out="$(docker run --rm -v "$REPO:/repo:ro" "$image" bash -c "$script" 2>&1)"
+  local out code container
+  CASE_INDEX=$((CASE_INDEX + 1))
+  container="kang-af3-preflight-$$-${CASE_INDEX}"
+  ACTIVE_CONTAINERS+=("$container")
+  out="$(timeout --signal=TERM --kill-after=10s "$CASE_TIMEOUT" \
+    docker run --rm --name "$container" -v "$REPO:/repo:ro" \
+    "$image" bash -c "$script" 2>&1)"
   code=$?
+  docker rm -f -- "$container" >/dev/null 2>&1 || true
   if [[ "$code" == "$want_code" ]] && grep -qF -- "$want_text" <<<"$out"; then
     printf '  [OK]   %s\n' "$name"
     PASS=$((PASS + 1))
@@ -54,7 +71,9 @@ run_case() {
     printf '  [실패] %s\n' "$name"
     printf '         기대: 종료코드 %s + 문구 %q\n' "$want_code" "$want_text"
     printf '         실제: 종료코드 %s\n' "$code"
-    sed 's/^/         | /' <<<"$(tail -5 <<<"$out")"
+    while IFS= read -r line; do
+      printf '         | %s\n' "$line"
+    done < <(tail -5 <<<"$out")
     FAIL=$((FAIL + 1))
   fi
 }
@@ -68,6 +87,11 @@ AS_USER='
   su af3user -c "cd /home/af3user/Kang_AF3 && %s"
 '
 
+as_user_script() {
+  local command="$1"
+  printf '%s' "${AS_USER/\%s/$command}"
+}
+
 printf '깨끗한 우분투 사전 점검 검증 (%s)\n\n' "$IMAGE_UBUNTU"
 
 run_case "root 로 실행하면 거부한다" 2 \
@@ -77,17 +101,17 @@ run_case "root 로 실행하면 거부한다" 2 \
 
 run_case "없는 필수 명령을 이름으로 알려 준다" 1 \
   "required command is missing" "$IMAGE_UBUNTU" \
-  "$(printf "$AS_USER" 'bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms')"
+  "$(as_user_script 'bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms')"
 
 run_case "우분투가 아니면 무엇을 지원하는지 말한다" 1 \
   "supported distribution is Ubuntu" "$IMAGE_OTHER" \
-  "$(printf "$AS_USER" 'bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms')"
+  "$(as_user_script 'bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms')"
 
 # 우분투이긴 하나 지원하지 않는 판인 경우 (os-release 를 바꿔 흉내낸다)
 run_case "지원하지 않는 우분투 판이면 지원 목록을 말한다" 1 \
   "supported Ubuntu releases are 22.04, 24.04, and 26.04" "$IMAGE_UBUNTU" \
   "sed -i 's/^VERSION_ID=.*/VERSION_ID=\"18.04\"/' /etc/os-release
-   $(printf "$AS_USER" 'bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms')"
+   $(as_user_script 'bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms')"
 
 # sudo 와 나머지 명령을 채워 두고 GPU 만 없는 상태를 만든다.
 WITH_TOOLS='
@@ -97,11 +121,11 @@ WITH_TOOLS='
 run_case "GPU 드라이버가 없으면 nvidia-smi 부터 고치라고 한다" 1 \
   "nvidia-smi" "$IMAGE_UBUNTU" \
   "$WITH_TOOLS
-   $(printf "$AS_USER" 'bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms')"
+   $(as_user_script 'bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms')"
 
 run_case "--dry-run 은 계획만 찍고 아무것도 바꾸지 않는다" 0 \
   "no sudo, network, or filesystem changes were made" "$IMAGE_UBUNTU" \
-  "$(printf "$AS_USER" 'bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms --dry-run')"
+  "$(as_user_script 'bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms --dry-run')"
 
 printf '\n통과 %d개, 실패 %d개\n' "$PASS" "$FAIL"
 if ((FAIL)); then

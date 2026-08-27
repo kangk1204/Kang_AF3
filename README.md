@@ -7,7 +7,7 @@ FASTA나 CSV에 서열을 준비하면 입력 JSON 생성부터 AlphaFold 3 실�
 처음 사용한다면 바로 아래 [Quick Start](#quick-start)만 순서대로 따라가세요. 후보를 고르는
 방법만 먼저 보고 싶다면 [wet-lab 연구자용 요약](docs/researcher_guide.md)을 먼저 보세요.
 
-현재 공개 버전은 `v0.1.1`입니다. 변경 메모는 [RELEASES.md](RELEASES.md)에서 볼 수 있습니다.
+현재 공개 버전은 `v0.1.2`입니다. 변경 메모는 [RELEASES.md](RELEASES.md)에서 볼 수 있습니다.
 
 이 저장소는 AlphaFold 3로 만든 예제 결과물(집계 CSV, 그림, 뷰어)도 함께 제공합니다.
 그 결과물에는 AF3 Output Terms 가 적용되고, 이 저장소가 원본 출력에 무엇을 더했는지는
@@ -26,8 +26,8 @@ FASTA나 CSV에 서열을 준비하면 입력 JSON 생성부터 AlphaFold 3 실�
 
 | 필요한 것 | 확인 방법 |
 |---|---|
-| Ubuntu PC와 NVIDIA GPU | 터미널에서 `nvidia-smi`를 실행하면 GPU 표가 나옵니다 |
-| 설치 중 여유 디스크 약 1TB | `df -h ~`로 확인합니다. 설치 후 압축본을 정리하면 약 627GiB까지 줄일 수 있습니다 |
+| Ubuntu 22.04/24.04/26.04 amd64 PC와 NVIDIA GPU | 터미널에서 `nvidia-smi`를 실행하면 GPU 표가 나옵니다 |
+| `sudo` 권한과 설치 중 여유 디스크 약 1TB | `df -h ~`로 확인합니다. 설치 후 압축본을 정리하면 약 627GiB까지 줄일 수 있습니다 |
 | 모델 가중치 이용약관 동의 | [Google DeepMind 원문](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)을 먼저 읽습니다 |
 | 공개 가능한 작업 폴더 | 미공개 서열, 모델 가중치, DB는 Git에 올리지 않습니다 |
 
@@ -81,7 +81,7 @@ python3 scripts/af3_db.py reduce \
 AF3_DB_DIR=~/public_databases_full bash scripts/af3_check.sh
 ```
 
-`af3_check.sh` 마지막에 `[OK] 필수 환경 점검을 모두 통과했습니다.`가 나오면 예제를 실행합니다.
+`af3_check.sh` 마지막에 `[OK] 필수 환경 점검을 모두 통과했다.`가 나오면 예제를 실행합니다.
 
 ```bash
 mkdir -p quick_in
@@ -96,6 +96,10 @@ python3 scripts/run_af3_batch_improved.py \
 이 PC의 VHH 예제는 overlay 경로에서 **53초** 정도 걸립니다. full DB만 사용하면 MSA 검색 때문에
 **35분 이상** 걸릴 수 있습니다. jackhmmer가 DB를 읽는 동안 로그가 **멈춘 것처럼 보여도 정상**입니다.
 다른 터미널에서 `docker ps`를 실행해 컨테이너가 살아 있는지 확인하세요.
+
+기본 watchdog은 결과 파일이 2시간 동안 전혀 바뀌지 않으면 멈춘 작업으로 판단합니다. 매우 큰
+protein/RNA MSA가 실제로 계속 진행 중임을 별도 로그와 `docker ps`로 확인한 경우에만
+`--no-progress-timeout 0`을 추가해 감시를 끄고 직접 지켜보세요.
 
 정상 종료 시 다음 문구가 보입니다.
 
@@ -122,25 +126,24 @@ python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 
 아래 화면을 먼저 보면, 전체 Table에서 개별 Mol* View로 어떻게 이동하는지 바로 잡힙니다.
 
-![전체 Table에서 개별 Mol* View까지 이어지는 실제 Chrome 화면](figures/view3d_screenshot.png)
+원본 전체 화면은 [figures/view3d_screenshot.png](figures/view3d_screenshot.png)에서 볼 수 있습니다.
 
-**1) 전체 Table — `index.html`**
+**A. 전체 Table — `index.html`**
 
 ranking score 순으로 타깃이 보입니다. 파란색 타깃 이름을 누르세요.
 
-![브라우저에서 연 전체 AF3 타깃 Table](figures/view3d_index_table.png)
+[![브라우저에서 연 전체 AF3 타깃 Table](figures/view3d_index_table.png)](figures/view3d_index_table.png)
 
 **↓ 타깃 이름 클릭**
 
-**2) 개별 Mol* View — `<타깃>.html`**
+**B. 개별 Mol* View — `<타깃>.html`**
 
 구조를 마우스로 회전·확대할 수 있습니다. `pLDDT`와 `사슬별` 버튼으로 색상을 바꾸고,
 왼쪽에서 ranking score, pTM, ipTM, 평균 pLDDT와 경고를 함께 확인합니다.
 
-![전체 Table에서 타깃을 눌렀을 때 열리는 개별 MolStar 3D View](figures/view3d_molstar_target.png)
+[![전체 Table에서 타깃을 눌렀을 때 열리는 개별 Mol* View](figures/view3d_molstar_target.png)](figures/view3d_molstar_target.png)
 
 위의 두 이미지는 실제 Chrome 검증 screenshot에서 오른쪽/아래 영역을 잘라낸 것입니다.
-원본 전체 화면은 바로 위에 있습니다.
 
 ### 4. 내 서열을 실행합니다
 
@@ -224,8 +227,8 @@ reduced overlay의 score 보존이 검증되지 않았으므로 full DB 결과�
 
 ### 0. 설치 전에 예시 결과부터 보기
 
-아래 파일은 이 저장소에 그대로 들어 있다. AF3 나 데이터베이스 없이 열린다.
-전부 실제로 돌려서 나온 결과다.
+아래 파일은 이 저장소에 그대로 들어 있습니다. AF3 나 데이터베이스 없이 열립니다.
+전부 실제로 돌려서 나온 결과입니다.
 
 | 산출물 | 파일 | 여는 법 |
 |---|---|---|
@@ -235,11 +238,11 @@ reduced overlay의 score 보존이 검증되지 않았으므로 full DB 결과�
 | 사슬 간 PAE 그림 | `figures/example_complex_pae.png` | 이미지 뷰어 |
 | 6타깃 요약 그림 | `figures/example_summary_6targets.png` | 이미지 뷰어 |
 
-설치는 1절부터다.
+설치는 1절부터 시작합니다.
 
 ### 1. 설치하기
 
-Ubuntu에서 처음 설치할 때는 저장소를 먼저 내려받는다.
+Ubuntu에서 처음 설치할 때는 저장소를 먼저 내려받습니다.
 
 ```bash
 sudo apt update && sudo apt install -y git   # git이 이미 있으면 생략
@@ -248,21 +251,21 @@ git clone https://github.com/kangk1204/Kang_AF3.git ~/af3_work/Kang_AF3
 cd ~/af3_work/Kang_AF3
 ```
 
-설치 전에 NVIDIA 드라이버 상태를 확인한다.
+설치 전에 NVIDIA 드라이버 상태를 확인합니다.
 
 ```bash
 nvidia-smi
 ```
 
-GPU 이름, Driver Version, Memory-Usage 표가 출력되면 다음 단계로 진행한다. `command not found`
+GPU 이름, Driver Version, Memory-Usage 표가 출력되면 다음 단계로 진행합니다. `command not found`
 또는 드라이버와 통신할 수 없다는 오류가 나오면 설치기를 실행하지 않고 NVIDIA 드라이버를
-먼저 설정한다. 설치기는 드라이버를 설치하거나 업그레이드하지 않는다.
+먼저 설정합니다. 설치기는 드라이버를 설치하거나 업그레이드하지 않습니다.
 
-설치 전에 모델 가중치 약관을 읽는다.
+설치 전에 모델 가중치 약관을 읽습니다.
 
-> **가중치는 어디서 받는가.** 설치기가 자동으로 내려받는다. 따로 신청하거나 승인을
-> 기다릴 필요는 없다. 다만 약관이 **받아서 쓰는 행위 자체를 동의로 본다.** 그래서
-> 아래를 먼저 읽고, 세 가지를 확인한다.
+> **가중치는 어디서 받는가.** 설치기가 자동으로 내려받습니다. 따로 신청하거나 승인을
+> 기다릴 필요는 없습니다. 다만 약관이 **받아서 쓰는 행위 자체를 동의로 봅니다.** 그래서
+> 아래를 먼저 읽고, 세 가지를 확인합니다.
 >
 > [WEIGHTS_TERMS_OF_USE.md (원문)](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)
 >
@@ -270,24 +273,24 @@ GPU 이름, Driver Version, Memory-Usage 표가 출력되면 다음 단계로 �
 > 공유 폴더, 깃 저장소 모두 해당한다) ③ AF3 출력으로 다른 구조예측 모델을 학습시키지
 > 않을 것인가.
 >
-> 세 가지가 맞으면 아래 명령의 `--accept-weights-terms` 가 그 확인을 뜻한다.
-> 내려받은 날짜를 적어 두면 나중에 논문 심사나 기관 감사에서 근거가 된다.
-> 파일은 약 1.1GB 이고 `~/af3_models/af3.bin` 에 놓인다. 손으로 받는 방법과
-> 체크섬은 [3-3](#3-3-모델-가중치-확보)에 있다.
+> 세 가지가 맞으면 아래 명령의 `--accept-weights-terms` 가 그 확인을 뜻합니다.
+> 내려받은 날짜를 적어 두면 나중에 논문 심사나 기관 감사에서 근거가 됩니다.
+> 파일은 약 1.1GB 이고 `~/af3_models/af3.bin` 에 놓습니다. 손으로 받는 방법과
+> 체크섬은 [3-3](#3-3-모델-가중치-확보)에 있습니다.
 
-설치 명령은 한 줄이다. Docker, NVIDIA Container Toolkit, 확인된 AF3 소스 커밋으로 빌드한
-이미지, 가중치, full DB, 그림 환경을 설치하고 완료 후 환경을 점검한다.
+설치 명령은 한 줄입니다. Docker, NVIDIA Container Toolkit, 확인된 AF3 소스 커밋으로 빌드한
+이미지, 가중치, full DB, 그림 환경을 설치하고 완료 후 환경을 점검합니다.
 
 ```bash
 bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
 ```
 
 full 설치는 시작 시 약 1TB의 빈 공간을 확인하고, DB 다운로드와 전체 해시 검증에 수 시간이
-걸릴 수 있다. 다시 실행하면 이미 완료되어 검증된 항목은 재사용한다.
+걸릴 수 있습니다. 다시 실행하면 이미 완료되어 검증된 항목은 재사용합니다.
 
-> **1TB 가 계속 필요한 것은 아니다.** 1TB 는 설치 도중의 최대치를 기준으로 한 문턱이다.
+> **1TB 가 계속 필요한 것은 아닙니다.** 1TB 는 설치 도중의 최대치를 기준으로 한 문턱입니다.
 > 압축본과 해제본이 잠시 같이 존재하기 때문이다 (이 장비 실측 849GiB).
-> 설치가 끝나면 압축본 폴더를 지워 **약 627GiB** 로 줄일 수 있다.
+> 설치가 끝나면 압축본 폴더를 지워 **약 627GiB** 로 줄일 수 있습니다.
 >
 > ```bash
 > du -sh ~/public_databases_full/_zst      # 이 장비에서 223GiB
@@ -296,35 +299,35 @@ full 설치는 시작 시 약 1TB의 빈 공간을 확인하고, DB 다운로드
 > ```
 >
 > 지운 뒤에도 러너와 `af3_db.py verify` 는 그대로 동작한다(실측 확인). 설치기를 다시
-> 돌리면 압축본 대신 `mmcif_files` 트리 전체를 해시해서 검증하므로 시간이 더 걸린다.
-> RNA 전용 DB 3종(약 89GB)은 단백질만 다뤄도 지우면 안 된다. 러너의 사전 점검이 공식
-> 9항목을 모두 요구한다.
+> 돌리면 압축본 대신 `mmcif_files` 트리 전체를 해시해서 검증하므로 시간이 더 걸립니다.
+> RNA 전용 DB 3종(약 89GB)은 단백질만 다뤄도 지우면 안 됩니다. 러너의 사전 점검이 공식
+> 9항목을 모두 요구합니다.
 
-full DB를 아직 받지 않을 때는 `bash scripts/install_af3_ubuntu.sh`만 실행한다. 이 core
-모드는 Docker/GPU, AF3 이미지와 그림 환경까지만 설치한다. 새로 docker 그룹에 들어간
-경우 설치가 끝난 뒤 한 번 로그아웃·로그인한다.
+full DB를 아직 받지 않을 때는 `bash scripts/install_af3_ubuntu.sh`만 실행합니다. 이 core
+모드는 Docker/GPU, AF3 이미지와 그림 환경까지만 설치합니다. 새로 docker 그룹에 들어간
+경우 설치가 끝난 뒤 한 번 로그아웃·로그인합니다.
 
 ### 2. 예제로 한 번 실행해 보기
 
-설치가 끝나면 저장소의 단량체 JSON으로 1건을 실행한다.
+설치가 끝나면 저장소의 단량체 JSON으로 1건을 실행합니다.
 
-> **이 단계는 `--full` 설치를 마친 상태를 전제한다.** 아래 명령은 `~/public_databases_full`
-> 을 읽는다. 1단계에서 `--full` 없이 core 모드로만 설치했다면 그 폴더가 없어서
-> `FAIL source DB directory does not exist` 로 멈춘다. 그때는 아래를 먼저 실행한다.
+> **이 단계는 `--full` 설치를 마친 상태를 전제합니다.** 아래 명령은 `~/public_databases_full`
+> 을 읽습니다. 1단계에서 `--full` 없이 core 모드로만 설치했다면 그 폴더가 없어서
+> `FAIL source DB directory does not exist` 로 멈춥니다. 그때는 아래를 먼저 실행합니다.
 >
 > ```bash
 > bash scripts/install_af3_ubuntu.sh --full --accept-weights-terms
 > ```
 >
-> 설치 상태는 이 명령으로 확인한다. DB 가 없으면 종료코드 1 이다.
+> 설치 상태는 이 명령으로 확인합니다. DB 가 없으면 종료코드 1 입니다.
 >
 > ```bash
 > python3 scripts/af3_db.py verify --db-dir ~/public_databases_full
 > ```
 
-**먼저 MSA overlay를 만든다.** full DB를 그대로 쓰면 이 예제 1건이 **34.8분** 걸린다.
-overlay는 MSA용 FASTA 7종만 앞에서 잘라 둔 약 2GB 사본이고, 만드는 데 1분이 안 걸린다.
-같은 예제가 **52.6초**로 끝난다. 40배 차이다.
+**먼저 MSA overlay를 만듭니다.** full DB를 그대로 쓰면 이 예제 1건이 **34.8분** 걸립니다.
+overlay는 MSA용 FASTA 7종만 앞에서 잘라 둔 약 2GB 사본이고, 만드는 데 1분이 안 걸립니다.
+같은 예제가 **52.6초**로 끝납니다. 40배 차입니다.
 
 ```bash
 # MSA overlay 생성 (약 1.9GB, 이 장비 실측 16.7초)
@@ -333,9 +336,9 @@ python3 scripts/af3_db.py reduce \
     --output ~/public_databases_reduced
 ```
 
-> overlay는 full DB를 **대체하지 않는다.** 템플릿용 `pdb_seqres`와 `mmcif_files`는
-> full DB에서 가져오므로 아래처럼 `--db-dir`을 두 번, overlay를 먼저 준다.
-> 다운로드 용량이 줄어드는 것이 아니라 **MSA 시간이 줄어든다.**
+> overlay는 full DB를 **대체하지 않습니다.** 템플릿용 `pdb_seqres`와 `mmcif_files`는
+> full DB에서 가져오므로 아래처럼 `--db-dir`을 두 번, overlay를 먼저 줍니다.
+> 다운로드 용량이 줄어드는 것이 아니라 **MSA 시간이 줄어듭니다.**
 
 ```bash
 # 예제 입력 폴더 준비
@@ -364,41 +367,41 @@ python3 scripts/af3_view3d.py quick_out --out-dir quick_viewer
 | overlay 먼저 + full fallback | **52.6초** | 4.4초 | 23.5초 |
 | full DB 단독 | **34.8분** | 2055.0초 (34.3분) | 13.0초 |
 
-차이는 전부 MSA 에서 난다. 추론 시간은 DB 와 무관하다 (위의 23.5초는 JAX 컴파일
+차이는 전부 MSA 에서 납니다. 추론 시간은 DB 와 무관합니다 (위의 23.5초는 JAX 컴파일
 캐시를 비우고 처음 돌린 값이고, 34.8분 쪽은 그 캐시를 재사용했다).
-두 값 모두 컨테이너 기동을 포함한 전체 명령 기준이다.
+두 값 모두 컨테이너 기동을 포함한 전체 명령 기준입니다.
 
-> **로그가 멈춘 것처럼 보여도 정상이다.** jackhmmer가 DB를 훑는 동안 몇 분씩 출력이
->없을 수 있다. 진행 여부는 다른 터미널에서 `docker ps` 로 확인한다.
-> 중간에 멈춰야 하면 Ctrl-C를 쓴다. 러너가 자기 컨테이너를 정리한다.
-> 터미널이 강제로 닫혀 컨테이너가 남았다면 `--cleanup` 이 찾아서 정리한다.
+> **로그가 멈춘 것처럼 보여도 정상입니다.** jackhmmer가 DB를 훑는 동안 몇 분씩 출력이
+>없을 수 있습니다. 진행 여부는 다른 터미널에서 `docker ps` 로 확인합니다.
+> 중간에 멈춰야 하면 Ctrl-C를 씁니다. 러너가 자기 컨테이너를 정리합니다.
+> 터미널이 강제로 닫혀 컨테이너가 남았다면 `--cleanup` 이 찾아서 정리합니다.
 >
-> **한 번에 하나만 돌린다.** AF3(JAX)는 GPU 메모리를 거의 전부 선점한다. 이 장비
+> **한 번에 하나만 돌립니다.** AF3(JAX)는 GPU 메모리를 거의 전부 선점합니다. 이 장비
 > 실측으로 한 실행이 12,288MiB 중 **11,692MiB(95%)** 를 잡았고, 겹쳐 띄운 쪽은
-> `CUDA_ERROR_OUT_OF_MEMORY` 로 CUDA 초기화조차 못 하고 죽었다. 러너가 시작 전에
-> 이 상황을 감지해 종료코드 2 로 멈추고 어느 실행이 GPU 를 쓰는지 알려준다.
-> `--allow-busy-gpu`는 외부 프로세스/메모리 admission만 우회한다. 서로 다른 Kang_AF3
+> `CUDA_ERROR_OUT_OF_MEMORY` 로 CUDA 초기화조차 못 하고 죽었습니다. 러너가 시작 전에
+> 이 상황을 감지해 종료코드 2 로 멈추고 어느 실행이 GPU 를 쓰는지 알려줍니다.
+> `--allow-busy-gpu`는 외부 프로세스/메모리 admission만 우회합니다. 서로 다른 Kang_AF3
 > 실행끼리는 결과 손상과 OOM을 막기 위해 같은 GPU의 exclusive lease를 계속 지키므로,
-> 이 옵션으로 Kang_AF3 실행 두 개를 같은 device에 겹쳐 띄울 수는 없다.
+> 이 옵션으로 Kang_AF3 실행 두 개를 같은 device에 겹쳐 띄울 수는 없습니다.
 
-> **입력을 고치면 다시 계산한다.** 결과 폴더마다
+> **입력을 고치면 다시 계산합니다.** 결과 폴더마다
 > `<타깃>_af3run_provenance.json` 이 함께 생기고, 거기에 입력 JSON 의 SHA-256,
-> 실행 모드, DB 경로, 모델 폴더, 도커 이미지가 적힌다. 다음 실행에서 이 값이 하나라도
-> 다르면 그 건은 완료로 보지 않고 다시 돌린다. 무엇이 달라졌는지도 알려 준다.
-> 2026-08-26 이전에 만든 결과에는 이 기록이 없어 지난 입력과 같은지 확인할 수 없다.
-> 안전한 기본값은 그런 결과를 **미확인으로 보고 다시 계산**하는 것이다. archive된 입력·DB·모델·
+> 실행 모드, DB 경로, 모델 폴더, 도커 이미지가 적힙니다. 다음 실행에서 이 값이 하나라도
+> 다르면 그 건은 완료로 보지 않고 다시 돌립니다. 무엇이 달라졌는지도 알려 줍니다.
+> 2026-08-26 이전에 만든 결과에는 이 기록이 없어 지난 입력과 같은지 확인할 수 없습니다.
+> 안전한 기본값은 그런 결과를 **미확인으로 보고 다시 계산**하는 것입니다. archive된 입력·DB·모델·
 > image가 당시 실행과 같다는 것을 별도로 확인했고 재계산 비용을 의도적으로 피할 때만
-> `--trust-unverified-results`를 명시한다. 이 opt-in은 과거 결과를 검증해 주지 않는다.
+> `--trust-unverified-results`를 명시합니다. 이 opt-in은 과거 결과를 검증해 주지 않습니다.
 
-배치 실행이 끝나면 `quick_out/vhh_7mfv_1/`에 구조와 신뢰도 파일이 생긴다.
+배치 실행이 끝나면 `quick_out/vhh_7mfv_1/`에 구조와 신뢰도 파일이 생깁니다.
 정상 완료되면 `quick_summary.csv`에 `vhh_7mfv_1` 한 줄이 들어가고,
 `quick_figures/`에는 pLDDT/PAE 그림이, `quick_viewer/index.html`에는 회전할 수 있는
-3D 구조가 표시된다.
+3D 구조가 표시됩니다.
 
-축소 DB 결과는 빠른 실행 경로의 탐색 자료일 뿐, 후보를 제거할 검증된 분류기가 아니다.
-`경고` 열의 `MSA얕음`은 unpaired 깊이 100 미만에 붙는 local heuristic이다. 축소 DB와
+축소 DB 결과는 빠른 실행 경로의 탐색 자료일 뿐, 후보를 제거할 검증된 분류기가 아닙니다.
+`경고` 열의 `MSA얕음`은 unpaired 깊이 100 미만에 붙는 local heuristic입니다. 축소 DB와
 full DB의 confidence 순위 보존을 score-blind representative panel에서 검증하기 전에는
-축소 DB만으로 후보를 제외하지 않는다. 비교와 한계는 [3-5절](#3-5-데이터베이스-선택)에 있다.
+축소 DB만으로 후보를 제외하지 않습니다. 비교와 한계는 [3-5절](#3-5-데이터베이스-선택)에 있습니다.
 
 ### 3. 결과를 읽는 법 보기
 
@@ -427,52 +430,52 @@ quick_out/vhh_7mfv_1/
 | 복합체 | `A_계면신뢰` / `B_계면회색` / `C_계면실패` | ipTM ≥ 0.8 (그리고 pLDDT ≥ 80) / ≥ 0.6 / 그 외 |
 | 단량체 | `A_높음` / `B_신뢰` / `C_보통` / `D_낮음` | pLDDT ≥ 90 이고 pTM ≥ 0.7 / pLDDT ≥ 80 이고 pTM ≥ 0.5 / pLDDT ≥ 70 / 그 외 |
 
-등급은 AF3 가 준 값이 아니라 이 저장소가 정한 분류다. 원본 지표를 같은 표에 함께 실으니
-기준을 바꾸고 싶으면 원본 값으로 다시 자르면 된다.
+등급은 AF3 가 준 값이 아니라 이 저장소가 정한 분류입니다. 원본 지표를 같은 표에 함께 실으니
+기준을 바꾸고 싶으면 원본 값으로 다시 자르면 됩니다.
 
-`af3_visualize.py` 는 타깃마다 그림 두 장을 그린다. 왼쪽이 잔기별 pLDDT, 오른쪽이 PAE 다.
+`af3_visualize.py` 는 타깃마다 그림 두 장을 그립니다. 왼쪽이 잔기별 pLDDT, 오른쪽이 PAE입니다.
 
 ![잔기별 pLDDT](figures/example_complex_plddt.png)
 
 ![사슬 간 PAE](figures/example_complex_pae.png)
 
 pLDDT 그림에서 파란 구간은 믿을 만하고, 주황으로 떨어지는 끝부분은 위치가 정해지지 않은
-꼬리다. PAE 그림에서 사슬 경계는 빨간 선으로 나뉜다. 대각선 밖 블록이 어두우면 두 사슬의
-상대 위치가 확실하다는 뜻이고, 옅으면 계면이 불확실하다.
+꼬리입니다. PAE 그림에서 사슬 경계는 빨간 선으로 나뉩니다. 대각선 밖 블록이 어두우면 두
+사슬의 상대 위치가 확실하다는 뜻이고, 옅으면 계면이 불확실합니다.
 
-여러 건을 한 번에 돌렸으면 요약 그림 한 장이 더 생긴다.
+여러 건을 한 번에 돌렸으면 요약 그림 한 장이 더 생깁니다.
 
 ![6타깃 요약](figures/example_summary_6targets.png)
 
-`af3_view3d.py` 로 만든 HTML 은 브라우저에서 바로 열린다. 왼쪽에 지표, 오른쪽에 3D 구조가
-있고, pLDDT 색과 사슬 색을 버튼으로 바꾼다. `index.html` 은 ranking score 내림차순 목록이다.
+`af3_view3d.py` 로 만든 HTML 은 브라우저에서 바로 열립니다. 왼쪽에 지표, 오른쪽에 3D 구조가
+있고, pLDDT 색과 사슬 색을 버튼으로 바꿉니다. `index.html` 은 ranking score 내림차순 목록입니다.
 
 ![3D 뷰어 실제 화면](figures/view3d_screenshot.png)
 
-검토는 이 순서로 한다.
+검토는 이 순서로 합니다.
 
-1. 등급은 calibration되지 않은 local heuristic이므로 정렬·표시에만 쓰고 행을 제거하지 않는다.
-2. `경고` 에 `충돌` 이 있는 건은 구조를 직접 열어 본다.
-3. `샘플불안`은 within-run diffusion-sample range 표시다. 독립 seed/config 민감도를 따로 본다.
-4. 남은 것을 ipTM(복합체) 또는 pTM(단량체) 내림차순으로 정렬한다.
-5. 상위 수십 건만 3D 뷰어로 눈으로 본다.
+1. 등급은 calibration되지 않은 local heuristic이므로 정렬·표시에만 쓰고 행을 제거하지 않습니다.
+2. `경고` 에 `충돌` 이 있는 건은 구조를 직접 열어 봅니다.
+3. `샘플불안`은 within-run diffusion-sample range 표시입니다. 독립 seed/config 민감도를 따로 봅니다.
+4. 남은 것을 ipTM(복합체) 또는 pTM(단량체) 내림차순으로 정렬합니다.
+5. 상위 수십 건만 3D 뷰어로 눈으로 봅니다.
 
-지표의 정의와 판정 근거는 [8절](#8-결과-해석)에 있다.
+지표의 정의와 판정 근거는 [8절](#8-결과-해석)에 있습니다.
 
 ### 4. 내 입력 준비하기
 
-AlphaFold 3는 JSON을 입력으로 받는다. `af3_prepare.py`는 FASTA 또는 CSV/TSV 서열표를
-읽어 레코드마다 AF3 JSON 하나를 만든다. 이미 AF3 형식의 JSON이 있다면 변환하지 않고
-입력 폴더에 바로 둔다.
+AlphaFold 3는 JSON을 입력으로 받습니다. `af3_prepare.py`는 FASTA 또는 CSV/TSV 서열표를
+읽어 레코드마다 AF3 JSON 하나를 만듭니다. 이미 AF3 형식의 JSON이 있다면 변환하지 않고
+입력 폴더에 바로 둡니다.
 
-FASTA는 `>` 뒤에 타깃 이름을 쓰고 다음 줄에 아미노산 서열을 적는다.
+FASTA는 `>` 뒤에 타깃 이름을 쓰고 다음 줄에 아미노산 서열을 적습니다.
 
 ```text
 >sample_01
 QVQLVESGGGLVQAGGSLRLSCAASGFPVAYKTMWWYRQAPGKEREWVAAIESYGIKWTRYADSVKGRFTISRDNAKNTVYLQMNSLKPEDTAVYYCIVWVGAQYHGQGTQVTVSA
 ```
 
-파일 생성 전 `--dry-run`으로 이름, 서열, 토큰 수와 버킷을 확인한다.
+파일 생성 전 `--dry-run`으로 이름, 서열, 토큰 수와 버킷을 확인합니다.
 
 ```bash
 python3 scripts/af3_prepare.py --fasta my_sequences.fasta -o my_project_in --dry-run
@@ -484,11 +487,11 @@ python3 scripts/run_af3_batch_improved.py \
     --db-dir ~/public_databases_full --yes
 ```
 
-CSV/TSV도 사용할 수 있다. 첫 줄에는 열 이름이 있어야 하며 이름·서열 열은 자동 인식한다.
-열 이름이 특수한 경우 `--name-col`과 `--seq-col`로 지정한다. 공통 항원, 리간드, homomer,
-여러 seed 입력은 [5-3절](#5-3-af3_preparepy-fastacsv-에서-json-만들기)에 정리했다.
+CSV/TSV도 사용할 수 있습니다. 첫 줄에는 열 이름이 있어야 하며 이름·서열 열은 자동 인식합니다.
+열 이름이 특수한 경우 `--name-col`과 `--seq-col`로 지정합니다. 공통 항원, 리간드, homomer,
+여러 seed 입력은 [5-3절](#5-3-af3_preparepy-fastacsv-에서-json-만들기)에 정리했습니다.
 
-입력 파일과 복합체 구성의 관계는 다음과 같다.
+입력 파일과 복합체 구성의 관계는 다음과 같습니다.
 
 | 준비하려는 작업 | 입력 방법 | 생성 결과 |
 |---|---|---|
@@ -499,7 +502,7 @@ CSV/TSV도 사용할 수 있다. 첫 줄에는 열 이름이 있어야 하며 �
 | 서로 다른 단백질 사슬이 3종 이상 | AF3 JSON을 직접 작성 | `sequences` 배열에 A, B, C 사슬을 각각 추가 |
 
 multi-FASTA의 각 레코드는 서로 독립된 예측 작업이며, 여러 레코드를 한 복합체로 합치지
-않는다.
+않습니다.
 
 </details>
 
@@ -539,9 +542,9 @@ python3 scripts/af3_collect.py panel_out -o panel_summary.csv
 python3 scripts/af3_view3d.py panel_out --out-dir panel_viewer
 ```
 
-아래 그림은 위 명령을 이 컴퓨터에서 full DB로 실행해 만든 결과다. 6건 모두 완료됐고
-pTM은 0.82~0.90, 원자 평균 pLDDT는 82.9~92.7이었다. 다른 입력에서도 같은 점수가
-나온다는 뜻은 아니다.
+아래 그림은 위 명령을 이 컴퓨터에서 full DB로 실행해 만든 결과입니다. 6건 모두 완료됐고
+pTM은 0.82~0.90, 원자 평균 pLDDT는 82.9~92.7이었습니다. 다른 입력에서도 같은 점수가
+나온다는 뜻은 아닙니다.
 
 ![A. multi-FASTA 6종 실제 실행 결과](figures/quickstart_a_multifasta.png)
 
@@ -564,8 +567,9 @@ python3 scripts/af3_view3d.py homodimer_out --out-dir homodimer_viewer
 ```
 
 이 컴퓨터의 full DB 실행에서는 1건이 완료됐고 pTM 0.60, ipTM 0.30, 원자 평균 pLDDT
-86.8이었다. 아래 PAE에서 A와 B 내부 블록은 어둡지만 사슬 사이 블록은 밝다. 각 사슬의
-접힘보다 두 사슬의 상대 배치가 불확실하다는 뜻이며, homodimer 형성의 근거로 쓰지 않는다.
+86.8이었습니다. 아래 PAE에서 A와 B 내부 블록은 어둡지만 사슬 사이 블록은 밝습니다. 각
+사슬의 접힘보다 두 사슬의 상대 배치가 불확실하다는 뜻이며, homodimer 형성의 근거로
+쓰지 않습니다.
 
 ![B. homodimer 실제 실행의 PAE](figures/quickstart_b_homodimer_pae.png)
 
@@ -686,16 +690,16 @@ CSV의 `등급`과 `경고`를 먼저 확인하세요. 단량체는 pTM과 pLDDT
 ### 공식 upstream과의 관계 및 Kang_AF3의 추가 가치
 
 [Google DeepMind의 공식 AlphaFold 3 저장소](https://github.com/google-deepmind/alphafold3)는
-모델과 data/inference pipeline의 정본이다. 공식 `run_alphafold.py`는 이미 `--input_dir`,
-`--run_data_pipeline`/`--run_inference`, 반복 `--db_dir`와 여러 성능 플래그를 지원한다. Kang_AF3는
+모델과 data/inference pipeline의 정본입니다. 공식 `run_alphafold.py`는 이미 `--input_dir`,
+`--run_data_pipeline`/`--run_inference`, 반복 `--db_dir`와 여러 성능 플래그를 지원합니다. Kang_AF3는
 이를 다시 구현하거나 모델을 변경하지 않고, pinned upstream 위에 연구실 운영·감사·후처리 계층을
-추가한다. Kang_AF3는 Google DeepMind가 유지보수하거나 지원하는 공식 저장소가 아니다. upstream
+추가합니다. Kang_AF3는 Google DeepMind가 유지보수하거나 지원하는 공식 저장소가 아닙니다. upstream
 설치·실행 기능의 정확한 범위는 [공식 설치 문서](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md)를
-우선한다.
+우선합니다.
 
 | 관점 | 공식 upstream | Kang_AF3가 추가하는 것 |
 |---|---|---|
-| 구조 예측 | 공식 AF3 모델·입력 schema·data pipeline·inference | 같은 pinned engine을 호출한다. 모델 architecture/weights는 바꾸지 않는다 |
+| 구조 예측 | 공식 AF3 모델·입력 schema·data pipeline·inference | 같은 pinned engine을 호출합니다. 모델 architecture/weights는 바꾸지 않는다 |
 | 대량 실행 | 한 명령에서 단일/다중 JSON 실행 | target별 완료 판정, 실패만 재시도, partial 격리, canonical publish transaction, 실행 상태 요약 |
 | 결과 identity | AF3 표준 output 생성 | JSON·sidecar snapshot, model SHA-256, official full-DB seal, image ID, GPU 설정, 최종 artifact hash를 하나의 provenance로 결합 |
 | 동시성·장애 | GPU/성능 flag와 container 실행 | output/work lock, known/unknown GPU global gate와 UUID lease, memory admission, timeout·무진행 watchdog, bounded cleanup |
@@ -703,24 +707,24 @@ CSV의 `등급`과 `경고`를 먼저 확인하세요. 단량체는 pTM과 pLDDT
 | 연구 분석 | pLDDT/pTM/ipTM 등 표준 output | MSA 재사용 2단계 실행, identity-safe selection, 동점 보존, complete-case 층화, Spearman/Kendall/top-N bootstrap CI, CSV·figure·viewer |
 | 배포 감사 | 공식 license/terms와 citation | exact Output Terms/notice 전달, deterministic figure builder, source-data lineage manifest, claim gate와 hermetic regression/mutation tests |
 
-따라서 이 저장소의 우위는 **예측 정확도 우위가 아니라 운영 신뢰성·재현성·감사 가능성**이다.
-Kang_AF3 결과만으로 binder 여부, affinity/Kd, epitope, 임상 유효성 또는 SOTA를 주장할 수 없다.
+따라서 이 저장소의 우위는 **예측 정확도 우위가 아니라 운영 신뢰성·재현성·감사 가능성**입니다.
+Kang_AF3 결과만으로 binder 여부, affinity/Kd, epitope, 임상 유효성 또는 SOTA를 주장할 수 없습니다.
 또한 pinned revision은 재현성에는 유리하지만 최신 upstream 기능을 자동으로 따라가지는 않으므로,
-upstream update는 별도의 compatibility/수치 재검증 뒤에 반영한다.
+upstream update는 별도의 compatibility/수치 재검증 뒤에 반영합니다.
 
-이 저장소는 AlphaFold 3 자체를 배포하지 않는다. AF3 코드, 가중치, 데이터베이스는 포함하지 않는다
+이 저장소는 AlphaFold 3 자체를 배포하지 않습니다. AF3 코드, 가중치, 데이터베이스는 포함하지 않는다
 ([3-1](#3-1-다운로드-목록)).
 
 **가중치, `ccd.pickle`, DB, 실제 연구 서열은 저장소 공개 여부와 관계없이 Git에 추가하지
-않는다.** 한 번 커밋하면 나중에 파일을 지워도 이력에 남는다. 되돌리려면 이력을 다시 쓰는
-수밖에 없고, 그러면 이미 내려받은 사람에게는 소용이 없다. `.gitignore`는 실수 방지용이며
+않습니다.** 한 번 커밋하면 나중에 파일을 지워도 이력에 남습니다. 되돌리려면 이력을 다시 쓰는
+수밖에 없고, 그러면 이미 내려받은 사람에게는 소용이 없습니다. `.gitignore`는 실수 방지용이며
 최종 확인은 커밋하는 사람이 담당한다 ([11절](#11-라이선스와-인용)).
 
 여기 들어 있는 예제 서열과 실측 결과는 전부 공개 PDB 유래다 (1MEL, 7DJX, 7A50, 8V8K,
-4QGY, 4S11, 7MFV, 1GOT). 미공개 연구 서열은 없다.
+4QGY, 4S11, 7MFV, 1GOT). 미공개 연구 서열은 없습니다.
 
-타깃이 10건 이하면 AF3 공식 명령이 더 간단하다. 이 저장소는 짧고 유사한 서열을
-수백 건 이상 처리하는 항체 라이브러리, 나노바디 패널, 점돌연변이 시리즈에 맞춰져 있다.
+타깃이 10건 이하면 AF3 공식 명령이 더 간단합니다. 이 저장소는 짧고 유사한 서열을
+수백 건 이상 처리하는 항체 라이브러리, 나노바디 패널, 점돌연변이 시리즈에 맞춰져 있습니다.
 
 ---
 
@@ -728,45 +732,45 @@ upstream update는 별도의 compatibility/수치 재검증 뒤에 반영한다.
 
 | 항목 | 요구 | 근거 |
 |------|------|------|
-| GPU | **짧은 VHH는 RTX 3080 Ti 12GB에서도 실제 추론됐다.** 1024-token 공식 stress는 기본 메모리 설정에서 OOM, unified memory에서 통과했다. 일반 입력의 보장은 아니다 | 2026-08-20 실측 |
+| GPU | **짧은 VHH는 RTX 3080 Ti 12GB에서도 실제 추론됐습니다.** 1024-token 공식 stress는 기본 메모리 설정에서 OOM, unified memory에서 통과했습니다. 일반 입력의 보장은 아니다 | 2026-08-20 실측 |
 | 실제 VRAM 피크 (VHH 116~144 aa, sample 5 곱하기 recycle 10) | **2,942~2,963 MiB** | gpu-5070ti 23런 |
 | CPU | 8코어 이상 권장. MSA 단계 속도를 직접 결정한다 | 실측 |
 | RAM | 검증 호스트는 126GB. 축소 DB 만 쓰면 훨씬 적어도 된다 (하한 미측정) | |
 | 디스크 | full DB 해제본 약 627GiB. 압축본 223GiB를 함께 보존하면 peak 약 850GiB. reduced-MSA overlay는 약 2GB지만 템플릿 fallback용 full DB를 유지해야 한다 | 2026-08-21 실측 |
 
-이전 RTX 5070 Ti 측정에서 `nvidia-smi`는 15,157 MiB를 사용 중이라고 표시했다. 이는
-실사용량이 아니라 XLA 선점량이었다. 현재 Docker full 실행에서도 MSA 단계에 약 11.7GB를
-미리 잡았지만 GPU 연산은 아직 시작하지 않은 상태였다.
+이전 RTX 5070 Ti 측정에서 `nvidia-smi`는 15,157 MiB를 사용 중이라고 표시했습니다. 이는
+실사용량이 아니라 XLA 선점량이었습니다. 현재 Docker full 실행에서도 MSA 단계에 약 11.7GB를
+미리 잡았지만 GPU 연산은 아직 시작하지 않은 상태였습니다.
 
 ![gpu-5070ti 추론 실측: 컴파일 상환, 캐시 효과, VRAM 선점 대 실제 요구량](figures/baseline_gpu5070ti.png)
 
-원 측정값 (카드 총량 16,303 MiB): 선점 ON 15,157 MiB(**예약량이다. 수요가 아니다**),
+원 측정값 (카드 총량 16,303 MiB): 선점 ON 15,157 MiB(**예약량입니다. 수요가 아니다**),
 선점 OFF 스모크 1건 5,291 MiB, 선점 OFF 배치 23런 2,942~2,963 MiB. 뒤 두 값의 차이는
 계측 조건 차이(단발 실행 대 순회 정상상태)이고 어느 값이든 16GB 카드에 여유롭게 들어간다
 ([docs/benchmark_report.md](docs/benchmark_report.md)). 그림은 모두 MiB로 다시 생성했으며
-선점량과 실제 수요량이 아니라 서로 다른 관측 조건임을 함께 표시한다.
+선점량과 실제 수요량이 아니라 서로 다른 관측 조건임을 함께 표시합니다.
 
 ### 동작이 확인된 버전 조합
 
 공통 기준은 AF3 commit `97d20234c6eb89e8d05376e9eecc9321e60a559b`
-(tag `v3.0.4-15-g97d2023`), JAX/jaxlib 0.10.2, HMMER 3.4와 AF3의
-`--seq_limit` 패치다.
+(git describe 문자열 `v3.0.4-15-g97d2023`), JAX/jaxlib 0.10.2, HMMER 3.4와 AF3의
+`--seq_limit` 패치입니다.
 
 현재 Docker 경로는 Ubuntu 26.04, kernel 7.0.0, Docker Engine 29.7.2,
-NVIDIA Container Toolkit 1.20.0, RTX 3080 Ti 12GB, driver 595.84에서 검증했다.
+NVIDIA Container Toolkit 1.20.0, RTX 3080 Ti 12GB, driver 595.84에서 검증했습니다.
 이미지는 CUDA 12.6.3 기반, Python 3.12.3, AF3 3.0.4이며 컨테이너 안의 JAX가
-`CudaDevice(id=0)`을 확인했다.
+`CudaDevice(id=0)`을 확인했습니다.
 
 이전 native 측정은 RTX 5070 Ti에서 Python 3.12.13, CUDA 12.9 JAX 번들,
 jax-cuda12-plugin/pjrt 0.10.2, numpy 2.5.2, rdkit 2025.9.4, dm-haiku 0.0.17,
-tokamax 0.0.12 조합이었다. 두 경로 모두 시스템 `nvcc`를 따로 설치하지 않았다.
-세부 설치 기록은 [docs/install_log.md](docs/install_log.md)에 있다.
+tokamax 0.0.12 조합이었습니다. 두 경로 모두 시스템 `nvcc`를 따로 설치하지 않았습니다.
+세부 설치 기록은 [docs/install_log.md](docs/install_log.md)에 있습니다.
 
 ---
 
 ## 3. 설치
 
-설치 방법은 두 가지입니다. 차이는 full DB를 지금 함께 받을지, 나중에 준비할지입니다.
+설치 방법은 두 가지입니다. full DB를 지금 함께 받을지, 나중에 준비할지가 다릅니다.
 
 | 경로 | 실작업 시간 | 디스크 | 어떤 경우에 |
 |------|-------------|--------|-------------|
@@ -796,7 +800,8 @@ tokamax 0.0.12 조합이었다. 두 경로 모두 시스템 `nvcc`를 따로 설
 | | **이 저장소** | 수 MB | https://github.com/kangk1204/Kang_AF3 | 스크립트와 문서만 |
 
 가중치는 **비영리 목적으로만 사용할 수 있고 재배포할 수 없습니다.** Google에서 직접
-받아야 하며, 동료에게 복사해 받거나 전달하면 안 됩니다. `ccd.pickle`과 DB 파일도
+받아야 하며, 조직 내부에서는 약관과 기관 정책이 허용하는 범위에서만 공유할 수 있습니다.
+공개 저장소, 외부 공유 폴더, 개인 전달은 허용되지 않습니다. `ccd.pickle`과 DB 파일도
 저장소에 커밋하지 마세요 ([11절](#11-라이선스와-인용),
 [docs/license_notes.md](docs/license_notes.md)).
 
@@ -870,7 +875,7 @@ docker run --rm --runtime=nvidia --gpus all \
 
 두 번째 명령에 자신의 GPU 이름과 드라이버 버전이 나오면 Docker GPU 경로가 준비된 상태입니다.
 2026-08-21 검증 호스트에서는 Docker Engine 29.7.2, NVIDIA Container Toolkit 1.20.0,
-driver 595.84, RTX 3080 Ti가 확인됐다.
+driver 595.84, RTX 3080 Ti가 확인되었습니다.
 
 AF3 소스를 확인된 commit으로 고정한 뒤 공식 Dockerfile을 빌드하세요.
 
@@ -893,7 +898,8 @@ cd ~/af3_work/Kang_AF3                                  # 이후 명령은 항�
 
 가중치는 반드시 Google에서 직접 받고
 [현재 이용약관](https://github.com/google-deepmind/alphafold3/blob/main/WEIGHTS_TERMS_OF_USE.md)을
-준수하세요. 동료에게 복사하거나 이 저장소에 커밋하면 안 됩니다.
+준수하세요. 조직 내부에서는 약관과 기관 정책이 허용하는 범위에서만 공유할 수 있습니다.
+공개 저장소, 외부 공유 폴더, 개인 전달은 허용되지 않습니다.
 
 **신청서를 내거나 승인을 기다릴 필요는 없습니다.** 공식 URL에서 직접 받을 수 있습니다.
 다만 다운로드와 사용은 약관 동의를 전제로 합니다. 받기 전에 ① 비영리 목적인지 ② 가중치를
@@ -930,13 +936,13 @@ trap - EXIT
 해제·크기·SHA-256 검증을 모두 통과한 임시 파일만 최종 이름으로 이동합니다. 기존
 `af3.bin`은 자동으로 덮어쓰지 않습니다.
 
-`af3.bin.zst` 는 1,020,545,840 B 이고 가중치 안에는 파라미터가 368,384,602개 있다.
+`af3.bin.zst` 는 1,020,545,840 B 이고 가중치 안에는 파라미터가 368,384,602개 있습니다.
 이 저장소는 pinned AF3 commit과 함께 위 크기를 엄격히 검사합니다. 다른 model release를
 사용하려면 코드·가중치·출력 계약을 함께 다시 검증해야 합니다.
 
 검증을 끝내고 다른 release 를 의도적으로 쓸 때만, 배치 러너의 크기 검사를
-`AF3_MODEL_BYTES` 로 바꿀 수 있다. 조용히 넘어가지 않고 실행할 때마다 경고를 찍는다.
-(`af3_check.sh` 의 `AF3_MODEL_SHA256` 과 같은 성격의 탈출구다.)
+`AF3_MODEL_BYTES` 로 바꿀 수 있습니다. 조용히 넘어가지 않고 실행할 때마다 경고를 찍습니다.
+(`af3_check.sh` 의 `AF3_MODEL_SHA256` 과 같은 성격의 탈출구입니다.)
 
 ```bash
 AF3_MODEL_BYTES=$(stat -c %s ~/af3_models/af3.bin) \
@@ -945,8 +951,8 @@ AF3_MODEL_BYTES=$(stat -c %s ~/af3_models/af3.bin) \
 
 ### 3-4. build_data
 
-공식 Dockerfile이 이미지 빌드 중 `uv run build_data`를 이미 실행한다. Docker 설치에서는
-별도의 임시 `docker run ... build_data`가 필요 없다. native 설치에서만 직접 실행한다.
+공식 Dockerfile이 이미지 빌드 중 `uv run build_data`를 이미 실행합니다. Docker 설치에서는
+별도의 임시 `docker run ... build_data`가 필요 없습니다. native 설치에서만 직접 실행합니다.
 
 ### 3-5. 데이터베이스 선택
 
@@ -967,20 +973,20 @@ AF3_MODEL_BYTES=$(stat -c %s ~/af3_models/af3.bin) \
 | 3사슬 형식 예시 | 26.6초 | 6414.0초 | 80.0초 | 107.9분 |
 | 3사슬 1GOT | 15.0초 | 6304.8초 | 138.9초 | 106.9분 |
 
-**손실을 정하는 것은 사슬 수가 아니라 overlay 가 그 단백질에서 얻는 MSA 깊이다.**
+**손실을 정하는 것은 사슬 수가 아니라 overlay 가 그 단백질에서 얻는 MSA 깊이입니다.**
 진짜 3사슬 복합체인 트랜스듀신 헤테로3량체
 (PDB 1GOT, Gα·Gβ1·Gγ1)는 overlay 에서도 Gβ1 에 1,135개, Gα 에 40개 서열이 잡혔고,
-그 결과 ranking score 가 같고 ipTM 차이가 0.01 이다. 반면 VHH 계열은 overlay 에서
-한 자리~열 자리 서열밖에 못 얻었고, 그 건들에서 계면 지표가 떨어졌다. Gβ1 은
-WD40 반복 계열이라 데이터베이스를 잘라도 동족체가 많이 남는다. VHH 는 그렇지 않다.
+그 결과 ranking score 가 같고 ipTM 차이가 0.01 입니다. 반면 VHH 계열은 overlay 에서
+한 자리~열 자리 서열밖에 못 얻었고, 그 건들에서 계면 지표가 떨어졌습니다. Gβ1 은
+WD40 반복 계열이라 데이터베이스를 잘라도 동족체가 많이 남습니다. VHH 는 그렇지 않습니다.
 
-**네 건 모두 local heuristic 등급은 같았다.** 이것은 작은 조건부 사례의 기술적 관찰일
-뿐 grade stability나 올바른 후보 제거의 validation이 아니다. 세 건은 형식 예시로 만든
-서로 무관한 단백질 조합이고, known complex는 1GOT 한 건뿐이다. 이 네 건으로 cutoff나
-false-negative rate를 정할 수 없다.
+**네 건 모두 local heuristic 등급은 같았습니다.** 이것은 작은 조건부 사례의 기술적 관찰일
+뿐 grade stability나 올바른 후보 제거의 validation이 아닙니다. 세 건은 형식 예시로 만든
+서로 무관한 단백질 조합이고, known complex는 1GOT 한 건뿐입니다. 이 네 건으로 cutoff나
+false-negative rate를 정할 수 없습니다.
 
-**overlay 의 ipTM 은 낮게도, 높게도 나온다.** 나노바디 복합체 10건을 overlay 로 훑고
-그중 경계 근처 3건을 full DB 로 다시 돌린 결과다.
+**overlay 의 ipTM 은 낮게도, 높게도 나옵니다.** 나노바디 복합체 10건을 overlay 로 훑고
+그중 경계 근처 3건을 full DB 로 다시 돌린 결과입니다.
 
 | 타깃 | overlay ipTM | full DB ipTM | 등급 |
 |---|---|---|---|
@@ -988,17 +994,17 @@ false-negative rate를 정할 수 없다.
 | `nb_1kxv` | 0.18 | 0.15 | C_계면실패 = C_계면실패 |
 | `cplx_4krl` | 0.13 | 0.13 | C_계면실패 = C_계면실패 |
 
-`nb_1kxt` 는 overlay 가 **0.39 높게** 나왔다. 얕은 MSA 가 계면을 과대평가한 것이다.
-앞의 VHH-항원 복합체에서는 반대로 overlay 가 0.05 낮았다. 즉 방향이 일정하지 않으므로
-**overlay 의 ipTM 은 크든 작든 그대로 믿을 수 없다.**
+`nb_1kxt` 는 overlay 가 **0.39 높게** 나왔습니다. 얕은 MSA 가 계면을 과대평가한 것입니다.
+앞의 VHH-항원 복합체에서는 반대로 overlay 가 0.05 낮았습니다. 즉 방향이 일정하지 않으므로
+**overlay 의 ipTM 은 크든 작든 그대로 믿을 수 없습니다.**
 
-대조된 복합체에서 등급이 뒤집히지 않았다는 관찰은 validation이 아니다. full DB 재실행
+대조된 복합체에서 등급이 뒤집히지 않았다는 관찰은 validation이 아닙니다. full DB 재실행
 표본이 overlay 결과에 따라 선택됐고 사례 수가 작아 false-negative rate, sensitivity,
-enrichment, grade stability 또는 다른 panel로의 transportability를 추정할 수 없다.
+enrichment, grade stability 또는 다른 panel로의 transportability를 추정할 수 없습니다.
 
-정리하면 **집계 CSV의 `MSA_unpaired깊이` 열은 계산 조건을 설명하는 진단값**이다.
+정리하면 **집계 CSV의 `MSA_unpaired깊이` 열은 계산 조건을 설명하는 진단값**입니다.
 현재의 조건부 표본에서 깊이와 confidence 변화가 함께 관찰됐지만, 깊이 cutoff를 후보 제거
-규칙으로 보정하지 않았다. 따라서 overlay ipTM/pLDDT를 최종값이나 배제 근거로 읽지 않는다.
+규칙으로 보정하지 않았습니다. 따라서 overlay ipTM/pLDDT를 최종값이나 배제 근거로 읽지 않습니다.
 
 두 선택지의 실측 차이:
 
@@ -1008,40 +1014,40 @@ enrichment, grade stability 또는 다른 panel로의 transportability를 추정
 | 건당 시간 (end-to-end) | 43.3초 | 1,830초 | **42.2배** |
 | 2000건 환산 | 24시간 | **1,017시간 (42일)** | 해당 없음 |
 
-MSA 깊이가 1000배 차이나는데 **VHH 단량체의 신뢰도는 거의 변하지 않았다.** 6종을 양쪽
+MSA 깊이가 1000배 차이나는데 **VHH 단량체의 신뢰도는 거의 변하지 않았습니다.** 6종을 양쪽
 조건으로 모두 돌린 결과 ranking score 는 무변화 3건, +0.03 2건, -0.01 1건이었다
 (0.82~0.90 범위, pLDDT평균 차이 -0.99~+2.12). 그 -0.01 은 같은 조건에서 샘플 5개를
 돌렸을 때의 산포(0.002~0.008)를 살짝 넘지만 판정을 바꿀 크기가 아니다
 (타깃별 값은 [results_example/af3_summary.csv](results_example/af3_summary.csv)).
 나노바디는 면역글로불린 폴드가 잘 보존돼 있고 PDB 에 템플릿이 아주 많은데
-**템플릿 검색은 양쪽 조건 모두 전체 PDB 를 쓴다.** 축소 DB 로 잃는 것은 공진화 신호이고
-VHH 프레임워크는 그 신호 없이도 템플릿만으로 잡힌다.
+**템플릿 검색은 양쪽 조건 모두 전체 PDB 를 씁니다.** 축소 DB 로 잃는 것은 공진화 신호이고
+VHH 프레임워크는 그 신호 없이도 템플릿만으로 잡힙니다.
 
 ![축소 DB 대 전체 DB 신뢰도 비교](figures/db_confidence_comparison.png)
 
 > 위 표의 818~1,186배는 AF3 가 DB 4종 결과를 합치고 중복을 제거한 뒤 최종 입력에 담은
-> unpaired 깊이 기준이다. uniref90 하나만 검색해 나온 정렬 서열 수 기준으로는
+> unpaired 깊이 기준입니다. uniref90 하나만 검색해 나온 정렬 서열 수 기준으로는
 > 31~34배(축소 705~811, 전체 23,693~25,503)이므로 **한 쪽 값을 다른 쪽과 섞어 인용하지
-> 말 것.** 타깃별 짝은 [docs/db_notes.md](docs/db_notes.md) 에 있다.
+> 말 것.** 타깃별 짝은 [docs/db_notes.md](docs/db_notes.md) 에 있습니다.
 
 어느 쪽을 골라야 하나:
 
 - 단량체 VHH 를 수백에서 수천 건 전수 스크리닝한다: **축소 DB.** 전체 DB 로 2000건은
-  약 42일이 걸려 전수 스크리닝에는 적합하지 않다.
-- 항원-나노바디 복합체의 예측 배치 confidence를 탐색한다(ipTM이 필요하다): **full DB를 기본으로 권한다.**
+  약 42일이 걸려 전수 스크리닝에는 적합하지 않습니다.
+- 항원-나노바디 복합체의 예측 배치 confidence를 탐색한다(ipTM이 필요합니다): **full DB를 기본으로 권합니다.**
   paired MSA 차이가 계면에 영향을 줄 가능성은 있지만, 비교 6종이 모두 단량체여서
   이 저장소는 ipTM 개선을 직접 측정하지 않았다 ([12절](#12-측정-조건과-한계)).
 - 축소 DB로 전체를 계산하고 일부를 full DB로 재계산하는 2단계 경로는 아직 미검증
   exploratory workflow다. 사전 지정 metric, 동점 정책, intention-to-screen denominator,
-  held-out panel과 허용 miss-rate가 없으면 후보 제거에 사용하지 않는다.
+  held-out panel과 허용 miss-rate가 없으면 후보 제거에 사용하지 않습니다.
 
-**이미 축소 DB로 돌린 결과는 6개 단량체 panel의 탐색 자료로는 남길 수 있다.** 다만
-외부 정답 구조, CDR geometry, 복합체 계면, 대규모 순위 보존을 검증한 결과는 아니다.
+**이미 축소 DB로 돌린 결과는 6개 단량체 panel의 탐색 자료로는 남길 수 있습니다.** 다만
+외부 정답 구조, CDR geometry, 복합체 계면, 대규모 순위 보존을 검증한 결과는 아닙니다.
 
 #### ⑥-B full DB 다운로드와 검증
 
-공식 스크립트는 `wget`, `tar`, `zstd`를 요구하며 9개 다운로드를 동시에 실행한다.
-중간 파일·resume·checksum 기능은 없으므로 `tmux`에서 실행하고 완료 뒤 반드시 검증한다.
+공식 스크립트는 `wget`, `tar`, `zstd`를 요구하며 9개 다운로드를 동시에 실행합니다.
+중간 파일·resume·checksum 기능은 없으므로 `tmux`에서 실행하고 완료 뒤 반드시 검증합니다.
 
 ```bash
 sudo apt install -y wget tar zstd
@@ -1052,33 +1058,33 @@ python3 scripts/af3_db.py verify --db-dir ~/public_databases_full
 ```
 
 `af3_db.py verify`는 8개 비어 있지 않은 FASTA와 실제 `.cif`가 든 `mmcif_files`를 확인하는
-빠른 구조·경로 사전점검이다. 수백 GB의 byte 단위 checksum 검증은 단일 설치기를
-`--full`로 실행할 때 수행한다. 그 deep pass가 성공하면 설치기는
-`af3_full_db_manifest.json`을 원자적으로 게시한다. 이 seal은 8개 FASTA와 추출된 mmCIF
-tree의 경로 독립 content identity와 현재 파일의 inode/mtime/size binding을 분리해 기록한다.
-배치 러너는 매 실행 때 payload를 다시 읽지 않고 seal schema와 cheap binding만 확인한다.
-기존 full DB를 설치기 밖에서 검증했다면 다음 one-time deep pass로 seal한다.
+빠른 구조·경로 사전점검입니다. 수백 GB의 byte 단위 checksum 검증은 단일 설치기를
+`--full`로 실행할 때 수행합니다. 그 deep pass가 성공하면 설치기는
+`af3_full_db_manifest.json`을 원자적으로 게시합니다. 이 seal은 8개 FASTA와 추출된 mmCIF
+tree의 경로 독립 content identity와 현재 파일의 inode/mtime/size binding을 분리해 기록합니다.
+배치 러너는 매 실행 때 payload를 다시 읽지 않고 seal schema와 cheap binding만 확인합니다.
+기존 full DB를 설치기 밖에서 검증했다면 다음 one-time deep pass로 seal합니다.
 
 ```bash
 python3 scripts/af3_db.py seal-full --db-dir ~/public_databases_full
 python3 scripts/af3_db.py validate-full-seal --db-dir ~/public_databases_full
 ```
 
-seal이 없으면 preferred/legacy runner는 기본적으로 실행을 거부한다. 당장 deep pass를 할 수 없는
+seal이 없으면 preferred/legacy runner는 기본적으로 실행을 거부합니다. 당장 deep pass를 할 수 없는
 구버전 설치만 `--allow-unsealed-db`로 명시할 수 있지만, provenance에는
-`unsealed-full-database-metadata-only`로 기록되어 content 동일성을 증명하지 못한다. seal 파일이
-존재하지만 malformed/stale이면 이 옵션으로도 downgrade하지 않는다.
+`unsealed-full-database-metadata-only`로 기록되어 content 동일성을 증명하지 못합니다. seal 파일이
+존재하지만 malformed/stale이면 이 옵션으로도 downgrade하지 않습니다.
 2026-08-21 재검증에서 해제본은 약 627GiB였고, 압축본 223GiB를 함께 보존했을 때
-디렉터리 peak가 약 850GiB였다. 회선과 파일시스템에 따라 시간은 크게 달라지므로 자신의
-환경 기록을 우선한다. 다운로드가 끊겼다면 반쪽 파일을 정상으로
+디렉터리 peak가 약 850GiB였습니다. 회선과 파일시스템에 따라 시간은 크게 달라지므로 자신의
+환경 기록을 우선합니다. 다운로드가 끊겼다면 반쪽 파일을 정상으로
 간주하지 말고 공식 스크립트를 다시 실행한 뒤 압축 해제 성공, 예상 규모, `verify`를 함께
-확인한다.
+확인합니다.
 
 #### ⑥-A reduced-MSA overlay 생성
 
-공식 standalone 축소 DB는 없다. 이 저장소가 지원하는 경량 구성은 full DB 앞에 두는
-7개 FASTA overlay다. 템플릿 `pdb_seqres`와 `mmcif_files`는 full fallback에서 읽는다.
-따라서 full DB를 삭제할 수 없고 디스크 절약용 기능이 아니라 MSA 검색량 실험용이다.
+공식 standalone 축소 DB는 없습니다. 이 저장소가 지원하는 경량 구성은 full DB 앞에 두는
+7개 FASTA overlay다. 템플릿 `pdb_seqres`와 `mmcif_files`는 full fallback에서 읽습니다.
+따라서 full DB를 삭제할 수 없고 디스크 절약용 기능이 아니라 MSA 검색량 실험용입니다.
 
 ```bash
 cd ~/af3_work/Kang_AF3
@@ -1096,18 +1102,18 @@ python3 scripts/run_af3_batch_improved.py \
 ```
 
 도구는 모든 source를 먼저 검사하고, 완전한 FASTA 레코드까지만 쓰며, output/prefix SHA-256·레코드수·
-바이트수가 든 `af3_db_manifest.json`을 만든 뒤 디렉터리를 원자적으로 publish한다.
-`verify`는 manifest schema와 파일 byte 수를 자동 대조한다. 매 실행 때 multi-GB 전체 hash를
-다시 읽지는 않으므로 같은 크기 변조를 의심하면 manifest의 `output_sha256`과 직접 대조한다.
-외부 `mmcif_files` symlink는 Docker 안에서 깨지므로 만들지도 허용하지도 않는다.
+바이트수가 든 `af3_db_manifest.json`을 만든 뒤 디렉터리를 원자적으로 publish합니다.
+`verify`는 manifest schema와 파일 byte 수를 자동 대조합니다. 매 실행 때 multi-GB 전체 hash를
+다시 읽지는 않으므로 같은 크기 변조를 의심하면 manifest의 `output_sha256`과 직접 대조합니다.
+외부 `mmcif_files` symlink는 Docker 안에서 깨지므로 만들지도 허용하지도 않습니다.
 
 과거 벤치마크는 RCSB에서 선택한 1,239개 template와 대응하는 3,531개 chain의 `pdb_seqres`를
-사용했다. 그 ID/query manifest가 이 저장소에 없어 **정확히 재현할 수 없는 역사적 측정**이다.
-현재 overlay+full fallback 결과를 그 benchmark와 동일 조건이라고 부르지 않는다.
+사용했습니다. 그 ID/query manifest가 이 저장소에 없어 **정확히 재현할 수 없는 역사적 측정**입니다.
+현재 overlay+full fallback 결과를 그 benchmark와 동일 조건이라고 부르지 않습니다.
 
 ### 3-6. 폴더 관례
 
-스크립트는 아래 배치를 기본으로 가정한다. 이대로 쓰면 옵션을 거의 안 줘도 된다.
+스크립트는 아래 배치를 기본으로 가정합니다. 이대로 쓰면 옵션을 거의 안 줘도 됩니다.
 `<이름>` 은 작업 하나를 가리키는 이름이다 (예: `vhh_001`).
 
 ```
@@ -1125,33 +1131,33 @@ python3 scripts/run_af3_batch_improved.py \
 ### 3-7. native 설치 (러너와 별도)
 
 공식 AF3는 native 경로도 제공하지만 HMMER 3.4의 AF3 `--seq_limit` patch, Python 3.12,
-JAX/CUDA 조합을 정확히 맞춰야 한다. 최신 명령은
-[공식 설치 문서](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md)를 따른다.
-이 저장소의 두 batch runner는 Docker 명령을 조립하므로 native AF3를 대신 실행하지 않는다.
-native에서는 공식 `uv run run_alphafold.py ...`를 직접 사용한다.
+JAX/CUDA 조합을 정확히 맞춰야 합니다. 최신 명령은
+[공식 설치 문서](https://github.com/google-deepmind/alphafold3/blob/main/docs/installation.md)를 따릅니다.
+이 저장소의 두 batch runner는 Docker 명령을 조립하므로 native AF3를 대신 실행하지 않습니다.
+native에서는 공식 `uv run run_alphafold.py ...`를 직접 사용합니다.
 
-[docs/install_log.md](docs/install_log.md)는 2026-08-18 검증 호스트의 **역사적 설치 기록**이다.
-현재 범용 설치 명령이나 Docker 대비 성능 보증으로 읽지 않는다.
+[docs/install_log.md](docs/install_log.md)는 2026-08-18 검증 호스트의 **역사적 설치 기록**입니다.
+현재 범용 설치 명령이나 Docker 대비 성능 보증으로 읽지 않습니다.
 
 ### 3-8. 첫 실행 지연
 
-처음 한 번은 XLA가 GPU 커널을 컴파일한다. 이전 native 측정에서는 콜드·고부하 상태의
-고정 오버헤드가 406~497초, 웜 상태가 6.55~8.5초였다. 현재 Docker 검증에서는 준비된
-116-token `_data.json`의 첫 실행이 전체 39.3초, 모델 추론 23.64초였다. GPU와 캐시,
-입력 설정이 다르므로 어느 한 값을 다른 장비의 보장으로 쓰지 않는다.
+처음 한 번은 XLA가 GPU 커널을 컴파일합니다. 이전 native 측정에서는 콜드·고부하 상태의
+고정 오버헤드가 406~497초, 웜 상태가 6.55~8.5초였습니다. 현재 Docker 검증에서는 준비된
+116-token `_data.json`의 첫 실행이 전체 39.3초, 모델 추론 23.64초였습니다. GPU와 캐시,
+입력 설정이 다르므로 어느 한 값을 다른 장비의 보장으로 쓰지 않습니다.
 
-raw JSON을 full DB로 실행하면 이 컴파일보다 MSA 검색이 훨씬 오래 걸린다. 그동안 GPU
-사용률이 0%여도 정상이다. `_data.json`이 생성된 뒤 추론 단계에서 GPU가 동작한다.
+raw JSON을 full DB로 실행하면 이 컴파일보다 MSA 검색이 훨씬 오래 걸립니다. 그동안 GPU
+사용률이 0%여도 정상입니다. `_data.json`이 생성된 뒤 추론 단계에서 GPU가 동작합니다.
 
 컴파일 캐시 디렉터리를 지정하면 첫 컴파일을 재사용할 수 있다(스크립트가 기본으로 한다).
-다만 캐시의 이득은 배치가 커지면 0으로 수렴한다. 첫 2건의 컴파일만 없애기 때문이고,
+다만 캐시의 이득은 배치가 커지면 0으로 수렴합니다. 첫 2건의 컴파일만 없애기 때문이고,
 96건 순회에서 정상상태 4.20초는 캐시 유무와 무관했다 (실측).
 
 ### 3-9. 결과 그림용 Python 환경
 
-단일 설치기를 사용했다면 이 환경은 이미 만들어져 있다. 수동 설치에서는 AF3 추론 환경과
-분리해 matplotlib만 설치한다. 추론 환경에 설치하면 JAX가 요구하는 numpy 버전이 바뀔 수
-있으므로 섞지 않는다.
+단일 설치기를 사용했다면 이 환경은 이미 만들어져 있습니다. 수동 설치에서는 AF3 추론 환경과
+분리해 matplotlib만 설치합니다. 추론 환경에 설치하면 JAX가 요구하는 numpy 버전이 바뀔 수
+있으므로 섞지 않습니다.
 
 ```bash
 sudo apt install -y python3-matplotlib python3-venv
@@ -1160,15 +1166,15 @@ python3 -m venv --without-pip --system-site-packages ~/af3_plot_env
 ~/af3_plot_env/bin/python -c 'import matplotlib; print(matplotlib.__version__)'
 ```
 
-그림은 `~/af3_plot_env/bin/python`, 배치·집계·3D HTML은 시스템 `python3`로 실행한다.
+그림은 `~/af3_plot_env/bin/python`, 배치·집계·3D HTML은 시스템 `python3`로 실행합니다.
 matplotlib이 없어도 CSV와 뷰어 스크립트는 만들어지지만 PNG/PAE 그림은 생기지 않으므로,
-정적 그림이 필요하면 위 마지막 명령이 성공하는지 먼저 확인한다.
+정적 그림이 필요하면 위 마지막 명령이 성공하는지 먼저 확인합니다.
 
 ---
 
 ## 4. 동작 확인
 
-실행 전에 환경을 점검한다. 이 단계를 건너뛰면 장시간 실행 후에 DB 경로 오류를 발견할 수 있다.
+실행 전에 환경을 점검합니다. 이 단계를 건너뛰면 장시간 실행 후에 DB 경로 오류를 발견할 수 있습니다.
 
 ```bash
 cd ~/af3_work/Kang_AF3
@@ -1177,7 +1183,7 @@ AF3_PYTHON=~/af3_plot_env/bin/python \
   bash scripts/af3_check.sh 2>&1 | tee af3_check.txt
 ```
 
-환경 점검은 아래 6개 항목을 기준으로 판정한다.
+환경 점검은 아래 6개 항목을 기준으로 판정합니다.
 
 | 확인 항목 | 통과 기준 |
 |-----------|-----------|
@@ -1188,7 +1194,7 @@ AF3_PYTHON=~/af3_plot_env/bin/python \
 | HMMER | 선택한 Docker 이미지 안 `jackhmmer -h`에 `--seq_limit`가 보인다 |
 | 디스크 | 작업 폴더에 여유가 있다 |
 
-출력 형식은 스크립트 버전에 따라 다르다. 항목별 판정 표시(OK/실패)를 기준으로 읽는다.
+출력 형식은 스크립트 버전에 따라 다릅니다. 항목별 판정 표시(OK/실패)를 기준으로 읽습니다.
 `--seq_limit` 이 안 보이면 AF3 패치가 적용되지 않은 HMMER 다(도커 이미지를 쓰면 보통
 문제되지 않습니다). 실패 항목은 [10절](#10-자주-겪는-문제)에서 확인할 수 있습니다.
 
@@ -1204,11 +1210,11 @@ python3 scripts/run_af3_batch_improved.py \
 ls smoke_out/*/
 ```
 
-raw JSON과 full DB를 쓴 현재 Docker 실측은 35.5분이었다. 그중 MSA가 34.8분이고 GPU
-추론은 15.23초였다. MSA 중에는 GPU 사용률이 0%여도 중단하지 않는다
+raw JSON과 full DB를 쓴 현재 Docker 실측은 35.5분이었습니다. 그중 MSA가 34.8분이고 GPU
+추론은 15.23초였습니다. MSA 중에는 GPU 사용률이 0%여도 중단하지 않습니다.
 ([3-8](#3-8-첫-실행-지연)). 끝나면 `smoke_out/vhh_7mfv_1/` 안에
-`*_ranking_scores.csv`, `*_summary_confidences.json`, `*_model.cif`가 생긴다. 세 파일이
-모두 0바이트보다 크고 마지막에 `이번 대상 1/1건 완료`가 나오면 설치가 완료된 것으로 판정한다.
+`*_ranking_scores.csv`, `*_summary_confidences.json`, `*_model.cif`가 생깁니다. 세 파일이
+모두 0바이트보다 크고 마지막에 `이번 대상 1/1건 완료`가 나오면 설치가 완료된 것으로 판정합니다.
 
 ---
 
@@ -1221,7 +1227,7 @@ JSON을 만들고, 생성된 파일을 `<이름>_in/` 폴더에 넣으세요
 ### 5-1. 입력 JSON 의 구조
 
 가장 단순한 형태는 단백질 사슬 하나다 (`examples/vhh_monomer.json`). 아래 서열은
-PDB 7MFV(합성 나노바디 Sb16, 116 aa)의 실제 서열이다.
+PDB 7MFV(합성 나노바디 Sb16, 116 aa)의 실제 서열입니다.
 
 ```json
 {
@@ -1242,21 +1248,21 @@ PDB 7MFV(합성 나노바디 Sb16, 116 aa)의 실제 서열이다.
 
 | 필드 | 뜻 |
 |------|-----|
-| `name` | 타깃 이름. **출력 폴더 이름이 이걸로 만들어진다.** 공백, 한글, 슬래시 피할 것 |
-| `modelSeeds` | 난수 시드 배열. `[1]` 이면 시드 1개. 늘리면 시간도 비례해 늘어난다 |
+| `name` | 타깃 이름. **출력 폴더 이름이 이걸로 만들어집니다.** 공백, 한글, 슬래시 피할 것 |
+| `modelSeeds` | 난수 시드 배열. `[1]` 이면 시드 1개. 늘리면 시간도 비례해 늘어납니다 |
 | `sequences` | 이 구조에 들어가는 모든 실체의 배열. 여기 담긴 것 전부가 한 구조로 함께 예측된다 |
 | `sequences[].protein.id` | 사슬 ID. `"A"`, `"B"` 등. 구조 파일에서 이 이름으로 보인다 |
 | `sequences[].protein.sequence` | 아미노산 1문자 서열 |
 | `dialect`, `version` | AF3 입력 형식 표시. 그대로 두면 된다 |
 
 `protein` 자리에는 `dna`(`ACGT`), `rna`(`ACGU`), `ligand`(CCD 코드
-`{"ligand": {"id": "L", "ccdCodes": ["ATP"]}}` 또는 SMILES) 도 올 수 있다.
+`{"ligand": {"id": "L", "ccdCodes": ["ATP"]}}` 또는 SMILES) 도 올 수 있습니다.
 
 ### 5-2. 복합체: 항원 파트너 붙이기
 
-`sequences` 배열에 항목을 추가하면 여러 사슬을 한 구조로 예측할 수 있다. 아래는 PDB
-1MEL의 낙타 단일도메인 항체(148 aa)와 lysozyme 항원(129 aa) 예시다. JSON 구조를 보여주기
-위해 서열을 줄여 표시했으며, 실행 가능한 전체 서열은 `examples/vhh_antigen_complex.json`에 있다.
+`sequences` 배열에 항목을 추가하면 여러 사슬을 한 구조로 예측할 수 있습니다. 아래는 PDB
+1MEL의 낙타 단일도메인 항체(148 aa)와 lysozyme 항원(129 aa) 예시입니다. JSON 구조를 보여주기
+위해 서열을 줄여 표시했으며, 실행 가능한 전체 서열은 `examples/vhh_antigen_complex.json`에 있습니다.
 
 ```json
 {
@@ -1272,23 +1278,23 @@ PDB 7MFV(합성 나노바디 Sb16, 116 aa)의 실제 서열이다.
 ```
 
 서로 다른 단백질 사슬이 세 개라면 같은 `sequences` 배열에 `id`가 `"C"`인 protein 항목을
-추가한다. AlphaFold 3 자체는 이와 같은 다중 사슬 JSON을 지원한다. 현재 `af3_prepare.py`는
-대상 서열 1종과 공통 파트너 1종, 각 사슬의 복제 수, 선택적 리간드까지 자동 생성한다.
-서로 다른 파트너가 두 종 이상인 임의 복합체는 JSON을 직접 작성한다.
+추가합니다. AlphaFold 3 자체는 이와 같은 다중 사슬 JSON을 지원합니다. 현재 `af3_prepare.py`는
+대상 서열 1종과 공통 파트너 1종, 각 사슬의 복제 수, 선택적 리간드까지 자동 생성합니다.
+서로 다른 파트너가 두 종 이상인 임의 복합체는 JSON을 직접 작성합니다.
 
-복합체에서는 출력에 **ipTM(계면 신뢰도)** 이 함께 나온다. 단량체에서는 나오지 않는다.
-복합체 예측에서는 두 가지를 고려한다. 첫째, **토큰 수가 늘어나 패딩 버킷이 커진다.**
+복합체에서는 출력에 **ipTM(계면 신뢰도)** 이 함께 나옵니다. 단량체에서는 나오지 않습니다.
+복합체 예측에서는 두 가지를 고려합니다. 첫째, **토큰 수가 늘어나 패딩 버킷이 커집니다.**
 버킷은 토큰 수 이상인 가장 작은 계단이 잡히므로 116 aa VHH 는 128 에 들어가지만 130 aa 는
 이미 256 이고(실측 6종: 116/123 aa 는 128, 130/131/135/138 aa 는 256), 300 aa 항원을
-붙이면 512 로 올라간다. 버킷 128 대 256 의 실측 차이가 2.25배(4.20초 대 9.44초)다.
-둘째, **paired MSA 가 계면 예측에 중요하다.** 축소 DB 의 paired 깊이는 158~225, 전체
-DB 는 24,250~27,353 이다. 복합체에는 전체 DB 를 써야 할 것으로 보이는데 이건 추론이고
+붙이면 512 로 올라갑니다. 버킷 128 대 256 의 실측 차이는 2.25배(4.20초 대 9.44초)입니다.
+둘째, **paired MSA 가 계면 예측에 중요합니다.** 축소 DB 의 paired 깊이는 158~225, 전체
+DB 는 24,250~27,353 입니다. 복합체에는 전체 DB 를 써야 할 것으로 보이는데 이건 추론이고
 직접 측정하지 못했다 ([12절](#12-측정-조건과-한계)).
 
 ### 5-3. `af3_prepare.py`: FASTA/CSV 에서 JSON 만들기
 
-세부 옵션은 `python3 scripts/af3_prepare.py --help` 에 있다. 여기 적은 것보다
-스크립트가 정확하다.
+세부 옵션은 `python3 scripts/af3_prepare.py --help` 에 있습니다. 여기 적은 것보다
+스크립트가 정확합니다.
 
 ```bash
 # multi-FASTA의 각 레코드를 독립된 JSON 1개로 변환
@@ -1307,7 +1313,7 @@ python3 scripts/af3_prepare.py --fasta examples/vhh_panel.fasta -o vhh_in --seed
 python3 scripts/af3_prepare.py --fasta target.fasta -o with_atp_in --ligand-ccd ATP
 ```
 
-대량 변환 전에는 `--dry-run`으로 이름 충돌과 입력 오류를 확인한다.
+대량 변환 전에는 `--dry-run`으로 이름 충돌과 입력 오류를 확인합니다.
 `--dry-run` 이 실제로 출력하는 버킷 분포는 이런 모양이다 (예제 6종).
 
 ```
@@ -1318,9 +1324,9 @@ python3 scripts/af3_prepare.py --fasta target.fasta -o with_atp_in --ligand-ccd 
 ```
 
 길이 검증(`--min-len` 10, `--max-len` 3000), 비표준 알파벳(`--allow-ambiguous`),
-동일 서열 복제(`--copies`)와 JSON version(`--json-version`) 등 세부 옵션은 `--help`에서 확인한다.
+동일 서열 복제(`--copies`)와 JSON version(`--json-version`) 등 세부 옵션은 `--help`에서 확인합니다.
 
-CSV 입력은 `name,sequence` 두 열을 갖는 형태다.
+CSV 입력은 `name,sequence` 두 열을 갖는 형태입니다.
 
 ```csv
 name,sequence
@@ -1332,7 +1338,7 @@ vhh_7a50_1,QVQLQESGGGLVQAGDSLRLSCAASGRTFSTYPMGWFRQAPGKEREFVAASSSRAYYADSVKGRFTISR
 판이다(공개 PDB 유래). 이 6종이
 [3-5절](#3-5-데이터베이스-선택) 의 DB 비교에 쓴 타깃과 같으므로
 결과를 [results_example/af3_summary.csv](results_example/af3_summary.csv) 와 직접
-비교할 수 있다. 리간드와 다량체 관련 옵션은 `--help`에서 확인한다.
+비교할 수 있습니다. 리간드와 다량체 관련 옵션은 `--help`에서 확인합니다.
 
 ### 5-4. 생성 결과 확인
 
@@ -1343,7 +1349,7 @@ python3 -c "import json;print(json.load(open('vhh_001_in/vhh_A01.json'))['name']
 find vhh_001_in -name '._*' -delete    # macOS 유래 사이드카를 지운다
 ```
 
-`._`로 시작하는 파일은 입력 해석 오류를 일으킨다. 이 문제로 3시간 측정이 실패한 사례가
+`._`로 시작하는 파일은 입력 해석 오류를 일으킵니다. 이 문제로 3시간 측정이 실패한 사례가
 있습니다. 원인과 예방은 [10절](#10-자주-겪는-문제) 첫 항목에서 확인할 수 있습니다.
 
 ---
@@ -1363,32 +1369,32 @@ nohup python3 scripts/run_af3_batch_improved.py \
 tail -f af3.log
 ```
 
-입력 폴더의 JSON은 컨테이너 1회 기동으로 순회한다. 기본 폴더 이름은 파일 위쪽
-`INPUT_DIR_NAME` / `OUTPUT_DIR_NAME` 에서 바꾸거나 `--input-dir` / `--output-dir` 로 준다.
-`--yes`를 빼면 백그라운드에서 확인 질문을 받지 못해 멈춘다. 이는 대량 결과를 입력
-폴더에 쓰는 실수를 막기 위한 장치다.
+입력 폴더의 JSON은 컨테이너 1회 기동으로 순회합니다. 기본 폴더 이름은 파일 위쪽
+`INPUT_DIR_NAME` / `OUTPUT_DIR_NAME` 에서 바꾸거나 `--input-dir` / `--output-dir` 로 줍니다.
+`--yes`를 빼면 백그라운드에서 확인 질문을 받지 못해 멈춥니다. 이는 대량 결과를 입력
+폴더에 쓰는 실수를 막기 위한 장치입니다.
 
 | 옵션 | 하는 일 |
 |------|---------|
-| `--guide` | 경로와 모드 설명만 보고 끝낸다. 아무것도 만들지 않는다 |
+| `--guide` | 경로와 모드 설명만 보고 끝냅니다. 아무것도 만들지 않는다 |
 | `--audit` | 실행 없이 완료/미완료와 잔여 폴더만 점검. 미완료가 있으면 종료코드 1 |
 | `--mode data` / `--mode inference` | MSA/템플릿만 (**GPU 를 할당하지 않아** 추론과 병행 가능) / 준비된 입력으로 추론만 |
-| `--per-file` | 파일마다 컨테이너를 따로 띄운다 (느리다. 문제 격리용) |
+| `--per-file` | 파일마다 컨테이너를 따로 띄운다 (느립니다. 문제 격리용) |
 | `--cleanup` | 격리 결과와 잔여 staging 을 미리 보여준 뒤 정리 |
 | `--yes` | 확인 질문에 자동 응답. 백그라운드 실행에 필요 |
 | `--docker COMMAND` | 자동 탐지 대신 Docker 명령을 명시. 자동 경로는 암호를 묻는 sudo를 선택하지 않는다 |
 | `--db-dir PATH` | DB root. reduced overlay와 full fallback을 우선순서대로 반복 가능 |
 | `--allow-unsealed-db` | 호환성 전용 metadata-only full DB identity. seal 누락만 허용하며 malformed/stale seal은 거부 |
 
-이 러너는 완료 여부를 폴더가 아니라 최종 산출물로 판단한다. `_ranking_scores.csv`,
-`_model.cif`, `_summary_confidences.json` 세 파일이 모두 있고 크기가 0보다 커야 완료다.
+이 러너는 완료 여부를 폴더가 아니라 최종 산출물로 판단합니다. `_ranking_scores.csv`,
+`_model.cif`, `_summary_confidences.json` 세 파일이 모두 있고 크기가 0보다 커야 완료입니다.
 미완료 결과는 `.af3_incomplete/`로 옮겨 작업별 최신 한 건만 보존하며, 같은 출력 폴더의
-중복 실행은 파일 잠금으로 막는다.
+중복 실행은 파일 잠금으로 막습니다.
 
 ### 6-2. 보조 legacy 래퍼: `af3run.sh`
 
 작업 이름 하나로 진단부터 집계까지 묶는다 (`af3_batch.py` 를 호출한다). 새 배포는 6-1의
-권장 러너를 우선한다. 이 래퍼는 기존 2단계 작업과의 호환 경로다. 두 번째 인자가
+권장 러너를 우선합니다. 이 래퍼는 기존 2단계 작업과의 호환 경로입니다. 두 번째 인자가
 모드다: `check`(환경 진단), `dry`(실행 없이 명령만 확인), `screen`(경량 스크리닝
 sample 1 / recycle 3, 전수용), `full`(정밀 sample 5 / recycle 10, 상위 후보용),
 `msa`, `infer`(보관 MSA + pinned AF3 기본 정밀 설정),
@@ -1407,19 +1413,19 @@ bash scripts/af3run.sh vhh_001 screen     # 4. 전수
 bash scripts/af3run.sh vhh_001 collect    # 5. 집계
 ```
 
-MSA 동시 갈래와 DB당 스레드는 환경변수로 조절한다. **둘 다 양의 정수만 받는다.**
+MSA 동시 갈래와 DB당 스레드는 환경변수로 조절합니다. **둘 다 양의 정수만 받습니다.**
 
 ```bash
 AF3_MSA_WORKERS=2 AF3_MSA_NCPU=8 bash scripts/af3run.sh vhh_001 screen
 ```
 
-숫자가 아닌 값을 주면 어느 변수가 잘못됐는지 알려 주고 멈춘다. 이 값들은 셸 산술
-확장에 들어가므로, 검증 없이 받으면 값 안의 명령이 실행된다. 작업 이름도 폴더 이름이
-되므로 영문·숫자·`.`·`_`·`-` 만 받고 슬래시나 `..` 는 거부한다.
+숫자가 아닌 값을 주면 어느 변수가 잘못됐는지 알려 주고 멈춥니다. 이 값들은 셸 산술
+확장에 들어가므로, 검증 없이 받으면 값 안의 명령이 실행됩니다. 작업 이름도 폴더 이름이
+되므로 영문·숫자·`.`·`_`·`-` 만 받고 슬래시나 `..` 는 거부합니다.
 
 ### 6-3. `af3_batch.py` 직접 쓰기
 
-전체 옵션은 `python3 scripts/af3_batch.py --help`에서 확인한다.
+전체 옵션은 `python3 scripts/af3_batch.py --help`에서 확인합니다.
 
 ```bash
 # 실행 계획 확인(계산하지 않음)
@@ -1439,44 +1445,44 @@ python3 scripts/af3_batch.py --name vhh_001 --stage both --retry
 ```
 
 `--stage` 는 `msa`(MSA 만, 산출물 `*_data.json` 을 `msa_store` 에 보관),
-`infer`(보관된 MSA 로 추론만), `both`(기본값), `oneshot`(한 프로세스에서 둘 다) 네 가지다.
+`infer`(보관된 MSA 로 추론만), `both`(기본값), `oneshot`(한 프로세스에서 둘 다) 네 가집니다.
 
 경로는 `--name` / `--input-dir` / `--output-dir` / `--db-dir` / `--model-dir` /
 `--cache-dir` / `--image` / `--docker`, 계산량은 `--diffusion-samples`(스크리닝 1,
 정밀 5) / `--recycles`(3, 10) / `--msa-n-cpu`(기본 `min(코어수/2, 8)`) /
 `--msa-workers`(기본 1. **실측상 1이 최적이니 건드리지 말 것**) / `--limit N`,
-재실행은 `--retry` / `--no-skip` 로 준다. 전체 목록은 `--help`, 명령 모음은
+재실행은 `--retry` / `--no-skip` 로 줍니다. 전체 목록은 `--help`, 명령 모음은
 [docs/commands.md](docs/commands.md).
 
-legacy 러너는 기본적으로 `--no-progress-timeout 7200`을 적용한다. `infer`/`oneshot`은
+legacy 러너는 기본적으로 `--no-progress-timeout 7200`을 적용합니다. `infer`/`oneshot`은
 stdout 로그 또는 output artifact가, 병렬 MSA는 **각 갈래의** 로그 또는 그 갈래 target
-artifact가 2시간 동안 모두 변하지 않으면 해당 프로세스를 종료하고 실패로 기록한다. GPU
-사용률 0%만으로는 멈추지 않는다. 정상 작업이 2시간 넘게 아무 로그·파일도 만들지 않는다는
-근거가 있을 때만 값을 늘리고, 감시를 명시적으로 끄려면 `--no-progress-timeout 0`을 쓴다.
-음수는 잘못된 설정으로 거부한다.
+artifact가 2시간 동안 모두 변하지 않으면 해당 프로세스를 종료하고 실패로 기록합니다. GPU
+사용률 0%만으로는 멈춘 것으로 보지 않습니다. 정말로 2시간 넘게 아무 로그·파일도 만들지
+않는 작업만 값을 늘리고, 감시를 명시적으로 끄려면 `--no-progress-timeout 0`을 사용합니다.
+음수는 잘못된 설정으로 거부합니다.
 
-이 legacy 러너도 manifest가 없는 과거 MSA/result를 기본으로 재사용하지 않는다. upgrade 후에는
-먼저 `--dry-run`과 결과/입력 archive를 대조한다. 일치 여부를 외부 기록으로 확인한 경우에만
-`--trust-unverified-legacy`를 명시할 수 있으며, 이 옵션은 과거 cache의 정확성을 새로 검증하지 않는다.
-full DB seal 정책은 preferred runner와 동일하다. `--allow-unsealed-db`는 seal을 만들거나 검증하지
-않으며 metadata-only provenance를 남기는 제한적 호환 옵션이다.
+이 legacy 러너도 manifest가 없는 과거 MSA/result를 기본으로 재사용하지 않습니다. upgrade 후에는
+먼저 `--dry-run`과 결과/입력 archive를 대조합니다. 일치 여부를 외부 기록으로 확인한 경우에만
+`--trust-unverified-legacy`를 명시할 수 있으며, 이 옵션은 과거 cache의 정확성을 새로 검증하지 않습니다.
+full DB seal 정책은 preferred runner와 동일합니다. `--allow-unsealed-db`는 seal을 만들거나 검증하지
+않으며 metadata-only provenance를 남기는 제한적 호환 옵션입니다.
 
 > ### 버킷 사다리에는 128을 포함한다
 >
 > AF3 의 기본 패딩 버킷 사다리는 128에서 시작한다 (`run_alphafold.py` 의 `_BUCKETS`
 > 기본값, 소스 대조 및 실측 확인). 128을 빠뜨리면 토큰 128 이하인 짧은 VHH 가 갈 곳을
 > 잃고 256 버킷으로 밀려 정상상태 추론이 **4.20초에서 9.44초, 2.25배**가 되고 2000건이면
-> GPU 단계가 2.3시간에서 5.2시간이 된다.
+> GPU 단계가 2.3시간에서 5.2시간이 됩니다.
 >
 > `af3_batch.py` 는 입력의 토큰 수를 세어 `[128, 256, 384, 512, ...]` 사다리에서 실제로
-> 쓰이는 버킷만 골라 넘긴다. 기본값에서는 자동으로 선택된다. `af3_prepare.py --buckets`로
-> 사다리를 직접 지정할 때는 128을 첫 항목으로 둔다. 결과 CSV의 `패딩버킷` 열이 256이면
-> 이 경우에는 버킷 설정에서 128이 빠졌는지, 입력이 실제로 128 토큰을 넘는지 확인한다.
+> 쓰이는 버킷만 골라 넘깁니다. 기본값에서는 자동으로 선택됩니다. `af3_prepare.py --buckets`로
+> 사다리를 직접 지정할 때는 128을 첫 항목으로 둡니다. 결과 CSV의 `패딩버킷` 열이 256이면
+> 이 경우에는 버킷 설정에서 128이 빠졌는지, 입력이 실제로 128 토큰을 넘는지 확인합니다.
 
 ### 6-4. 2단계 전략: MSA 먼저, 추론 나중
 
-MSA(CPU)와 추론(GPU)을 분리하면 MSA 산출물(`*_data.json`)이 `msa_store`에 보관된다.
-추론 설정을 바꿔도 MSA를 다시 계산하지 않으므로 상위 후보의 정밀 재실행 시간을 줄일 수 있다.
+MSA(CPU)와 추론(GPU)을 분리하면 MSA 산출물(`*_data.json`)이 `msa_store`에 보관됩니다.
+추론 설정을 바꿔도 MSA를 다시 계산하지 않으므로 상위 후보의 정밀 재실행 시간을 줄일 수 있습니다.
 
 ```bash
 # 1단계: MSA 만 전수 (CPU 바운드)
@@ -1494,21 +1500,21 @@ while read n; do cp "vhh_001_in/${n}.json" vhh_top_in/ 2>/dev/null; done < top10
 python3 scripts/af3_batch.py --name vhh_top --stage infer --diffusion-samples 5 --recycles 10
 ```
 
-`--stage infer`는 MSA/data pipeline을 건너뛴다는 뜻일 뿐 계산 fidelity를 뜻하지 않는다.
-`--diffusion-samples`/`--recycles`를 생략하면 pinned AF3 기본값을 사용한다. 경량 설정은
-항상 두 값을 명시하고 provenance에서 stage와 fidelity parameters를 따로 비교한다.
-top-N 경계 동점은 이름으로 자르지 않고 `af3_stage2.py` 기본 정책대로 전부 포함한다.
-정확히 N개가 필요하면 `--tie-policy error`로 중단해 cutoff를 재정의한다.
+`--stage infer`는 MSA/data pipeline을 건너뛴다는 뜻일 뿐 계산 fidelity를 뜻하지 않습니다.
+`--diffusion-samples`/`--recycles`를 생략하면 pinned AF3 기본값을 사용합니다. 경량 설정은
+항상 두 값을 명시하고 provenance에서 stage와 fidelity parameters를 따로 비교합니다.
+top-N 경계 동점은 이름으로 자르지 않고 `af3_stage2.py` 기본 정책대로 전부 포함합니다.
+정확히 N개가 필요하면 `--tie-policy error`로 중단해 cutoff를 재정의합니다.
 
-`_data.json` 재사용의 절약폭은 1단계에 쓴 DB 구성이 정한다. 축소 DB 로 1단계를 돌렸으면
-건당 4~5초, 전체 DB 급으로 돌렸으면 건당 약 30초다 (실측, VHH 4건). 축소 DB 에서도
+`_data.json` 재사용의 절약폭은 1단계에 쓴 DB 구성이 정합니다. 축소 DB 로 1단계를 돌렸으면
+건당 4~5초, 전체 DB 급으로 돌렸으면 건당 약 30초입니다 (실측, VHH 4건). 축소 DB 에서도
 재사용을 권하는 이유는 시간이 아니라 1단계와 2단계가 동일한 MSA 를 쓴다는 것이다
-(MSA 를 다시 만들면 같은 DB 로도 깊이가 달라졌다.
+(MSA 를 다시 만들면 같은 DB 로도 깊이가 달라졌습니다.
 [docs/two_stage_notes.md](docs/two_stage_notes.md) 3절). 다만 **경량 스크리닝으로 고른
-상위 100건이 정밀 계산의 상위 100건과 같다는 보장은 없다.** 순위 보존은 측정하지 않았다
+상위 100건이 정밀 계산의 상위 100건과 같다는 보장은 없습니다.** 순위 보존은 측정하지 않았다
 ([12절](#12-측정-조건과-한계)).
 
-MSA 설정은 실측 최적값을 기본으로 사용한다. 별도 측정 없이 `--msa-workers`를 늘리는 것은 권장하지 않는다.
+MSA 설정은 실측 최적값을 기본으로 사용합니다. 별도 측정 없이 `--msa-workers`를 늘리는 것은 권장하지 않습니다.
 같은 스레드 총량에서 갈래를 늘리면 오히려 느려진다 (32스레드 1갈래 0.890 대
 2갈래 0.767 타깃/분). AF3 가 이미 체인당 DB 4개를 내부에서 병렬 검색한다
 (`ThreadPoolExecutor(max_workers=4)`).
@@ -1519,14 +1525,14 @@ MSA 설정은 실측 최적값을 기본으로 사용한다. 별도 측정 없�
 **0.895 타깃/분으로 포화**하고 그 이상은 손해다 (24스레드 0.778, 32스레드 0.890,
 96스레드 0.848). 측정 조건은 **전체 DB 급(4종 각 4GB 슬라이스) 기준**이다
 (`results_example/msa_throughput.csv` 의 `db` 열). 축소 DB 약 2GB 에서는 데이터
-파이프라인이 건당 1.98초로 훨씬 짧다.
+파이프라인이 건당 1.98초로 훨씬 짧습니다.
 
-권장값은 `--jackhmmer_n_cpu = --nhmmer_n_cpu = min(코어수/2, 8)`, 동시 1갈래다.
-AF3 기본값이 `min(코어수, 8)` 이므로 **8코어 이상이면 기본값이 이미 최적에 가깝다.**
+권장값은 `--jackhmmer_n_cpu = --nhmmer_n_cpu = min(코어수/2, 8)`, 동시 1갈래입니다.
+AF3 기본값이 `min(코어수, 8)` 이므로 **8코어 이상이면 기본값이 이미 최적에 가깝습니다.**
 
 ### 6-5. 진행 확인과 재개
 
-스크립트는 `<이름>_work/` 에 상태를 남긴다.
+스크립트는 `<이름>_work/` 에 상태를 남깁니다.
 
 ```bash
 cat vhh_001_work/state.json | python3 -m json.tool | head -30   # 진행 상태와 실패 목록
@@ -1539,15 +1545,15 @@ nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -l 5
 `utilization.gpu` 가 오르내리면 정상이고, `memory.used` 가 15GB 근처인 것도 정상이다
 (XLA 선점량, [2절](#2-요구-사양)).
 
-전원, 커널 OOM, SSH 연결 종료 등으로 중단되면 동일한 명령으로 재개한다. 이미 끝난
-타깃은 건너뛴다. 미완성 결과 폴더는 스크립트가 `partial/` 로 옮겨 둔다
+전원, 커널 OOM, SSH 연결 종료 등으로 중단되면 동일한 명령으로 재개합니다. 이미 끝난
+타깃은 건너뜁니다. 미완성 결과 폴더는 스크립트가 `partial/` 로 옮겨 둡니다
 (그대로 두려면 `--keep-partial`). 실패한 것만 골라 다시 하려면 `--retry`,
-처음부터 다시 계산하려면 `--no-skip` 이다. **2000건에 `--no-skip` 을 쓰면 처음부터
-다시 돌린다.**
+처음부터 다시 계산하려면 `--no-skip` 입니다. **2000건에 `--no-skip` 을 쓰면 처음부터
+다시 돌립니다.**
 
 장시간 실행에는 `tmux new -s af3` 세션을 사용한다
 (`Ctrl+B, D` 로 빠져나오고 `tmux attach -t af3` 로 다시 붙는다). 운영 절차 전체는
-[docs/operations_guide.md](docs/operations_guide.md) 에 있다.
+[docs/operations_guide.md](docs/operations_guide.md) 에 있습니다.
 
 ---
 
@@ -1555,33 +1561,33 @@ nvidia-smi --query-gpu=utilization.gpu,memory.used --format=csv -l 5
 
 ### 7-0. full DB MSA 시간은 무엇이 정하는가
 
-복합체(사슬 2개, 277잔기)는 사슬마다 MSA 를 돌므로 full DB 로 **69.8분** 걸렸다.
+복합체(사슬 2개, 277잔기)는 사슬마다 MSA 를 돌므로 full DB 로 **69.8분** 걸렸습니다.
 
-> **34.8분은 CPU 도 GPU 도 아니라 디스크가 정한 값이다.** full DB MSA 가 도는 동안
+> **34.8분은 CPU 도 GPU 도 아니라 디스크가 정한 값입니다.** full DB MSA 가 도는 동안
 > 이 장비를 재 보면 GPU 1%(54°C, 210MHz 아이들), CPU 32코어 중 실질 3코어,
-> iowait 7.4%, 그리고 HDD 가 152MB/s 로 읽으며 평균 대기 **287ms** 였다.
+> iowait 7.4%, 그리고 HDD 가 152MB/s 로 읽으며 평균 대기 **287ms** 였습니다.
 > jackhmmer 3개가 `--cpu 8` 을 받고도 같은 회전 디스크를 동시에 훑느라 서로
-> seek 를 뺏는다. **full DB 를 NVMe 에 두면 이 표의 시간은 크게 달라진다.**
-> 여기 숫자를 다른 장비 계획에 그대로 쓰면 안 된다.
+> 동시 읽기가 디스크 seek를 놓고 경쟁합니다. **full DB 를 NVMe 에 두면 이 표의 시간은 크게 달라집니다.**
+> 여기 숫자를 다른 장비 계획에 그대로 쓰면 안 됩니다.
 
 **MSA 시간은 사슬 길이를 타지 않는다 (이 장비에서).** 같은 날 full DB 로 돌린
-네 입력의 사슬 9개를 잔기 수 순으로 놓으면 이렇다.
+네 입력의 사슬 9개를 잔기 수 순으로 놓으면 이렇습니다.
 
 | 잔기 | 73 | 116 | 116 | 129 | 129 | 138 | 148 | 340 | 350 |
 |---|---|---|---|---|---|---|---|---|---|
 | MSA (초) | 2109 | 2055 | 2262 | 2049 | 2061 | 2091 | 2066 | 2092 | 2105 |
 
-73잔기와 350잔기가 같은 35분이다. 최대/최소 비가 1.10배이고, 그 편차는 같은 116잔기
-두 건 사이(2055 vs 2262)에서도 나온다. 즉 jackhmmer 의 계산량이 아니라 **DB 를
+73잔기와 350잔기가 같은 35분입니다. 최대/최소 비가 1.10배이고, 그 편차는 같은 116잔기
+두 건 사이(2055 vs 2262)에서도 나옵니다. 즉 jackhmmer 의 계산량이 아니라 **DB 를
 디스크에서 한 번 읽어 오는 시간이 바닥값** 이고, 이 길이 범위에서는 계산이 그 바닥
-아래에 묻힌다. 그래서 full DB 소요는 대략 **사슬 수 × 35분** 으로 잡으면 되고
+아래에 묻힙니다. 그래서 full DB 소요는 대략 **사슬 수 × 35분** 으로 잡으면 되고
 (1사슬 34.8분, 2사슬 69.8분, 3사슬 106.9~107.9분), 사슬이 길다고 더 잡을 필요는
-없다. 이보다 훨씬 긴 사슬(수천 잔기)에서는 확인하지 않았다.
+없습니다. 이보다 훨씬 긴 사슬(수천 잔기)에서는 확인하지 않았습니다.
 
 JSON 하나마다 `docker run` 을 새로 띄우면 타깃마다 컨테이너 기동, JAX/CUDA 초기화,
-가중치 로딩(1.15GB, 파라미터 3.68억 개), XLA 커널 컴파일을 처음부터 반복한다.
+가중치 로딩(1.15GB, 파라미터 3.68억 개), XLA 커널 컴파일을 처음부터 반복합니다.
 이 고정 비용이 건당 9.1~9.2초로 측정됐고, 버킷 128 에 들어가는 짧은 VHH 의 실제 추론은
-정상상태 4.20초다.
+정상상태 4.20초입니다.
 
 A/B 실측 (32건 곱하기 3반복, MSA 없는 GPU 추론 경로만, 웜 캐시):
 
@@ -1592,36 +1598,36 @@ A/B 실측 (32건 곱하기 3반복, MSA 없는 GPU 추론 경로만, 웜 캐시
 | 단일 프로세스 + 캐시 미지정 | 6.26초 | 5.10배 |
 | **단일 프로세스 + 캐시 지정 (권장)** | **5.39초** | **5.93배** |
 
-세 번 반복한 값이 5.39 / 5.39 / 5.41초로 편차 0.1%였다.
+세 번 반복한 값이 5.39 / 5.39 / 5.41초로 편차 0.1%였습니다.
 
 ![A/B 벤치마크](figures/ab_benchmark.png)
 
-가장 큰 차이는 단일 프로세스화에서 나왔다. 캐시 미지정 조건에서 5.10배, 캐시 지정에서
-1.76배 차이가 났다. 캐시 효과는 첫 두 입력의 컴파일 이후 줄어든다. 길이순 정렬의 이득은
-측정상 0.00초/건이었다.
+가장 큰 차이는 단일 프로세스화에서 나왔습니다. 캐시 미지정 조건에서 5.10배, 캐시 지정에서
+1.76배 차이가 났습니다. 캐시 효과는 첫 두 입력의 컴파일 이후 줄어듭니다. 길이순 정렬의 이득은
+측정상 0.00초/건이었습니다.
 
-GPU 단계를 고치면 다음에 무엇이 남는지는 **1단계에 어떤 DB 를 쓰는가**에 달려 있다.
-아래 두 구성은 조건이 달라 직접 비교할 수 없다.
+GPU 단계를 고치면 다음에 무엇이 남는지는 **1단계에 어떤 DB 를 쓰는가**에 달려 있습니다.
+아래 두 구성은 조건이 달라 직접 비교할 수 없습니다.
 
 | 구성 | 데이터 파이프라인(MSA) 건당 | GPU 추론 건당 | 2000건 합계 | MSA 비중 | 근거 |
 |---|---|---|---|---|---|
 | 역사적 축소 sequence DB | 1.98초 | 5.39초 | **4.1시간** | 27% | 서로 다른 실험의 건당 값을 합친 cross-experiment 투영 |
 | 전체 DB 급 4GB 슬라이스 4종 | 67.0초 (스레드 스윕 포화점) | 5.39초 | **40.2시간 (1.7일)** | 93% | MSA 인용, 추론 직접측정, 합계는 합산 추정 |
 
-**축소 DB 구성에서는 MSA 가 병목이 아니다.** 데이터 파이프라인 1.98초가 GPU 추론
-5.39초보다 짧다. **MSA 가 93%를 차지하는 것은 전체 DB 급 구성에서만 성립하고**, 조건을
-빼고 "코드를 고치면 MSA 가 93%" 라고 쓰면 틀린 말이 된다.
+**축소 DB 구성에서는 MSA 가 병목이 아닙니다.** 데이터 파이프라인 1.98초가 GPU 추론
+5.39초보다 짧습니다. **MSA 가 93%를 차지하는 것은 전체 DB 급 구성에서만 성립하고**, 조건을
+빼고 "코드를 고치면 MSA 가 93%" 라고 쓰면 틀린 말이 됩니다.
 
-연구자의 현재 방식은 건당 341초, 2000건 189시간(7.9일)이었다. 직접 측정된 개선은
+연구자의 현재 방식은 건당 341초, 2000건 189시간(7.9일)이었습니다. 직접 측정된 개선은
 GPU 추론 단계의 **5.93배**다. 189시간과 서로 다른 조건의 4~40시간 투영을 나눈
-**4.7~46배는 산술 시나리오 범위이며 end-to-end로 검증한 개선 배수가 아니다.**
+**4.7~46배는 산술 시나리오 범위이며 end-to-end로 검증한 개선 배수가 아닙니다.**
 
-> `341 / 5.39 = 63배` 같은 계산은 성립하지 않는다. 341초에는 MSA 가 포함돼 있고
-> 5.39초에는 포함돼 있지 않으므로 end-to-end 시간 계산에는 적용하지 않는다.
+> `341 / 5.39 = 63배` 같은 계산은 성립하지 않습니다. 341초에는 MSA 가 포함돼 있고
+> 5.39초에는 포함돼 있지 않으므로 end-to-end 시간 계산에는 적용하지 않습니다.
 
 측정 원자료와 조건별 대조는 [docs/benchmark_report.md](docs/benchmark_report.md),
 [docs/diagnosis_report.md](docs/diagnosis_report.md),
-[docs/msa_correction_notes.md](docs/msa_correction_notes.md) 에 있다.
+[docs/msa_correction_notes.md](docs/msa_correction_notes.md) 에 있습니다.
 
 ---
 
@@ -1637,7 +1643,7 @@ GPU 추론 단계의 **5.93배**다. 189시간과 서로 다른 조건의 4~40�
 | 두 사슬이 **어떤 자세로** 붙을 수 있는가 | **예측합니다.** ipTM과 PAE로 계면 confidence를 봅니다 |
 | 두 단백질이 **실제로 결합하는가** | **답하지 못합니다.** 높은 ipTM은 결합 증거가 아닙니다 |
 | 결합 세기(Kd, IC50)는 얼마인가 | **답하지 못합니다.** AF3에는 해당 출력이 없습니다 |
-| 어느 잔기가 에피토프인가 | 접촉 잔기는 볼 수 있지만, **예측 자세가 맞다는 전제**가 필요합니다 |
+| 어느 잔기가 에피토프인가 | 접촉 잔기는 볼 수 있지만, **예측 자세가 맞는다는 전제**가 필요합니다 |
 | 돌연변이가 결합을 얼마나 바꾸는가 | **답하지 못합니다.** 두 예측의 점수 차이는 결합 변화량이 아닙니다 |
 
 **높은 ipTM은 “AF3가 이 자세에 확신한다”는 뜻이지 “실제로 결합한다”는 뜻이 아닙니다.**
@@ -1659,7 +1665,7 @@ confidence만으로 구조 정확도를 확정할 수는 없습니다. 수치를
 
 ### 8-2. 출력 폴더의 구성
 
-타깃 하나가 폴더 하나가 되고 폴더 이름은 입력 JSON 의 `name` 을 정규화한 값이다.
+타깃 하나가 폴더 하나가 되고 폴더 이름은 입력 JSON 의 `name` 을 정규화한 값입니다.
 아래는 검증 호스트의 실제 출력이다 (VHH 단량체, sample 5).
 
 ```
@@ -1682,16 +1688,16 @@ vhh_001_out/vhh_4qgy_1/
 | `*_data.json` | MSA(`unpairedMsa`, `pairedMsa`)와 템플릿이 문자열로 담긴 **재사용 가능한 입력** | MSA 깊이를 볼 때. `--norun_data_pipeline` 재실행에 그대로 쓴다 ([6-4](#6-4-2단계-전략-msa-먼저-추론-나중)) |
 | `seed-*_sample-*/` | 샘플 하나의 `_model.cif` 와 신뢰도 2종 | 샘플 간 구조를 직접 비교할 때 |
 
-타깃 폴더 바로 아래의 파일은 AF3가 선택한 1위 모델이며 기본 구조 검토 대상이다.
+타깃 폴더 바로 아래의 파일은 AF3가 선택한 1위 모델이며 기본 구조 검토 대상입니다.
 
 출력 폴더가 이미 있고 비어 있지 않으면 AF3 는 `<폴더명>_<타임스탬프>` 형제 폴더를
-새로 만든다. 그때도 **파일 stem 은 원래 타깃명 그대로**이므로 집계 스크립트는 타깃을
-정상적으로 인식한다.
+새로 만듭니다. 그때도 **파일 stem 은 원래 타깃명 그대로**이므로 집계 스크립트는 타깃을
+정상적으로 인식합니다.
 
-**폴더가 있다는 것은 완료를 뜻하지 않는다.** AF3 는 추론 *전에* `_data.json` 을 쓴다.
+**폴더가 있다는 것은 완료를 뜻하지 않습니다.** AF3 는 추론 *전에* `_data.json` 을 씁니다.
 완료 기준은 `_ranking_scores.csv`, `_model.cif`(또는 `.cif.zst`),
-`_summary_confidences.json` 세 개가 모두 있고 크기가 0보다 클 때다.
-`run_af3_batch_improved.py` 가 이 기준으로 판정한다.
+`_summary_confidences.json` 세 개가 모두 있고 크기가 0보다 클 때입니다.
+`run_af3_batch_improved.py` 가 이 기준으로 판정합니다.
 
 ### 8-3. 지표의 정의
 
@@ -1704,20 +1710,20 @@ vhh_001_out/vhh_4qgy_1/
 | **ranking_score** | 해당 없음 | AF3 가 모델을 줄 세울 때 쓰는 종합 점수 | `*_summary_confidences.json` |
 | **fraction_disordered**, **has_clash** | 0~1, 0/1 | 무질서 비율, 원자 충돌 발생 | 같음 |
 
-pLDDT 평균은 집계 단위를 확인해야 한다. `af3_collect.py`의 `pLDDT평균`과 등급 판정은
-`atom_plddts` 전체의 원자 가중 평균이다. `af3_visualize.py`의 표에는
+pLDDT 평균은 집계 단위를 확인해야 합니다. `af3_collect.py`의 `pLDDT평균`과 등급 판정은
+`atom_plddts` 전체의 원자 가중 평균입니다. `af3_visualize.py`의 표에는
 `mean_atom_plddt`와 `mean_residue_plddt`가 따로 있고, 요약 비교 그림은 집계 CSV와 같은
-원자 평균을 쓴다. 잔기별 꺾은선과 3D 뷰어는 각 잔기에 같은 가중치를 준 잔기 평균을 쓴다.
-현재 Docker 스모크에서는 두 값이 각각 92.67과 93.31이었다. 계산 오류가 아니라 가중치
-차이다. 시각화 표의 기존 `mean_plddt`와 `min_plddt` 열은 호환성을 위해 잔기 지표 별칭으로
-남아 있다. atom-weighted global mean은 큰 framework와 원자 수가 많은 잔기의 영향을 더
-받으므로 CDR/interface 정확도를 대표하지 않는다.
+원자 평균을 씁니다. 잔기별 꺾은선과 3D 뷰어는 각 잔기에 같은 가중치를 준 잔기 평균을 씁니다.
+현재 Docker 스모크에서는 두 값이 각각 92.67과 93.31이었습니다. 계산 오류가 아니라 가중치
+차입니다. 시각화 표의 기존 `mean_plddt`와 `min_plddt` 열은 호환성을 위해 잔기 지표 별칭으로
+남아 있습니다. atom-weighted global mean은 큰 framework와 원자 수가 많은 잔기의 영향을 더
+받으므로 CDR/interface 정확도를 대표하지 않습니다.
 
 ### 8-4. 판정 기준선
 
-`af3_collect.py`가 CSV의 `등급` 열에 쓰는 **calibration되지 않은 local heuristic**이다.
+`af3_collect.py`가 CSV의 `등급` 열에 쓰는 **calibration되지 않은 local heuristic**입니다.
 pLDDT 색 구간과 달리 아래 whole-target 조합 등급과 cutoff는 AF3가 제공한 분류가 아니며,
-assay/native truth에 대해 sensitivity, specificity 또는 false-negative rate가 알려져 있지 않다.
+assay/native truth에 대해 sensitivity, specificity 또는 false-negative rate가 알려져 있지 않습니다.
 
 | 지표 | 구간 | 해석 |
 |------|------|------|
@@ -1730,47 +1736,47 @@ assay/native truth에 대해 sensitivity, specificity 또는 false-negative rate
 | | 0.6~0.8 | 회색지대. 판단 보류 |
 | | 0.6 미만 | 계면 실패 가능성 높음 |
 
-**복합체는 ipTM 을 1차 기준으로 쓴다.** 단량체는 ipTM 이 없으므로 pLDDT 와 pTM 을
-함께 본다. `등급` 열은 복합체에서 `A_계면신뢰`(ipTM ≥ 0.8 이고 pLDDT평균 ≥ 80),
+**복합체는 ipTM 을 1차 기준으로 씁니다.** 단량체는 ipTM 이 없으므로 pLDDT 와 pTM 을
+함께 봅니다. `등급` 열은 복합체에서 `A_계면신뢰`(ipTM ≥ 0.8 이고 pLDDT평균 ≥ 80),
 `B_계면회색`(ipTM ≥ 0.6), `C_계면실패`(그 외)이고, 단량체에서
 `A_높음`(pLDDT평균 ≥ 90 이고 pTM ≥ 0.7), `B_신뢰`(pLDDT평균 ≥ 80 이고 pTM ≥ 0.5),
-`C_보통`(pLDDT평균 ≥ 70), `D_낮음`(그 외)이다.
+`C_보통`(pLDDT평균 ≥ 70), `D_낮음`(그 외)입니다.
 
-등급과 별개로 `경고` 열이 붙는다. `충돌`(has_clash > 0, 원자 중첩 구조 확인 필요),
+등급과 별개로 `경고` 열이 붙습니다. `충돌`(has_clash > 0, 원자 중첩 구조 확인 필요),
 `무질서`(fraction_disordered ≥ 0.1), `MSA얕음`(unpaired 깊이 < 100.
 축소 DB 를 쓰면 정상적으로 붙는다), `샘플불안`(within-run diffusion-sample ranking
 max-min range ≥ 0.05인 local heuristic; 재현성 또는 correctness calibration이 아님),
-`버킷256`(패딩 버킷 ≥ 256. 더 큰 연산 구간이라는 표시)이다.
+`버킷256`(패딩 버킷 ≥ 256. 더 큰 연산 구간이라는 표시)입니다.
 2.25배는 이 컴퓨터에서 버킷 128과 256을 비교한 값이며 다른 버킷이나 장비에 그대로
-적용하지 않는다.
+적용하지 않습니다.
 
 > ### 주의 1. 신뢰도는 정답과의 일치도가 아니다
 >
 > pLDDT, pTM, ipTM, ranking_score는 모델 내부의 예측 신뢰도이며
-> **실제 구조와의 일치도를 직접 측정하지 않는다.** 특히 학습 데이터에
+> **실제 구조와의 일치도를 직접 측정하지 않습니다.** 특히 학습 데이터에
 > 유사 구조가 많은 계열(면역글로불린 폴드가 이에 해당한다)은 프레임워크 부분의 pLDDT가
-> 항상 높게 나오는데 그게 CDR 루프의 배치가 맞다는 뜻은 아니다. **이 값들은 실험 검증
+> 항상 높게 나오는데 그게 CDR 루프의 배치가 맞다는 뜻은 아닙니다. **이 값들은 실험 검증
 > 대상을 줄이는 순위 지표로만 쓰라.** "pLDDT 92니까 이 구조가 맞다" 는 결론은 이
-> 데이터로 낼 수 없다.
+> 데이터로 낼 수 없습니다.
 
 > ### 주의 2. ranking_score는 단독 순위 기준으로 사용하지 않는다
 >
 > AF3 의 정의는 `0.8 x (ipTM 또는 단량체면 pTM) + 0.2 x pTM +
 > 0.5 x fraction_disordered - 100 x has_clash` 다. **`fraction_disordered` 를 더하므로**
-> 무질서 비율이 높은 건이 pTM 이 더 낮아도 ranking_score 는 더 높게 나올 수 있다.
+> 무질서 비율이 높은 건이 pTM 이 더 낮아도 ranking_score 는 더 높게 나올 수 있습니다.
 > 이 점수는 원래 같은 타깃의 여러 샘플 중 대표를 고르기 위한 것이고 **서로 다른 타깃을
-> 줄 세우는 용도가 아니다.**
+> 줄 세우는 용도가 아닙니다.**
 >
-> 스크리닝 순위에는 **pTM(단량체) 또는 ipTM(복합체)과 pLDDT평균을 함께** 사용한다.
-> `af3_collect.py` 의 `--top-by` 로 기준 열을 바꿀 수 있다. CSV 의 `ranking검산차` 열은
+> 스크리닝 순위에는 **pTM(단량체) 또는 ipTM(복합체)과 pLDDT평균을 함께** 사용합니다.
+> `af3_collect.py` 의 `--top-by` 로 기준 열을 바꿀 수 있습니다. CSV 의 `ranking검산차` 열은
 > 위 식으로 다시 계산한 값과의 차이이고, **0 근처가 아니면 파일 짝이 안 맞는다**
 > (다른 실행의 파일이 섞였다).
 
 ### 8-5. `af3_collect.py` 로 표 만들기
 
-출력 폴더에서 타깃별 지표를 읽어 CSV로 모은다. 표준 라이브러리만 쓰므로
+출력 폴더에서 타깃별 지표를 읽어 CSV로 모읍니다. 표준 라이브러리만 쓰므로
 pandas 가 없는 서버에서도 돌아간다 (python 3.8 이상). **읽기만 하고** 출력 폴더의 어떤
-파일도 수정하거나 삭제하지 않는다.
+파일도 수정하거나 삭제하지 않습니다.
 
 ```bash
 python3 scripts/af3_collect.py vhh_001_out -o vhh_001_결과요약.csv    # 기본
@@ -1787,15 +1793,15 @@ python3 scripts/af3_collect.py vhh_001_out --top 100 --top-by pTM --top-list top
 python3 scripts/af3_collect.py vhh_001_out --grade-doc                # 등급 기준 설명
 ```
 
-CSV 는 35열이다. `조건, 타깃, 등급, 경고`, 신뢰도(`ranking_score, pTM, ipTM,
+CSV 는 35열입니다. `조건, 타깃, 등급, 경고`, 신뢰도(`ranking_score, pTM, ipTM,
 원자 가중 pLDDT평균/중앙값/최소/p10/70이상비율/90이상비율, fraction_disordered, has_clash`),
 MSA(`MSA_unpaired깊이, MSA_paired깊이`), 규모(`토큰수, 원자수, 체인수, 체인ID,
 패딩버킷`), 샘플 산포(`샘플수, ranking최고/최저/산포`), 체인별
 (`chain_pTM, chain_ipTM, min_chain_pair_ipTM`), 검산(`ranking검산차`), 그리고 출처
 (`출력경로, 폴더명, 실행시각, 실행수, 중복정책`)다. 여러 번 실행해 타임스탬프 폴더가
-생겼으면 `--all-runs` 로 전부 집계할 수 있다. `-o`를 생략했을 때 기본 CSV 파일명을
-ASCII로 만들려면 `--filename-lang en`을 준다. 이 옵션은 파일명만 바꾸며 CSV 열 이름은
-바꾸지 않는다.
+생겼으면 `--all-runs` 로 전부 집계할 수 있습니다. `-o`를 생략했을 때 기본 CSV 파일명을
+ASCII로 만들려면 `--filename-lang en`을 줍니다. 이 옵션은 파일명만 바꾸며 CSV 열 이름은
+바꾸지 않습니다.
 
 실행하면 화면에 이렇게 요약이 뜬다 (검증 호스트 실물 출력, 축소 DB 6종).
 
@@ -1808,42 +1814,42 @@ ASCII로 만들려면 `--filename-lang en`을 준다. 이 옵션은 파일명만
   ranking_score 검산: 전건 일치 (파일 짝이 맞다)
 ```
 
-2026-08-21 Docker 스모크 결과는 다음처럼 읽었다.
+2026-08-21 Docker 스모크 결과는 다음처럼 읽었습니다.
 
 | 등급 | ranking score | pTM | pLDDT 평균 | MSA unpaired / paired | tokens / bucket | ranking 범위(최고-최저) |
 |------|---------------|-----|------------|-----------------------|-----------------|-----------|
 | A_높음 | 0.90 | 0.90 | 92.67 | 10,640 / 24,469 | 116 / 128 | 0.0023 |
 
 단량체 접힘에 대한 AF3 내부 confidence가 높고 같은 실행의 다섯 diffusion sample에서
-ranking score 범위가 작았다는 뜻이다. 이 within-run range는 run-to-run reproducibility,
-parameter/data uncertainty 또는 correctness calibration이 아니다. 단량체라 ipTM은
-없으며 0으로 해석하지 않는다. 이 값만으로 결합, 활성, 실험 구조 일치를 주장할 수는 없다.
+ranking score 범위가 작았다는 뜻입니다. 이 within-run range는 run-to-run reproducibility,
+parameter/data uncertainty 또는 correctness calibration이 아닙니다. 단량체라 ipTM은
+없으며 0으로 해석하지 않습니다. 이 값만으로 결합, 활성, 실험 구조 일치를 주장할 수는 없습니다.
 
-`ranking_score 검산`이 전건 일치인지 확인한다. 불일치는 서로 다른 실행의 파일이 섞였을
-가능성을 뜻한다.
+`ranking_score 검산`이 전건 일치인지 확인합니다. 불일치는 서로 다른 실행의 파일이 섞였을
+가능성을 뜻합니다.
 실제 출력 예시는 [results_example/af3_summary.csv](results_example/af3_summary.csv)
-(축소 DB 대 전체 DB 6종 비교, 실측)에 있다. 현재 35열 형식으로 맞췄으며, 과거 실행에서
-시각을 따로 보존하지 않아 `실행시각`은 비어 있다.
+(축소 DB 대 전체 DB 6종 비교, 실측)에 있습니다. 현재 35열 형식으로 맞췄으며, 과거 실행에서
+시각을 따로 보존하지 않아 `실행시각`은 비어 있습니다.
 
 ### 8-6. 검토 순서
 
-1. `등급` 열은 local heuristic으로 정렬에만 쓰고 행을 제거하지 않는다.
-2. `경고` 열에 `충돌` 이 있는 건은 구조를 직접 열어 확인한다.
-3. `샘플불안`은 같은 실행 diffusion-sample score range가 local cutoff를 넘었다는 뜻이다.
-   재현성 판정으로 부르지 말고, 필요하면 독립 seed/configuration으로 민감도를 확인한다.
-4. 남은 것을 pTM(또는 ipTM) 내림차순 + pLDDT평균 으로 정렬한다.
+1. `등급` 열은 local heuristic으로 정렬에만 쓰고 행을 제거하지 않습니다.
+2. `경고` 열에 `충돌` 이 있는 건은 구조를 직접 열어 확인합니다.
+3. `샘플불안`은 같은 실행 diffusion-sample score range가 local cutoff를 넘었다는 뜻입니다.
+   재현성 판정으로 부르지 말고, 필요하면 독립 seed/configuration으로 민감도를 확인합니다.
+4. 남은 것을 pTM(또는 ipTM) 내림차순 + pLDDT평균 으로 정렬합니다.
 5. 상위 수십 건만 구조를 실제로 눈으로 본다 ([9절](#9-결과-보기)).
-6. 실제 후보 선택은 사전 지정 규칙과 assay/native validation design 안에서 수행한다.
+6. 실제 후보 선택은 사전 지정 규칙과 assay/native validation design 안에서 수행합니다.
 
-`MSA얕음` 경고는 축소 DB 를 썼으면 전량에 붙는다. 단량체 스크리닝에서는 정상이다
+`MSA얕음` 경고는 축소 DB 를 썼으면 전량에 붙습니다. 단량체 스크리닝에서는 정상이다
 ([3-5](#3-5-데이터베이스-선택) 의 6종 비교).
 
 ![신뢰도 분포](figures/confidence_overview.png)
 
 > 위 그림은 **이 저장소가 측정해 둔 12건 분석**이고, `af3_visualize.py` 가 만드는
-> 파일이 아니다. 파일명이 같지만 도구는 왼쪽에 ranking score 순위, 오른쪽에
-> 신뢰도 산점도를 담은 **2패널** 그림을 만든다. 위 그림은 단량체 12건이라 pTM 을
-> 축으로 쓰고, 복합체에서는 도구가 ipTM 을 축으로 쓴다.
+> 파일이 아닙니다. 파일명이 같지만 도구는 왼쪽에 ranking score 순위, 오른쪽에
+> 신뢰도 산점도를 담은 **2패널** 그림을 만듭니다. 위 그림은 단량체 12건이라 pTM 을
+> 축으로 쓰고, 복합체에서는 도구가 ipTM 을 축으로 씁니다.
 
 ---
 
@@ -1863,14 +1869,15 @@ parameter/data uncertainty 또는 correctness calibration이 아니다. 단량�
 ~/af3_plot_env/bin/python scripts/af3_visualize.py vhh_001_out -o figs          # 폴더 전체
 ```
 
-**pLDDT 프로파일**(잔기별 꺾은선)에서 낮게 파인 구간은 신뢰도가 낮은 부위다. VHH에서는 CDR3
-근처가 낮은 게 흔하다. **PAE 히트맵**(토큰 곱하기 토큰)에서 대각 블록은 도메인 내부이고,
+**pLDDT 프로파일**(잔기별 꺾은선)에서 낮게 파인 구간은 신뢰도가 낮은 부위입니다. VHH에서는
+CDR3 근처가 낮은 경우가 흔합니다. **PAE 히트맵**(토큰 곱하기 토큰)에서 대각 블록은 도메인
+내부이고,
 복합체에서 사슬 A 와 B 에 해당하는 대각 밖 블록이 어두우면(오차 작음) 두 사슬의 상대
-위치를 확신한다는 뜻이다. 밝으면(오차 큼) 각 사슬은 잘 접혔지만 **어떻게 붙는지는
-모른다**는 뜻이고, ipTM 이 낮은 복합체는 대개 이 모양이다.
+위치를 확신한다는 뜻입니다. 밝으면(오차 큼) 각 사슬은 잘 접혔지만 **어떻게 붙는지는
+모릅니다.** ipTM 이 낮은 복합체는 대개 이 모양입니다.
 
-이 스크립트는 뷰어용 색칠·정렬 명령을 타깃 이름에 맞춰 생성해 주기도 한다
-(`examples/viewer_pymol_plddt.pml`, `examples/viewer_chimerax_plddt.cxc` 가 그 예시다).
+이 스크립트는 뷰어용 색칠·정렬 명령을 타깃 이름에 맞춰 생성해 줍니다
+(`examples/viewer_pymol_plddt.pml`, `examples/viewer_chimerax_plddt.cxc` 가 그 예시입니다).
 
 ### 9-2. `af3_view3d.py`: 브라우저 3D 뷰어
 
@@ -1891,17 +1898,17 @@ python3 scripts/af3_view3d.py vhh_001_out --out-dir 뷰어 --top 20
 python3 scripts/af3_view3d.py vhh_001_out --out-dir 뷰어 --lib embed --engine 3dmol
 ```
 
-생성된 `뷰어/index.html`을 브라우저에서 연다.
+생성된 `뷰어/index.html`을 브라우저에서 엽니다.
 
 ### 9-3. 만들어지는 파일
 
 | 파일 | 무엇인가 |
 | --- | --- |
-| `뷰어/index.html` | 타깃 목록. ranking score 내림차순. pTM, ipTM, 평균 pLDDT, 사슬 수, pLDDT 구간 분포 막대가 한 줄에 있다. 타깃 이름을 누르면 구조로 간다 |
+| `뷰어/index.html` | 타깃 목록. ranking score 내림차순. pTM, ipTM, 평균 pLDDT, 사슬 수, pLDDT 구간 분포 막대가 한 줄에 있습니다. 타깃 이름을 누르면 구조로 간다 |
 | `뷰어/<타깃>.html` | 구조 하나. 왼쪽에 신뢰도 지표와 색 범례, 오른쪽에 3D 화면 |
 
-`--lib cdn` (기본)이면 HTML 이 작고 열 때 인터넷이 필요하다. `--lib embed` 면
-3D 라이브러리가 파일 안에 들어가서 인터넷 없이 열리는 대신 파일이 커진다.
+`--lib cdn` (기본)이면 HTML 이 작고 열 때 인터넷이 필요합니다. `--lib embed` 면
+3D 라이브러리가 파일 안에 들어가서 인터넷 없이 열리는 대신 파일이 커집니다.
 크기는 구조가 클수록 커진다 (mmCIF 가 파일 안에 들어간다).
 
 | 만드는 법 | 단량체 116잔기 | 복합체 277잔기 |
@@ -1910,47 +1917,47 @@ python3 scripts/af3_view3d.py vhh_001_out --out-dir 뷰어 --lib embed --engine 
 | `--lib embed` (Mol\*) | 4.99 MB | 5.13 MB |
 | `--lib embed --engine 3dmol` | 0.64 MB | 0.78 MB |
 
-이 장비 2026-08-25 실측이다. 인터넷 없이 많은 결과를 열 때는
-`--engine 3dmol --lib embed`를 사용한다.
+이 장비 2026-08-25 실측입니다. 인터넷 없이 많은 결과를 열 때는
+`--engine 3dmol --lib embed`를 사용합니다.
 
-CDN URL은 version과 SRI가 고정돼 있고 embed 다운로드/cache는 SHA-256을 검사한다.
+CDN URL은 version과 SRI가 고정돼 있고 embed 다운로드/cache는 SHA-256을 검사합니다.
 `--lib-file`은 일반 data가 아니라 사용자가 신뢰한 **실행 JavaScript**를 직접 제공하는
-옵션이다. 생성기는 script-context escape, CSP, artifact symlink 거부, index 경로 제한과
-출력 파일명 충돌 검사를 적용한다.
+옵션입니다. 생성기는 script-context escape, CSP, artifact symlink 거부, index 경로 제한과
+출력 파일명 충돌 검사를 적용합니다.
 
 ### 9-4. 화면 조작
 
 - **돌리기**: 왼쪽 버튼으로 끌기
 - **확대/축소**: 마우스 휠
 - **평행 이동**: 오른쪽 버튼으로 끌기 (또는 휠 버튼)
-- **pLDDT / 사슬별 버튼**: 색칠을 바꾼다. 즉시 바뀐다. 다시 만들 필요 없다
+- **pLDDT / 사슬별 버튼**: 색칠을 바꿉니다. 즉시 바뀝니다. 다시 만들 필요 없다
 - **시점 초기화 버튼**: 처음 시점으로 복원한다
 
 왼쪽에 ranking score, pTM, ipTM, 평균 pLDDT, 최저 pLDDT, 무질서 비율,
-원자 충돌 여부, 사슬 수, 잔기/원자 수, 확산 샘플 수와 within-run sample range가 나온다.
-ipTM 은 단량체에 없는 값이므로 단량체 화면에는 그 줄이 아예 없다 (0 이 아니다).
+원자 충돌 여부, 사슬 수, 잔기/원자 수, 확산 샘플 수와 within-run sample range가 나옵니다.
+ipTM 은 단량체에 없는 값이므로 단량체 화면에는 그 줄이 아예 없습니다 (0 이 아닙니다).
 
 ### 9-5. 색 해석
 
-기본 색칠은 pLDDT 다. 잔기별 예측 신뢰도이고 0~100 이다. 경계와 색은 EBI
-AlphaFold DB 와 같으므로 그쪽에서 본 그림과 나란히 비교할 수 있다.
+기본 색칠은 pLDDT입니다. 잔기별 예측 신뢰도이고 0~100 입니다. 경계와 색은 EBI
+AlphaFold DB 와 같으므로 그쪽에서 본 그림과 나란히 비교할 수 있습니다.
 
 | 색 | pLDDT | 뜻 |
 | --- | --- | --- |
 | 진한 파랑 | 90 이상 | 원자 위치까지 믿을 만하다 |
-| 하늘색 | 70~90 | 뼈대는 맞다. 곁사슬 방향은 덜 확실하다 |
+| 하늘색 | 70~90 | 뼈대는 맞습니다. 곁사슬 방향은 덜 확실하다 |
 | 노랑 | 50~70 | 대략적인 위치만 해석하며 결론의 단독 근거로 사용하지 않는다 |
 | 주황 | 50 미만 | 위치가 사실상 정해지지 않았다 |
 
 **신뢰도가 높은 VHH 단량체**: 전체가 파랑/하늘색이고, 주황은 양쪽 끝
-(N말단 1~2잔기, C말단 His-tag 등 꼬리)에만 있다. 그 꼬리가 낮은 것은 정상이다.
+(N말단 1~2잔기, C말단 His-tag 등 꼬리)에만 있습니다. 그 꼬리가 낮은 것은 정상입니다.
 실제로 붙어 있지 않은 유연한 끝이라서 위치가 정해지지 않는 것이고, 결합에도
-관여하지 않는다.
+관여하지 않습니다.
 
 **CDR3 근처가 낮은 것은 흔하다**. VHH 의 CDR3 는 대략 95~115번 잔기 근처의
-긴 루프다. 이 구간이 노랑까지 내려가는 것은 자주 보이고, 그 자체로 실패가 아니다.
-루프는 원래 여러 모양을 오간다. 화면 왼쪽 아래 "pLDDT 70 미만 연속 구간" 목록에
-신뢰도가 낮은 잔기 번호를 CDR3 범위와 대조한다.
+긴 루프입니다. 이 구간이 노랑까지 내려가는 것은 자주 보이고, 그 자체로 실패가 아닙니다.
+루프는 원래 여러 모양을 오갑니다. 화면 왼쪽 아래 "pLDDT 70 미만 연속 구간" 목록에
+신뢰도가 낮은 잔기 번호를 CDR3 범위와 대조합니다.
 
 **추가 검토가 필요한 형태**:
 - 프레임워크(대략 1~25 / 35~50 / 60~95 / 115~끝)까지 노랑이나 주황이면
@@ -1962,17 +1969,17 @@ AlphaFold DB 와 같으므로 그쪽에서 본 그림과 나란히 비교할 수
 - 확산 샘플 간 ranking score 표준편차가 크다
 
 **복합체(VHH + 항원) 확인 항목**: 사슬별 버튼으로 바꿔 어느 쪽이 VHH이고 어느 쪽이
-항원인지 확인한다. pLDDT 색은 각 잔기의 국소 구조 신뢰도만 나타내므로 접촉면이
-파랑/하늘색이어도 두 사슬의 상대 배치가 맞다는 뜻은 아니다. 상대 배치는 사슬 간 PAE
-블록과 ipTM으로 판단한다. ipTM이 낮고 pTM이 높은 경우에는 개별 사슬 접힘보다 사슬 간
-배치의 불확실성이 크다.
+항원인지 확인합니다. pLDDT 색은 각 잔기의 국소 구조 신뢰도만 나타내므로 접촉면이
+파랑/하늘색이어도 두 사슬의 상대 배치가 맞는다는 뜻은 아닙니다. 상대 배치는 사슬 간 PAE
+블록과 ipTM으로 판단합니다. ipTM이 낮고 pTM이 높은 경우에는 개별 사슬 접힘보다 사슬 간
+배치의 불확실성이 큽니다.
 
 ### 9-6. PyMOL / ChimeraX 로 보기
 
-`*_model.cif` 를 뷰어에 넣는다. AF3 는 mmCIF 의 B-factor 자리(`B_iso_or_equiv`)에
-원자별 pLDDT 를 넣으므로, 어느 뷰어에서든 그 값으로 색칠하면 신뢰도 지도가 된다.
+`*_model.cif` 를 뷰어에 넣습니다. AF3 는 mmCIF 의 B-factor 자리(`B_iso_or_equiv`)에
+원자별 pLDDT 를 넣으므로, 어느 뷰어에서든 그 값으로 색칠하면 신뢰도 지도가 됩니다.
 
-**(a) PyMOL.** `pymol vhh_001_out/vhh_A01/vhh_A01_model.cif` 로 열고 명령창에 붙인다.
+**(a) PyMOL.** `pymol vhh_001_out/vhh_A01/vhh_A01_model.cif` 로 열고 명령창에 붙입니다.
 
 ```python
 spectrum b, red_yellow_green_blue, minimum=50, maximum=90
@@ -1985,28 +1992,28 @@ color orange, lowconf
 ```
 
 빨강이 낮고(50 이하) 파랑이 높다(90 이상). AlphaFold 공식 배색과 방향이 다르니 그림에
-범례를 포함한다. AlphaFold 관례(파랑=높음, 주황=낮음)는
-`spectrum b, orange_yellow_cyan_blue, minimum=50, maximum=90` 이다.
+범례를 포함합니다. AlphaFold 관례(파랑=높음, 주황=낮음)는
+`spectrum b, orange_yellow_cyan_blue, minimum=50, maximum=90` 입니다.
 
-**(b) ChimeraX.** `af3_visualize.py`가 만든 `viewer_chimerax_plddt.cxc`를 연다. 일부
+**(b) ChimeraX.** `af3_visualize.py`가 만든 `viewer_chimerax_plddt.cxc`를 엽니다. 일부
 ChimeraX 버전은 `palette alphafold`를 0~1 범위로 해석하므로, 생성된 파일은 pLDDT의
-0~100 경계를 명시한 palette를 사용한다. `cartoon`, `set bgColor white`, 낮은 부위 선택
-명령도 같은 파일에 들어 있다.
+0~100 경계를 명시한 palette를 사용합니다. `cartoon`, `set bgColor white`, 낮은 부위 선택
+명령도 같은 파일에 들어 있습니다.
 
 **구조 중첩.** 같은 계열 나노바디에서 CDR 루프만 다른지 확인할 때 PyMOL은
-`load` 후 `align m2, m1`, ChimeraX 는 `open` 후 `matchmaker #2 to #1` 이다.
+`load` 후 `align m2, m1`, ChimeraX 는 `open` 후 `matchmaker #2 to #1` 입니다.
 전체 스크립트는 `examples/viewer_pymol_plddt.pml` 과
-`examples/viewer_chimerax_plddt.cxc` 에 있다.
+`examples/viewer_chimerax_plddt.cxc` 에 있습니다.
 
 ### 9-7. 외부 웹 뷰어로 파일 하나 확인
 
-결과 파일 하나는 외부 웹 뷰어에서도 확인할 수 있다.
+결과 파일 하나는 외부 웹 뷰어에서도 확인할 수 있습니다.
 <https://molstar.org/viewer> 를 열고 `<타깃>_model.cif` 파일을 화면에 끌어다
-놓는다. 같은 뷰어이고 pLDDT 색칠도 그쪽 메뉴에서 고를 수 있다
+놓습니다. 같은 뷰어이고 pLDDT 색칠도 그쪽 메뉴에서 고를 수 있다
 (Color Theme 를 pLDDT Confidence 로).
 
-외부 웹 뷰어는 파일을 외부 서비스에 업로드한다. 미공개 서열이거나
-미공개 후보나 특허 검토 대상에는 외부 웹 뷰어를 사용하지 않는다. 이 저장소의
+외부 웹 뷰어는 파일을 외부 서비스에 업로드합니다. 미공개 서열이거나
+미공개 후보나 특허 검토 대상에는 외부 웹 뷰어를 사용하지 않습니다. 이 저장소의
 `af3_view3d.py`로 만든 HTML은
 파일이 컴퓨터 밖으로 나가지 않는다 (`--lib embed` 로 만들면 열 때 네트워크
 연결조차 하지 않는다).
@@ -2014,18 +2021,18 @@ ChimeraX 버전은 `palette alphafold`를 0~1 범위로 해석하므로, 생성�
 ### 9-8. 구조가 표시되지 않을 때
 
 - **"구조를 표시하지 못했다" 안내가 나온다**: `--lib cdn` (기본)으로 만든 파일은
-  열 때 인터넷에서 3D 라이브러리를 가져온다. 인터넷이 없거나 사내망이 막았으면
-  이 화면이 나온다. `--lib embed` 로 다시 만들면 인터넷 없이 열린다
+  열 때 인터넷에서 3D 라이브러리를 가져옵니다. 인터넷이 없거나 사내망이 막았으면
+  이 화면이 나옵니다. `--lib embed` 로 다시 만들면 인터넷 없이 열린다
 - **인터넷이 되는데도 같은 안내가 나온다**: 2026-08-21~24 사이에 만든 HTML 은
-  페이지의 보안 정책(CSP)이 3D 라이브러리를 막아 구조가 뜨지 않는다. 그 기간의
-  파일이면 `af3_view3d.py` 를 최신으로 받아 **다시 만들면** 된다. 지금 버전은
+  페이지의 보안 정책(CSP)이 3D 라이브러리를 막아 구조가 뜨지 않습니다. 그 기간의
+  파일이면 `af3_view3d.py` 를 최신으로 받아 **다시 만들면** 됩니다. 지금 버전은
   이런 경우 안내문이 "원인은 인터넷이 아니라 CSP 다" 라고 직접 알려 준다
 - **"mmCIF 가 .cif.zst 압축이고 풀지 못했다"**: AF3 를
-  `--compress_large_output_files` 로 돌린 결과다. `python3 -m pip install zstandard`
+  `--compress_large_output_files` 로 돌린 결과입니다. `python3 -m pip install zstandard`
   를 사용하거나 `zstd -d <파일>_model.cif.zst`로 압축을 푼 뒤 다시 생성한다
 - **목록에 타깃이 없다**: 완료 판정은 `_ranking_scores.csv`, `_model.cif`(또는
   `.cif.zst`), `_summary_confidences.json` 세 개가 모두 있고 크기가 0보다 큰
-  것이다. 추론이 끝나지 않은 폴더는 빠진다. 그런 폴더도 보려면 `--include-partial`
+  것입니다. 추론이 끝나지 않은 폴더는 빠집니다. 그런 폴더도 보려면 `--include-partial`
 
 ### 9-9. 구조 확인 항목
 
@@ -2037,7 +2044,7 @@ ChimeraX 버전은 `palette alphafold`를 0~1 범위로 해석하므로, 생성�
 | 복합체 계면 | 두 사슬이 실제로 접촉해 있다 | 떨어져 있거나 엉뚱한 면끼리 붙어 있다 |
 | 원자 충돌 | 없음 | `has_clash > 0` 이면 여기를 확인 |
 
-복합체 계면 형태와 ipTM이 일관되는지 대조한다. 값이 어긋나면 서로 다른 실행의 파일이
+복합체 계면 형태와 ipTM이 일관되는지 대조합니다. 값이 어긋나면 서로 다른 실행의 파일이
 섞였는지 확인한다
 ([8-4](#8-4-판정-기준선) 의 `ranking검산차`).
 
@@ -2047,33 +2054,33 @@ ChimeraX 버전은 `palette alphafold`를 0~1 범위로 해석하므로, 생성�
 
 | 증상 | 원인 | 해결 |
 |------|------|------|
-| JSON 입력에서 UTF-8 디코딩 또는 파싱 오류가 발생한다. `ls`에서는 원인이 보이지 않는다 | macOS에서 만든 `tar.gz`를 Linux에서 풀 때 생기는 AppleDouble 사이드카 `._*.json`. `glob('*.json')`에 포함되지만 UTF-8이 아니다 | `find <입력폴더> -name '._*' -delete`. 아래 상세 항목 참고 |
-| `nvidia-smi` 가 15,157 MiB 사용 중이라고 나온다 | XLA 선점량. 수요가 아니다. 실제 피크는 2,942~2,963 MiB | 선점량으로 해석한다. 실제 사용량 측정에는 `--no-prealloc`을 사용한다(속도 저하 가능) |
-| 진짜 `CUDA out of memory` | 토큰 수가 크다. 버킷 1024 이상에서 급격히 커진다 | 아래 상세 항목의 5단계 순서 |
+| JSON 입력에서 UTF-8 디코딩 또는 파싱 오류가 발생합니다. `ls`에서는 원인이 보이지 않는다 | macOS에서 만든 `tar.gz`를 Linux에서 풀 때 생기는 AppleDouble 사이드카 `._*.json`. `glob('*.json')`에 포함되지만 UTF-8이 아니다 | `find <입력폴더> -name '._*' -delete`. 아래 상세 항목 참고 |
+| `nvidia-smi` 가 15,157 MiB 사용 중이라고 나온다 | XLA 선점량. 수요가 아닙니다. 실제 피크는 2,942~2,963 MiB | 선점량으로 해석합니다. 실제 사용량 측정에는 `--no-prealloc`을 사용한다(속도 저하 가능) |
+| 진짜 `CUDA out of memory` | 토큰 수가 큽니다. 버킷 1024 이상에서 급격히 커진다 | 아래 상세 항목의 5단계 순서 |
 | `docker: permission denied ... daemon socket` | 사용자가 `docker` 그룹에 없다 | `sudo usermod -aG docker $USER` 후 재로그인. 또는 `--docker 'sudo docker'` |
-| 첫 실행이 5~8분 걸린다 | XLA 커널 컴파일. 콜드/고부하에서 406~497초 관측 | 정상이다. 두 번째부터 웜 6.55~8.5초 ([3-8](#3-8-첫-실행-지연)) |
-| `run_alphafold.py: error: unrecognized arguments: --input_dir` | 도커 이미지가 오래된 AF3 다 | 이미지를 다시 빌드한다. 아래 상세 항목 참고 |
-| 결과 CSV 의 `패딩버킷` 이 256이다 | 사다리에서 128이 빠졌거나, 서열이 128 토큰보다 길다(130 aa는 정상적으로 256) | 기본 버킷 사다리를 사용한다. 직접 지정할 때는 128을 첫 항목으로 둔다([6-3](#6-3-af3_batchpy-직접-쓰기)) |
+| 첫 실행이 5~8분 걸린다 | XLA 커널 컴파일. 콜드/고부하에서 406~497초 관측 | 정상입니다. 두 번째부터 웜 6.55~8.5초 ([3-8](#3-8-첫-실행-지연)) |
+| `run_alphafold.py: error: unrecognized arguments: --input_dir` | 도커 이미지가 오래된 AF3 다 | 이미지를 다시 빌드합니다. 아래 상세 항목 참고 |
+| 결과 CSV 의 `패딩버킷` 이 256이다 | 사다리에서 128이 빠졌거나, 서열이 128 토큰보다 길다(130 aa는 정상적으로 256) | 기본 버킷 사다리를 사용합니다. 직접 지정할 때는 128을 첫 항목으로 둔다([6-3](#6-3-af3_batchpy-직접-쓰기)) |
 | `MSA얕음` 경고가 전량에 붙는다 | 축소 DB 를 쓰면 unpaired 깊이가 9~13 이다 | 단량체 스크리닝에서는 정상. **복합체라면 무시하지 말고 전체 DB 를 쓰라** |
-| MSA 단계에서 CPU 를 늘렸는데 안 빨라진다 | 처리율이 코어 수의 약 1.3배에서 0.895 타깃/분으로 포화한다 (전체 DB 급 기준) | 정상이다. `--msa-workers` 를 올리면 손해다 ([6-4](#6-4-2단계-전략-msa-먼저-추론-나중)) |
-| `jackhmmer -h` 에 `--seq_limit` 이 없다 | AF3 가 패치한 HMMER 가 아니다 | 도커 이미지를 쓰면 보통 문제없다. conda 설치면 [docs/install_log.md](docs/install_log.md) |
+| MSA 단계에서 CPU 를 늘렸는데 안 빨라진다 | 처리율이 코어 수의 약 1.3배에서 0.895 타깃/분으로 포화한다 (전체 DB 급 기준) | 정상입니다. `--msa-workers` 를 올리면 손해다 ([6-4](#6-4-2단계-전략-msa-먼저-추론-나중)) |
+| `jackhmmer -h` 에 `--seq_limit` 이 없다 | AF3 가 패치한 HMMER 가 아니다 | 도커 이미지를 쓰면 보통 문제없습니다. conda 설치면 [docs/install_log.md](docs/install_log.md) |
 | AF3 설치 시 python 3.11 이 거부된다 | AF3 가 `requires-python >=3.12` | `conda create -y -n af3 python=3.12` |
 | `/usr/include/zlib.h` 없음, sudo 불가 | 시스템 zlib 개발 헤더가 없다 | `conda install -y -c conda-forge zlib cmake` 후 `export CMAKE_PREFIX_PATH=$CONDA_PREFIX` |
-| 중간에 끊겼는데 어디까지 됐는지 모른다 | | `cat <이름>_work/state.json`, `ls <이름>_out \| wc -l`. 같은 명령을 다시 실행하면 끝난 것은 건너뛴다 |
-| JAX 캐시에서 `PERMISSION_DENIED` 가 수천 줄 나온다 | 예전 러너(root 컨테이너)가 만든 `~/af3_cache` 가 남아 있다. 지금 러너는 호출한 사용자로 돌아서 그 폴더에 못 쓴다 | `sudo chown -R $USER:$USER ~/af3_cache`. 러너가 이 상황을 감지하면 경고를 띄우고 캐시 없이 계속 진행한다(결과는 같고 첫 입력만 느려진다) |
-| 결과 파일이 root 소유라 지울 수 없다 | 2026-08-25 이전 러너로 돌렸다. 컨테이너에 `--user` 를 안 넘겨서 docker 데몬(root)이 쓴 파일이 root 소유가 됐다. `sudo docker` 와 무관하게 생긴다 | `sudo chown -R $USER:$USER <결과폴더>` 로 한 번 정리하고 러너를 최신으로 받는다. 지금 러너는 호출한 사용자의 uid:gid 로 컨테이너를 돌려 결과가 본인 소유로 남는다 |
+| 중간에 끊겼는데 어디까지 됐는지 모른다 | | `cat <이름>_work/state.json`, `ls <이름>_out \| wc -l`. 같은 명령을 다시 실행하면 끝난 것은 건너뜁니다 |
+| JAX 캐시에서 `PERMISSION_DENIED` 가 수천 줄 나온다 | 예전 러너(root 컨테이너)가 만든 `~/af3_cache` 가 남아 있습니다. 지금 러너는 호출한 사용자로 돌아서 그 폴더에 못 쓴다 | `sudo chown -R $USER:$USER ~/af3_cache`. 러너가 이 상황을 감지하면 경고를 띄우고 캐시 없이 계속 진행한다(결과는 같고 첫 입력만 느려진다) |
+| 결과 파일이 root 소유라 지울 수 없다 | 2026-08-25 이전 러너로 돌렸습니다. 컨테이너에 `--user` 를 안 넘겨서 docker 데몬(root)이 쓴 파일이 root 소유가 되었습니다. `sudo docker` 와 무관하게 생긴다 | `sudo chown -R $USER:$USER <결과폴더>` 로 한 번 정리하고 러너를 최신으로 받습니다. 지금 러너는 호출한 사용자의 uid:gid 로 컨테이너를 돌려 결과가 본인 소유로 남는다 |
 
-아래 세 항목은 별도 설명이 필요한 문제다.
+아래 세 항목은 별도 설명이 필요한 문제입니다.
 
 ### AppleDouble 사이드카 (`._*.json`)
 
-> 이 문제로 3시간 측정이 실패한 사례가 있다.
+> 이 문제로 3시간 측정이 실패한 사례가 있습니다.
 
-macOS 에서 만든 `tar.gz` 를 리눅스에서 풀면 `foo.json` 옆에 `._foo.json` 이 생긴다.
+macOS 에서 만든 `tar.gz` 를 리눅스에서 풀면 `foo.json` 옆에 `._foo.json` 이 생깁니다.
 `ls` 에서는 눈에 잘 안 띄고, `glob('*.json')` 에는 잡히고, 내용이 macOS 리소스 포크
-바이너리이므로 텍스트 입력으로 읽으면 처리가 중단된다. 이 저장소의 스크립트
+바이너리이므로 텍스트 입력으로 읽으면 처리가 중단됩니다. 이 저장소의 스크립트
 (`af3_batch.py`, `af3_collect.py`)는
-`._` 파일을 건너뛰지만 AF3 본체가 읽을 수 있으므로 실행 전에 삭제한다.
+`._` 파일을 건너뛰지만 AF3 본체가 읽을 수 있으므로 실행 전에 삭제합니다.
 
 ```bash
 find vhh_001_in -name '._*' | wc -l                     # 확인
@@ -2084,11 +2091,11 @@ find . -name '._*' -delete && find . -name '.DS_Store' -delete   # 리눅스에�
 
 ### CUDA OOM (out of memory)
 
-VHH 단량체에서는 드물며 큰 복합체나 긴 서열에서 발생한다. 다음 순서로 조정한다.
-먼저 결과 CSV의 `토큰수`와 `패딩버킷`을 확인한다. 버킷 1024 이상에서는 메모리 요구량이
-빠르게 증가한다. 그다음 `--diffusion-samples`를 5에서 1로 줄이고, `--no-prealloc`로
-선점을 끈다. `--unified-memory`는 GPU 메모리 초과분을 시스템 RAM으로 넘기는 마지막
-선택지이며 속도가 느려질 수 있다. 그래도 부족하면 입력을 나누거나 더 큰 GPU를 사용한다.
+VHH 단량체에서는 드물며 큰 복합체나 긴 서열에서 발생합니다. 다음 순서로 조정합니다.
+먼저 결과 CSV의 `토큰수`와 `패딩버킷`을 확인합니다. 버킷 1024 이상에서는 메모리 요구량이
+빠르게 증가합니다. 그다음 `--diffusion-samples`를 5에서 1로 줄이고, `--no-prealloc`로
+선점을 끕니다. `--unified-memory`는 GPU 메모리 초과분을 시스템 RAM으로 넘기는 마지막
+선택지이며 속도가 느려질 수 있습니다. 그래도 부족하면 입력을 나누거나 더 큰 GPU를 사용합니다.
 
 ```bash
 python3 scripts/af3_batch.py --name big --stage infer --no-prealloc --unified-memory
@@ -2097,80 +2104,81 @@ python3 scripts/af3_batch.py --name big --stage infer --no-prealloc --unified-me
 ### `--input_dir` 를 모른다는 오류 (구버전 이미지)
 
 이 저장소의 최적화는 `--input_dir` 로 한 프로세스가 전수 순회하는 것에 기반하므로 이게
-없으면 핵심 이득을 못 얻는다. `git fetch --all` 후 확인된 커밋으로 `git checkout` 하고
+없으면 핵심 이득을 못 얻습니다. `git fetch --all` 후 확인된 커밋으로 `git checkout` 하고
 이미지를 다시 빌드한다([3-2](#3-2-ubuntu-단일-설치기)). 즉시 재빌드할 수 없으면
-캐시 디렉터리를 지정한다. 이 설정만으로 31.95초에서 18.13초(1.76배)로 줄었다.
-단일 프로세스화(5.10배)는 포기해야 한다.
+캐시 디렉터리를 지정합니다. 이 설정만으로 31.95초에서 18.13초(1.76배)로 줄었습니다.
+단일 프로세스화(5.10배)는 포기해야 합니다.
 
 ---
 
 ## 11. 라이선스와 인용
 
-라이선스가 세 갈래로 나뉜다. **이 저장소의 스크립트와 문서**는 Apache 2.0
+라이선스가 세 갈래로 나뉩니다. **이 저장소의 스크립트와 문서**는 Apache 2.0
 ([LICENSE](LICENSE))이라 자유롭게 쓰고 고치고 재배포할 수 있고, **AF3 소스 코드**도
 Apache 2.0(별도 저장소)이지만, **AF3 모델 가중치는 비영리 한정이고 재배포가 금지**돼
-있다. **세 개는 서로 다르다.** 이 저장소가 Apache 2.0 이라는 것이 AF3 가중치를 자유롭게
-쓸 수 있다는 뜻이 아니다.
+있습니다. **세 개는 서로 다릅니다.** 이 저장소가 Apache 2.0 이라는 것이 AF3 가중치를 자유롭게
+쓸 수 있다는 뜻이 아닙니다.
 
-AF3 가중치 제약은 네 가지다. **비영리 목적으로만** 쓸 수 있고, **재배포가 금지**돼
-있으며(클라우드 공유 폴더, 사내 스토리지, 깃 저장소, 어디에도 올리면 안 된다),
-**출력물로 유사 구조예측 모델을 학습시키는 것이 금지**돼 있고, 약관은 **구글로부터 직접
-받은 경우만** 사용을 허용한다. 동료에게 복사해 받으면 위반이다.
+AF3 가중치 제약은 네 가지입니다. **비영리 목적으로만** 쓸 수 있고, **재배포가 금지**돼
+있으며(공개 저장소, 외부 공유 폴더, 개인 전달은 허용되지 않습니다), **출력물로 유사
+구조예측 모델을 학습시키는 것이 금지**돼 있고, 약관은 **구글로부터 직접 받은 경우만**
+사용을 허용합니다. 조직 내부 사용 범위는 약관과 기관 정책을 함께 확인하셔야 하지만, 가장
+안전한 방법은 공식 URL에서 본인이 직접 내려받는 것입니다.
 
-신청서나 승인 절차는 없다. 약관 원문(97d2023 기준)은 **가중치를 사용하는 행위 자체가
-동의**라고 정한다. 그러므로 절차는 이렇게 된다. **본인이 직접 위 URL 에서 내려받고,
-받기 전에 약관을 읽는다.** 내려받은 날짜와 그때의 약관 판본을 기록해 두면 나중에 논문
-심사나 기관 감사에서 근거가 된다.
+신청서나 승인 절차는 없습니다. 약관 원문(97d2023 기준)은 **가중치를 사용하는 행위 자체가
+동의**라고 정합니다. 그러므로 절차는 이렇게 됩니다. **본인이 직접 위 URL 에서 내려받고,
+받기 전에 약관을 읽습니다.** 내려받은 날짜와 그때의 약관 판본을 기록해 두면 나중에 논문
+심사나 기관 감사에서 근거가 됩니다.
 
 이 저장소가 함께 배포하는 AF3 결과물의 고지와 수정 내역은
-[OUTPUT_NOTICE.md](OUTPUT_NOTICE.md) 에 있다. 이 결과물을 다시 배포할 때는 그
+[OUTPUT_NOTICE.md](OUTPUT_NOTICE.md) 에 있습니다. 이 결과물을 다시 배포할 때는 그
 고지, [pinned Output Terms 사본](OUTPUT_TERMS_OF_USE.md),
 [Legally Binding Terms of Use 고지](LEGALLY_BINDING_TERMS_OF_USE.txt)가 함께 가야 한다
 (Output Terms 5항). `af3_visualize.py`와 `af3_view3d.py`는 생성 폴더에 세 파일을 자동으로
-배치하고 viewer 안에도 눈에 띄는 고지와 필수 논문 인용을 넣는다.
+배치하고 viewer 안에도 눈에 띄는 고지와 필수 논문 인용을 넣습니다.
 
 tracked reference artifact의 source SHA-256, generator, AF3 revision, terms 상태와
-재현 가능 여부는 [ARTIFACT_MANIFEST.json](ARTIFACT_MANIFEST.json)에 있다. tracked CSV에서
-재생성 가능한 benchmark 그림은 다음 명령으로 만든다.
+재현 가능 여부는 [ARTIFACT_MANIFEST.json](ARTIFACT_MANIFEST.json)에 있습니다. tracked CSV에서
+재생성 가능한 benchmark 그림은 다음 명령으로 만듭니다.
 
 ```bash
 python3 scripts/build_reference_artifacts.py --build
 python3 scripts/build_reference_artifacts.py --check   # hash/source/terms lineage 검증
 ```
 
-manifest는 Python, matplotlib, FreeType와 DejaVu Sans font hash도 기록한다. source lineage는
+manifest는 Python, matplotlib, FreeType와 DejaVu Sans font hash도 기록합니다. source lineage는
 다른 환경에서도 확인할 수 있지만 PNG byte identity는 이 rendering environment가 같을 때만
-주장한다. 환경이 다르면 값·label·source hash를 우선 검증하고 byte 차이를 곧바로 데이터
-차이로 해석하지 않는다.
+주장합니다. 환경이 다르면 값·label·source hash를 우선 검증하고 byte 차이를 곧바로 데이터
+차이로 해석하지 않습니다.
 
 원 AF3 JSON/mmCIF 또는 browser capture가 없는 역사적 그림은 manifest에
-`historical_not_reproducible`로 표시한다. 입력을 꾸며 byte 재현 가능하다고 주장하지 않는다.
+`historical_not_reproducible`로 표시합니다. 입력을 꾸며 byte 재현 가능하다고 주장하지 않습니다.
 
-정확한 조건은 Google DeepMind가 배포하는 약관 원문을 기준으로 한다. 위 내용은 요약이며
-법적 효력은 원문에 있다. 더 자세한 정리는
+정확한 조건은 Google DeepMind가 배포하는 약관 원문을 기준으로 합니다. 위 내용은 요약이며
+법적 효력은 원문에 있습니다. 더 자세한 정리는
 [docs/license_notes.md](docs/license_notes.md).
 
-AF3 를 써서 결과를 발표하면 다음을 인용해야 한다. 이 저장소는 인용할 필요가 없고,
-필요하면 URL 을 각주로 넣으면 된다.
+AF3 를 써서 결과를 발표하면 다음을 인용해야 합니다. 이 저장소는 인용할 필요가 없고,
+필요하면 URL 을 각주로 넣으면 됩니다.
 
 > Abramson, J., Adler, J., Dunger, J. et al. Accurate structure prediction of
 > biomolecular interactions with AlphaFold 3. *Nature* **630**, 493–500 (2024).
 
 > ### 저장소에 포함하지 않는 파일
 >
-> 저장소 공개 여부와 관계없이 다음 파일은 Git에 추가하지 않는다.
+> 저장소 공개 여부와 관계없이 다음 파일은 Git에 추가하지 않습니다.
 >
 > - 모델 가중치 `af3.bin`, `af3.bin.zst`
 > - `build_data`가 생성하는 `ccd.pickle`
 > - `public_databases*/` 아래의 DB와 압축본
 > - `*_out/` 결과와 실제 연구 FASTA/CSV/JSON
 >
-> `.gitignore`는 새 파일만 차단하며 이미 추적 중인 파일에는 적용되지 않는다. 커밋 전에는
+> `.gitignore`는 새 파일만 차단하며 이미 추적 중인 파일에는 적용되지 않습니다. 커밋 전에는
 > `git status`, `git diff --cached --stat`, `du -sh .git`으로 대용량·민감 파일 포함 여부를
-> 확인한다. push 후 발견한 경우에는 파일 삭제 커밋만으로 과거 이력이 지워지지 않으므로
-> 저장소 관리자와 이력 정리 범위를 결정한다.
+> 확인합니다. push 후 발견한 경우에는 파일 삭제 커밋만으로 과거 이력이 지워지지 않으므로
+> 저장소 관리자와 이력 정리 범위를 결정합니다.
 >
-> `examples/`의 서열은 공개 PDB 유래 예시이며 실제 연구 서열이 아니다.
+> `examples/`의 서열은 공개 PDB 유래 예시이며 실제 연구 서열이 아닙니다.
 
 ---
 
@@ -2178,57 +2186,57 @@ AF3 를 써서 결과를 발표하면 다음을 인용해야 한다. 이 저장�
 
 측정 호스트는 gpu-5070ti 다. **RTX 5070 Ti 16GB**(Blackwell sm_120), 24 코어, RAM
 126GB, AF3 commit `97d20234c6eb89e8d05376e9eecc9321e60a559b`, 그리고 설치 방식은
-**conda 네이티브였다. 이 호스트에 Docker 가 없었다.**
+**conda 네이티브였습니다. 이 호스트에 Docker 가 없었습니다.**
 
 **과거 계획 환경과 다른 점.** RTX 5090 32GB Docker 실행은 계획값이었고 실제 측정하지
-않았다. 따라서 5090 절대 시간이나 Docker 개선 배수는 보증하지 않는다.
+않았습니다. 따라서 5090 절대 시간이나 Docker 개선 배수는 보증하지 않습니다.
 
 ### 2026-08-20 현재 PC native 재검증
 
 현재 PC는 RTX 3080 Ti 12GB, driver 595.84, Python 3.12.14, JAX/jaxlib 0.10.2,
-AF3 commit `97d20234c6eb89e8d05376e9eecc9321e60a559b`의 native 환경이다.
+AF3 commit `97d20234c6eb89e8d05376e9eecc9321e60a559b`의 native 환경입니다.
 
-- JAX가 `CudaDevice(id=0)`, backend `gpu`로 인식했다.
+- JAX가 `CudaDevice(id=0)`, backend `gpu`로 인식했습니다.
 - 공식 `run_alphafold_data_test.py`: 7/7 통과.
 - 공식 `run_alphafold_test.py`: 기본 설정에서 17개 중 16개 통과. 유일한 실패는
-  1024-token stress의 3.06GiB 추가 할당 OOM이었다.
+  1024-token stress의 3.06GiB 추가 할당 OOM이었습니다.
 - 같은 1024-token test를 공식 저메모리 설정
   (`TF_FORCE_UNIFIED_MEMORY=true`, `XLA_CLIENT_MEM_FRACTION=3.2`)으로 재실행해 통과했다
   (inference 176.12초, 전체 188.36초).
 - 116-token VHH, MSA 없음, sample 1, recycle 1, Triton smoke는 inference 16.12초,
-  전체 32.91초에 완료됐고 정식 산출물 3종과 집계·그림·Mol*/3Dmol HTML을 모두 만들었다.
+  전체 32.91초에 완료됐고 정식 산출물 3종과 집계·그림·Mol*/3Dmol HTML을 모두 만들었습니다.
 - 같은 VHH를 공식 full DB, sample 1, recycle 1로 end-to-end 실행해 36분 41.8초에
-  완료했다. 최종 MSA 깊이는 unpaired 10,640 / paired 24,469였고 ranking score 0.91,
-  pTM 0.91, 원자 pLDDT 평균 93.15였다. 이 시간은 sample 5 / recycle 10 조건과 직접
-  비교하지 않는다.
+  완료했습니다. 최종 MSA 깊이는 unpaired 10,640 / paired 24,469였고 ranking score 0.91,
+  pTM 0.91, 원자 pLDDT 평균 93.15였습니다. 이 시간은 sample 5 / recycle 10 조건과 직접
+  비교하지 않습니다.
 - 설치된 full DB는 압축본을 보존한 상태로 850GiB이며, 압축 223GiB, 해제본 약
   627GiB, mmCIF 234GiB,
-  mmCIF 파일 195,858개다. `af3_db.py verify`의 필수 9항목을 모두 통과했다.
+  mmCIF 파일 195,858개입니다. `af3_db.py verify`의 필수 9항목을 모두 통과했습니다.
 
 ### 2026-08-21 현재 PC Docker 재검증
 
 같은 PC에 Docker Engine 29.7.2와 NVIDIA Container Toolkit 1.20.0을 공식 APT 저장소로
-설치했다.
+설치했습니다.
 
-- `hello-world`와 NVIDIA 공식 GPU 확인 컨테이너가 통과했다.
-- 공식 AF3 이미지는 첫 빌드에 약 34분이 걸렸다. 로컬 unpacked 이미지는 15.5GB,
-  빌드 캐시는 24.0GB였고 `docker image inspect` 크기는 4,699,381,677 B였다.
-- 이미지 안의 AF3 3.0.4, JAX GPU, HMMER 3.4 `--seq_limit` 패치를 확인했다.
-- 이미지 안 공식 테스트는 data 7/7, input 110/110, inference 17/17을 통과했다.
-  inference는 12GB 카드용 unified-memory 설정을 썼고 1024-token 케이스는 177.16초였다.
+- `hello-world`와 NVIDIA 공식 GPU 확인 컨테이너가 통과했습니다.
+- 공식 AF3 이미지는 첫 빌드에 약 34분이 걸렸습니다. 로컬 unpacked 이미지는 15.5GB,
+  빌드 캐시는 24.0GB였고 `docker image inspect` 크기는 4,699,381,677 B였습니다.
+- 이미지 안의 AF3 3.0.4, JAX GPU, HMMER 3.4 `--seq_limit` 패치를 확인했습니다.
+- 이미지 안 공식 테스트는 data 7/7, input 110/110, inference 17/17을 통과했습니다.
+  inference는 12GB 카드용 unified-memory 설정을 썼고 1024-token 케이스는 177.16초였습니다.
 - `af3_check.sh`는 Docker, GPU, 이미지, full DB 9항목, 가중치 크기와 SHA-256을 모두
-  통과했다.
+  통과했습니다.
 - full-DB에서 만든 116-token `_data.json`을 `run_af3_batch_improved.py --mode inference`로
-  실행했다. bucket 128, diffusion sample 5 조건에서 전체 39.3초, 모델 추론 23.64초였다.
-- 같은 raw JSON을 `--mode full`로 다시 실행해 full DB MSA부터 추론까지 확인했다.
-  데이터 파이프라인 2,087.77초, 모델 추론 15.23초, 러너 전체 2,127.4초(35.5분)였다.
+  실행했습니다. bucket 128, diffusion sample 5 조건에서 전체 39.3초, 모델 추론 23.64초였습니다.
+- 같은 raw JSON을 `--mode full`로 다시 실행해 full DB MSA부터 추론까지 확인했습니다.
+  데이터 파이프라인 2,087.77초, 모델 추론 15.23초, 러너 전체 2,127.4초(35.5분)였습니다.
 - 결과는 ranking score 0.90, pTM 0.90, 원자 pLDDT 평균 92.67, 샘플 간 ranking
-  최고-최저 범위 0.0023으로 `A_높음`이었다. 재실행 감사는 완료 1건, 미완료 0건으로
-  판정했다.
+  최고-최저 범위 0.0023으로 `A_높음`이었습니다. 재실행 감사는 완료 1건, 미완료 0건으로
+  판정했습니다.
 
 이 결과는 12GB 카드에서도 짧은 입력이 동작한다는 실행 증거이지, 긴 복합체가 항상
-들어간다는 보장이 아니다. 1024-token 이상은 unified memory 또는 더 큰 VRAM을 기본으로
-계획한다.
+들어간다는 보장이 아닙니다. 1024-token 이상은 unified memory 또는 더 큰 VRAM을 기본으로
+계획합니다.
 
 각 수치의 측정 조건:
 
@@ -2249,16 +2257,16 @@ AF3 commit `97d20234c6eb89e8d05376e9eecc9321e60a559b`의 native 환경이다.
 ### 측정하지 않은 것
 
 1. **샘플링 순위 보존.** `--diffusion-samples 1` 로 스크리닝한 순위가 `5` 순위와 얼마나
-   일치하는지 측정하지 않았다. **경량 스크리닝으로 고른 상위 100건이 정밀 계산의 상위
-   100건과 같다는 보장이 없다.** 2단계 전략의 주요 미검증 가정이다.
+   일치하는지 측정하지 않았습니다. **경량 스크리닝으로 고른 상위 100건이 정밀 계산의 상위
+   100건과 같다는 보장이 없습니다.** 2단계 전략의 주요 미검증 가정입니다.
 2. **CDR3 등 가변 루프의 잔기별 민감도.** 비교한 것은 원자 pLDDT 의 평균이고 그 값은
-   잔기 수가 많은 프레임워크가 지배한다. CDR 루프만 떼어 보면 축소 DB 와 전체 DB 의 차이가
-   더 클 수 있다. 분해하지 않았다.
+   잔기 수가 많은 프레임워크가 지배합니다. CDR 루프만 떼어 보면 축소 DB 와 전체 DB 의 차이가
+   더 클 수 있습니다. 분해하지 않았습니다.
 3. **복합체 계면에 대한 DB 크기 영향 (ipTM).** 비교 6종이 모두 단량체여서 ipTM 이
-   산출되지 않았다. paired MSA가 120~150배 달랐지만 복합체 정확도 영향은 **미측정**이다.
+   산출되지 않았습니다. paired MSA가 120~150배 달랐지만 복합체 정확도 영향은 **미측정**입니다.
 4. **데이터 파이프라인 30.41초와 MSA 스윕 67.0초의 불일치.** 둘 다 전체 DB 급 4GB
-   슬라이스 4종 조건인데 2배 넘게 차이난다. 30.41초는 VHH 4건 직접측정(첫 건 91.70초 포함
-   평균, 2~4번째는 9.09~9.60초), 67.0초는 14조합 스윕의 포화점 인용값이다.
+   슬라이스 4종 조건인데 2배 넘게 차이가 납니다. 30.41초는 VHH 4건 직접측정(첫 건 91.70초 포함
+   평균, 2~4번째는 9.09~9.60초), 67.0초는 14조합 스윕의 포화점 인용값입니다.
    **이 불일치는 해소되지 않았다** ([docs/msa_correction_notes.md](docs/msa_correction_notes.md)).
 5. 그 밖에: **MSA 처리율 포화의 원인**(CPU 경합인지 디스크 I/O 인지 구분하지 못했다),
    **동일 조건의 Docker 대 native 오버헤드**(Docker 절대 시간은 측정했지만 같은
@@ -2268,19 +2276,19 @@ AF3 commit `97d20234c6eb89e8d05376e9eecc9321e60a559b`의 native 환경이다.
    **RAM 하한**(120~126GB 호스트에서만 측정했다).
 
 `bash scripts/af3run.sh vhh_001 bench`는 길이순으로 정렬된 입력 중 가장 짧은 20건을
-sample 1/recycle 3으로 실행하는 빠른 스모크다. 대표 표본이나 정밀 설정의 처리시간으로
-간주하지 않는다. 전체 작업 시간을 계획할 때는 사용할 버킷별로 입력을 뽑고 실제 운영과
-같은 sample/recycle 조건으로 별도 pilot을 실행한다. 이 조건을 맞추지 않은 값은 표의
-sample 5/recycle 10 측정치와 직접 비교하지 않는다.
+sample 1/recycle 3으로 실행하는 빠른 스모크입니다. 대표 표본이나 정밀 설정의 처리시간으로
+간주하지 않습니다. 전체 작업 시간을 계획할 때는 사용할 버킷별로 입력을 뽑고 실제 운영과
+같은 sample/recycle 조건으로 별도 pilot을 실행합니다. 이 조건을 맞추지 않은 값은 표의
+sample 5/recycle 10 측정치와 직접 비교하지 않습니다.
 
 ---
 
 ## 문서 목록
 
 README와 `docs/researcher_guide.md`, `docs/operations_guide.md`, `docs/commands.md`,
-`docs/reduced_db.md`는 현재 사용 문서다.
+`docs/reduced_db.md`는 현재 사용 문서입니다.
 이름이 `*_notes.md`, `*_log.md`인 파일은 당시 판단과 원자료를 보존한 역사 기록이며 현재
-설치 명령보다 우선하지 않는다.
+설치 명령보다 우선하지 않습니다.
 
 | 문서 | 내용 |
 |------|------|
@@ -2302,12 +2310,12 @@ README와 `docs/researcher_guide.md`, `docs/operations_guide.md`, `docs/commands
 
 [examples/](examples/) 에 예제 FASTA/CSV, 입력 JSON(단량체와 복합체), 뷰어 색칠
 스크립트가 있고, [results_example/](results_example/) 에 실측 결과 CSV(신뢰도 요약,
-A/B 벤치마크, 2000건 환산, MSA 스윕), [figures/](figures/) 에 README 의 그림이 있다.
+A/B 벤치마크, 2000건 환산, MSA 스윕), [figures/](figures/) 에 README 의 그림이 있습니다.
 스크립트를 수정했다면 `python3 tests/run_all.py`로 release 검증을 실행한다(Docker도
 `pip install`도 필요 없다). 빠른 등록 회귀만 보려면 `python3 tests/run_tests.py --strict`,
-목록은 `python3 tests/run_tests.py --list`를 사용한다. GitHub Actions도 Python
+목록은 `python3 tests/run_tests.py --list`를 사용합니다. GitHub Actions도 Python
 3.8/3.9/3.12/3.14에서 같은 release entry point를 실행하며 3.12 lane은 matplotlib 그림
-생성 경로까지 검사한다.
+생성 경로까지 검사합니다.
 
 ---
 

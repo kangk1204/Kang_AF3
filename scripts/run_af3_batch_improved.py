@@ -1198,7 +1198,7 @@ def read_job(
                 )
                 if sidecar_snapshot_cache is not None:
                     sidecar_snapshot_cache[source] = sidecar_snapshot
-        except OSError as exc:
+        except (OSError, ValueError) as exc:
             return None, f"{key}의 안전한 sidecar snapshot을 만들 수 없습니다: {exc}"
         sidecars[relative_path] = Sidecar(
             source, relative_path, snapshot=sidecar_snapshot
@@ -2044,10 +2044,8 @@ def resolve_image_identity(
     if not line:
         return None
     fields = line[-1].split("\t")
-    # Lightweight test daemons may only expose an opaque inspect token.  It is
-    # still better than silently reducing the identity back to a mutable tag.
     if len(fields) != 3:
-        return {"image_id": line[-1], "repo_digests": [], "revision": None}
+        return None
     image_id, raw_digests, raw_revision = fields
     try:
         repo_digests = json.loads(raw_digests)
@@ -2057,11 +2055,31 @@ def resolve_image_identity(
         revision = json.loads(raw_revision)
     except json.JSONDecodeError:
         revision = raw_revision or None
-    return {
+    identity = {
         "image_id": image_id or None,
         "repo_digests": sorted(repo_digests) if isinstance(repo_digests, list) else [],
         "revision": revision if isinstance(revision, str) else None,
     }
+    return identity if immutable_image_reference(identity) is not None else None
+
+
+def immutable_image_reference(identity: object) -> str | None:
+    """Return an inspect-derived digest/ID that Docker cannot retarget."""
+    if not isinstance(identity, dict):
+        return None
+    digests = identity.get("repo_digests")
+    if isinstance(digests, list):
+        for digest in digests:
+            if isinstance(digest, str) and re.fullmatch(
+                r"[^\s@]+@sha256:[0-9a-fA-F]{64}", digest
+            ):
+                return digest
+    image_id = identity.get("image_id")
+    if isinstance(image_id, str) and re.fullmatch(
+        r"sha256:[0-9a-fA-F]{64}", image_id
+    ):
+        return image_id
+    return None
 
 
 def probe_flags(
@@ -2072,6 +2090,8 @@ def probe_flags(
         *docker_command,
         "run",
         "--rm",
+        "--network",
+        "none",
         "--name",
         probe_container_name(),
         image,
@@ -2138,7 +2158,7 @@ def docker_base(
     gpu_device: GPUDevice | None = None,
     gpu_memory_fraction: float | None = None,
 ) -> list[str]:
-    command = [*docker_command, "run", "--rm"]
+    command = [*docker_command, "run", "--rm", "--network", "none"]
     if container:
         command.extend(("--name", container))
     user = container_user()
@@ -2186,25 +2206,33 @@ def docker_base(
     return command
 
 
-def _progress_signature(root: Path | None) -> tuple[int, int, int]:
-    if root is None or not root.exists():
+def _progress_signature(
+    roots: Path | Sequence[Path] | None,
+) -> tuple[int, int, int]:
+    if roots is None:
         return (0, 0, 0)
+    scan_roots = (roots,) if isinstance(roots, Path) else tuple(roots)
     count = total = latest = 0
-    try:
-        for base, directories, files in os.walk(root):
-            directories[:] = [name for name in directories if name != QUARANTINE_DIR_NAME]
-            for name in files:
-                path = Path(base) / name
-                try:
-                    info = os.lstat(path)
-                except OSError:
-                    continue
-                if stat.S_ISREG(info.st_mode):
-                    count += 1
-                    total += info.st_size
-                    latest = max(latest, info.st_mtime_ns)
-    except OSError:
-        pass
+    for root in scan_roots:
+        if not root.exists():
+            continue
+        try:
+            for base, directories, files in os.walk(root):
+                directories[:] = [
+                    name for name in directories if name != QUARANTINE_DIR_NAME
+                ]
+                for name in files:
+                    path = Path(base) / name
+                    try:
+                        info = os.lstat(path)
+                    except OSError:
+                        continue
+                    if stat.S_ISREG(info.st_mode):
+                        count += 1
+                        total += info.st_size
+                        latest = max(latest, info.st_mtime_ns)
+        except OSError:
+            pass
     return count, total, latest
 
 
@@ -2224,7 +2252,7 @@ def run_docker(
     docker_command: Sequence[str] | None = None,
     container: str | None = None,
     timeout: int | None = None,
-    progress_dir: Path | None = None,
+    progress_dir: Path | Sequence[Path] | None = None,
     no_progress_timeout: int | None = None,
 ) -> int:
     """컨테이너를 돌리고, 어떻게 끝나든 그 컨테이너를 남기지 않는다.
@@ -2337,7 +2365,7 @@ def run_one_by_one(
             docker_command,
             name,
             run_timeout,
-            output_dir,
+            (output_dir / job.output_name,),
             no_progress_timeout,
         )
         complete = is_complete(output_dir / job.output_name, job.output_name, mode)
@@ -2445,7 +2473,7 @@ def run_batch_with_fallback(
         docker_command,
         name,
         run_timeout,
-        output_dir,
+        tuple(output_dir / job.output_name for job in jobs),
         no_progress_timeout,
     )
 
@@ -3093,7 +3121,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     except OSError as exc:
         print(f"[오류] 출력 폴더를 만들 수 없습니다: {output_dir} ({exc})")
         return 1
-    supported = probe_flags(docker_command, args.image, args.probe_timeout)
+    execution_identity = resolve_image_identity(docker_command, args.image)
+    execution_image = immutable_image_reference(execution_identity)
+    if execution_image is None:
+        print(
+            "[오류] 도커 이미지 identity를 확인하지 못해 플래그 확인에 실패했습니다 "
+            "(immutable ID/digest 없음)."
+        )
+        return 2
+    if execution_identity != image_identity:
+        print("[오류] 점검 뒤 도커 이미지 tag의 대상이 바뀌었습니다. 다시 실행하세요.")
+        return 2
+    supported = probe_flags(docker_command, execution_image, args.probe_timeout)
     if supported is None:
         return 1
     unsupported_reason = validate_supported_flags(supported, args.mode)
@@ -3249,7 +3288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                         "output_dir": output_dir,
                         "mode": args.mode,
                         "docker_command": docker_command,
-                        "image": args.image,
+                        "image": execution_image,
                         "db_dirs": db_dirs,
                         "model_dir": model_dir,
                         "cache_dir": cache_dir,

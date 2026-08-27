@@ -762,6 +762,21 @@ def test_artifact_manifest_closes_lineage_without_fabricating_sources():
             check(record.get("reason"), f"역사적 artifact의 비재현 이유가 없다: {path}")
     check_equal(records["figures/view3d_screenshot.png"]["sources"], [],
                 "원 browser capture가 없는 screenshot에 source를 꾸며 넣었다")
+    for crop in (
+        "figures/view3d_index_table.png",
+        "figures/view3d_molstar_target.png",
+    ):
+        record = records[crop]
+        check_equal(
+            record["sources"][0]["path"],
+            "figures/view3d_screenshot.png",
+            f"README browser crop의 source lineage가 없다: {crop}",
+        )
+        check_equal(
+            record.get("transform", {}).get("operation"),
+            "pixel_crop",
+            f"README browser crop 좌표 변환이 기록되지 않았다: {crop}",
+        )
     builder = (REPO_ROOT / "scripts" / "build_reference_artifacts.py").read_text(encoding="utf-8")
     check_in("Peak VRAM (MiB)", builder, "baseline builder가 MiB 단위를 고정하지 않았다")
     check_not_in('set_ylabel("Peak VRAM (GB)")', builder, "baseline builder에 GB 혼용이 남았다")

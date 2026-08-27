@@ -171,13 +171,17 @@ INJECTIONS = [
     },
     {
         "name": "이미지 확인 실패를 무시하고 최신 플래그를 추측한다",
-        "detail": "이미지를 못 찾았는데 실행을 계속해 원인 모를 실패로 끝난다.",
+        "detail": "immutable image identity를 못 얻었는데 mutable tag로 실행을 계속한다.",
         "script": "run_af3_batch_improved.py",
-        "old": """        print("       확인 실패 상태에서 최신 플래그를 추측하여 실행하지 않습니다.")
-        return None""",
-        "new": """        print("       확인 실패 상태에서 최신 플래그를 추측하여 실행하지 않습니다.")
-        return set(KNOWN_FLAGS)""",
-        "tests": ["test_image_probe_failure_stops_with_reason"],
+        "old": """    if execution_image is None:
+        print(
+            "[오류] 도커 이미지 identity를 확인하지 못해 플래그 확인에 실패했습니다 "
+            "(immutable ID/digest 없음)."
+        )
+        return 2""",
+        "new": """    if execution_image is None:
+        execution_image = args.image""",
+        "tests": ["registered_image_identity_fail_closed"],
     },
     {
         "name": "집계에서 숨은/관리 폴더 제외를 없앤다",
@@ -290,8 +294,8 @@ INJECTIONS = [
         "name": "컨테이너에 이름을 붙이지 않는다",
         "detail": "러너가 죽은 뒤 남은 컨테이너를 찾을 방법이 사라진다.",
         "script": "run_af3_batch_improved.py",
-        "old": '    command = [*docker_command, "run", "--rm"]\n    if container:\n        command.extend(("--name", container))\n',
-        "new": '    command = [*docker_command, "run", "--rm"]\n',
+        "old": '    command = [*docker_command, "run", "--rm", "--network", "none"]\n    if container:\n        command.extend(("--name", container))\n',
+        "new": '    command = [*docker_command, "run", "--rm", "--network", "none"]\n',
         "tests": ["test_runner_names_containers_and_reports_orphans"],
     },
     {

@@ -72,6 +72,7 @@ AF3_STUB_EXIT_AFTER_FINALS  최종 산출물을 쓴 뒤 이 종료코드로 실�
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import string
@@ -151,6 +152,7 @@ def parse_docker_args(argv: list[str]) -> dict:
         "name": None,
         "user": None,
         "env": {},
+        "network": None,
         "raw": list(argv),
     }
     index = 0
@@ -169,6 +171,9 @@ def parse_docker_args(argv: list[str]) -> dict:
         elif token == "--user":
             # 값(uid:gid)을 이미지로 오인하면 안 된다. 반드시 두 토큰을 소비한다.
             result["user"] = argv[index + 1]
+            index += 2
+        elif token == "--network":
+            result["network"] = argv[index + 1]
             index += 2
         elif token in ("-e", "--env"):
             # -e KEY=VALUE 도 두 토큰이다. 안 그러면 VALUE 가 이미지 자리를 차지한다.
@@ -339,8 +344,25 @@ def main(argv: list[str]) -> int:
         print("Docker version 99.0.0, build stub")
         return 0
     if argv[:2] == ["image", "inspect"]:
+        image = (
+            argv[-1]
+            if len(argv) > 2 and argv[2] == "--format"
+            else (argv[2] if len(argv) > 2 else "")
+        )
+        log_event({"call": "inspect", "image": image})
+        if os.environ.get("AF3_STUB_INSPECT_FAIL") or "broken" in image:
+            print("stub image inspect failed", file=sys.stderr)
+            return 125
         if "--format" in argv:
-            print("stub-image-inspect")
+            digest = hashlib.sha256(image.encode("utf-8")).hexdigest()
+            template = argv[argv.index("--format") + 1]
+            if template == "{{.Id}}":
+                print("sha256:%s" % digest)
+            else:
+                print(
+                    "sha256:%s\t%s\tnull"
+                    % (digest, json.dumps(["%s@sha256:%s" % (image, digest)]))
+                )
         return 0
     if argv[0] in {"images", "image"}:
         return 0
@@ -462,6 +484,7 @@ def main(argv: list[str]) -> int:
             "gpus": parsed["gpus"],
             "user": parsed.get("user"),
             "env": parsed.get("env", {}),
+            "network": parsed.get("network"),
             "per_file": "json_path" in flags,
             "flags": sorted(flags),
             "af3_flag_values": parsed["af3_flag_values"],

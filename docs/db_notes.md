@@ -14,7 +14,7 @@
 > 해제 payload는 약 627GiB이고, 압축본을 함께 보존한 peak가 약 850GiB다.
 
 검증 호스트: `ssh:gpu-5070ti` (RTX 5070 Ti 16GB, 24 CPU, RAM 126GB)
-DB 경로: `/home/keunsoo4070/public_databases_full`
+DB 경로: `/home/researcher/public_databases_full`
 측정일: 2026-08-18
 
 ---
@@ -393,8 +393,8 @@ MSA 산출물(`*_data.json`)은 재사용 가능하므로, 한 번 전체 DB로 
 | `af3_compare.sh` | AF3 파이프라인 축소/전체 대조 |
 | `collect_af3.py` | AF3 출력에서 깊이·신뢰도 지표 수집 |
 
-DB 경로: `/home/keunsoo4070/public_databases_full` (과거 peak 850GiB 기록)
-압축 파일: `/home/keunsoo4070/public_databases_full/_zst` (223GiB, 삭제 가능)
+DB 경로: `/home/researcher/public_databases_full` (과거 peak 850GiB 기록)
+압축 파일: `/home/researcher/public_databases_full/_zst` (223GiB, 삭제 가능)
 HMMER 환경: `~/miniforge3/envs/af3msa/bin/` (hmmer 3.4)
 AF3 환경: `~/miniforge3/envs/af3` (다른 트랙에서 구성)
 

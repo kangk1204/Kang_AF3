@@ -456,12 +456,15 @@ def test_runner_writes_results_as_the_invoking_user():
                 expected,
                 "docker run 에 --user <uid>:<gid> 를 넘기지 않았다 (결과가 root 소유가 된다)",
             )
-            # --user 값이 이미지 자리를 잡아먹지 않았는지도 본다.
+            # --user 값이 이미지 자리를 잡아먹지 않았고, 실행 이미지가
+            # inspect에서 고정한 immutable digest인지 함께 본다.
+            image = call.get("image") or ""
             check(
-                ":" not in (call.get("image") or ""),
+                image != expected,
                 "--user 값이 이미지로 잘못 해석됐다",
-                f"image={call.get('image')}",
+                f"image={image}",
             )
+            check_in("@sha256:", image, "mutable Docker tag로 실행했다")
     finally:
         workspace.cleanup()
 

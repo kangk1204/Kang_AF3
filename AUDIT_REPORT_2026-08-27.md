@@ -646,7 +646,7 @@ schema mismatch는 아니지만, test가 주장하는 장기 동등성 증명은
 
 ## 12. Coding Lord expert ledger
 
-`$S=/home/keunsoo/.codex/skills`. 동일 hash의 current/backup도 별도 path pass를 수행했으며,
+`$S=$HOME/.codex/skills`. 동일 hash의 current/backup도 별도 path pass를 수행했으며,
 중복 finding은 최종 issue count에서 한 번만 계산했다.
 
 | # | Skill path (`$S/…`) | Decision | 핵심 |
@@ -910,3 +910,60 @@ descriptor-relative snapshot되며, official DB seal validation은 pinned conten
 따라서 최종 package는 **재현 가능하고 fail-closed인 AF3 batch orchestration 및 exploratory
 prioritization 도구**로 승인한다. biological validation 또는 upstream 대비 모델 정확도 향상으로는
 승인하지 않는다.
+
+## 18. v0.1.2 final delta audit
+
+이 절은 README 공개 준비와 `$coding-lord` 최종 line-by-line 재검토에서 확인한 추가 문제와
+closure를 기록한다. 12절의 53개 expert skill path ledger를 기준선으로 재사용하고, 현재 설치기,
+preferred/legacy runner, postprocessor, artifact, 보안, wet-lab acceptance 경계를 독립적으로 다시
+검토했다. 53개 path의 32개 고유 `SKILL.md` 본문을 다시 확인했으며, 현재 diff에 영향을 받는
+correctness, algorithm, systems, security, infrastructure, statistics/claim, UX 렌즈를 재실행했다.
+
+### 18.1 추가 finding과 closure
+
+| Finding | 최종 상태 | 조치와 증거 |
+|---|---|---|
+| 공식 AF3가 동일 사슬을 `id: [A, B]`로 묶어 쓰는 결과를 오거부 | **Closed** | chain ID별 material core로 정규화하고 MSA materialization 및 `bondedAtomPairs: [] → null`을 허용하되 sequence/modification/ligand/seed/chain set은 계속 검증한다 |
+| DB seal/overlay publish 사이에 생긴 목적지를 `os.replace`가 덮어씀 | **Closed** | seal은 same-filesystem hard-link create-if-absent, overlay는 Linux `renameat2(RENAME_NOREPLACE)`로 게시하고 file/empty-directory race regression을 추가했다 |
+| symlink result directory를 postprocessor가 외부 tree로 따라감 | **Closed** | collect/visualize/view3d가 symlink root와 child directory를 거부하고 세 도구 공통 regression을 추가했다 |
+| image inspect 실패/retarget 뒤 mutable tag 실행 | **Closed** | inspect-derived repo digest 또는 image ID가 없으면 중단하고, 확인 전후 identity가 같을 때 그 immutable reference만 실행한다. preferred/legacy 계산과 help probe 모두 `--network none`을 사용한다 |
+| JSON sidecar path의 embedded NUL이 batch 전체를 `ValueError`로 중단 | **Closed** | per-file validation error로 변환하고 registered regression을 추가했다 |
+| watchdog가 과거 2,000-target output tree를 반복 scan | **Closed** | 현재 실행 대상 result directory만 signature에 포함한다. 2시간 이상 무산출 MSA의 `--no-progress-timeout 0` escape는 README에 명시했다 |
+| installer가 `${DB_DIR}.partial`과 model/work 경로 충돌을 놓침 | **Closed** | `DB_PARTIAL`을 managed overlap set에 포함하고 재현 regression을 추가했다 |
+| weights curl 및 clean-Ubuntu Docker probe가 무한 대기/잔존 가능 | **Closed** | connect/low-speed bound와 named-container timeout/EXIT cleanup을 추가하고 ShellCheck를 통과했다 |
+| Table/Mol* crop의 source/transform lineage 부재 | **Closed** | retained Chrome screenshot hash와 정확한 crop box를 manifest에 기록하고 builder가 동일 PNG byte를 재생성한다 |
+| README의 보고서체, 설치 전제, 가중치 공유 문구 | **Closed** | 초보 wet-lab 연구자용 공손체, Ubuntu/amd64/sudo 전제, 클릭 가능한 Table → Mol* 흐름, 현재 약관의 조직 내부 공유 예외와 외부/공개 공유 금지를 반영했다 |
+
+### 18.2 최종 검증
+
+- `python3 tests/run_all.py` → **release verification passed**
+- registered strict regressions → **183/183 passed**
+- filename/output compatibility → **77/77 passed**
+- standalone legacy integrity → **17/17 passed**
+- naming integration → **125/125 passed**
+- mutation verification → **56/56 caught**
+- test discovery → **9 registered modules + 3 standalone suites**, 누락 0
+- artifact builder `--build` 후 `--check` → passed; Table/Mol* crop SHA-256는 각각
+  `e440fb49116d23e7c10292045b2207183d18a95976d65d04dff0c9ec009bdd83`,
+  `7489df97e438bcdbee95cc5a617d607ac0b84645f9b4eab3a8b3c0db5c6cbc1d`
+- production ShellCheck, clean-Ubuntu preflight ShellCheck, Bash syntax, `compileall`,
+  `git diff --check` → passed
+- 현재 `af3_check.sh` 실환경 점검 → Docker/JAX GPU/HMMER/model/official full-DB seal 포함
+  **rc=0**, content identity
+  `595ec345d6233e6176d3db221e65d15d65be765c886193908242bbef1fda9ec9`
+- 현재 runner의 immutable digest + `--network none` 실제 VHH full-mode smoke → **1/1 complete**,
+  runner `38.1 s`; provenance v2에 image ID/repo digest와 canonical artifact 4개 기록; 잔여
+  managed container 0
+- 독립 final delta verifier → **APPROVE**
+
+외부 CLI cross-check는 Claude가 120초 안에 substantive output을 내지 못했고 Gemini CLI가 설치돼
+있지 않아 **inconclusive gate**로 기록했다. 이는 approval로 세지 않았으며, 최종 판정은 위의 코드
+증거, 독립 reviewer, 실제 Docker/GPU smoke와 release gate에만 근거한다.
+
+### 18.3 최종 claim gate
+
+운영·보안·설치·재현성 release는 승인한다. 그러나 17.4절의 independent binder assay,
+native/reference structure benchmark, prespecified held-out screening validation, full 2,000-target
+production completion, clinical/legal institutional review는 여전히 **False**다. 따라서 v0.1.2는
+exploratory structure prediction/prioritization용 공개 research preview이며, 결합·affinity·epitope,
+native 정확도 또는 SOTA의 검증으로 해석하지 않는다.

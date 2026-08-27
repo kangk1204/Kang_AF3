@@ -682,6 +682,16 @@ def test_runner_names_containers_and_reports_orphans():
     )
     check_in("--name", command, "컨테이너에 이름을 붙이지 않는다")
     check_in("af3run_4242_1", command, "컨테이너 이름이 명령에 들어가지 않았다")
+    network_index = command.index("--network")
+    check_equal(command[network_index + 1], "none", "AF3 runtime container network가 열려 있다")
+    legacy_source = (
+        Path(__file__).resolve().parents[1] / "scripts" / "af3_batch.py"
+    ).read_text(encoding="utf-8")
+    check_in(
+        '["run", "--rm", "--network", "none"]',
+        legacy_source,
+        "legacy AF3 runtime container network가 열려 있다",
+    )
     check(
         runner.container_name(1).startswith(runner.CONTAINER_PREFIX),
         "컨테이너 이름이 약속된 접두사로 시작하지 않는다",
